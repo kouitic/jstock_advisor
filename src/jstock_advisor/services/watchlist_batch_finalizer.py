@@ -1457,7 +1457,38 @@ def _count_active_capacity(items: list[WatchlistItem]) -> int:
     return sum(1 for item in items if _is_active_capacity_item(item))
 
 
-def _evict_over_capacity(all_items: list[WatchlistItem], cap: int) -> list[WatchlistItem]:
+def _held_codes_from_batch_item(batch_item: dict[str, Any]) -> frozenset[str]:
+    """Issue #328: maintenance batch 行の `held_stock_codes`(dispatch 時点の『保有 ∩ 監視リストの
+    AUTO』の銘柄コード)を集合で返す。
+
+    属性が無い(従来の batch 行)・NULL(dispatcher が保有を読めなかった)・list でない場合は
+    空集合 = 『優先なし』(従来の淘汰順位と同一)。**銘柄コードの一覧はログ・監査へ出さない**
+    (件数のみ。保有を公開面・ログへ露出しない)。
+    """
+    raw = batch_item.get("held_stock_codes")
+    if not isinstance(raw, (list, tuple, set, frozenset)):
+        return frozenset()
+    return frozenset(code for code in raw if isinstance(code, str) and code)
+
+
+def _count_held_priority_candidates(
+    all_items: list[WatchlistItem], held_codes: frozenset[str]
+) -> int:
+    """Issue #328: 淘汰の対象になりうる項目(ACTIVE かつ AUTO_SCREENING)のうち、保有済みの件数。"""
+    return sum(
+        1
+        for item in all_items
+        if _is_active_capacity_item(item)
+        and item.registration_source == WatchlistRegistrationSource.AUTO_SCREENING
+        and item.stock_code in held_codes
+    )
+
+
+def _evict_over_capacity(
+    all_items: list[WatchlistItem],
+    cap: int,
+    held_codes: frozenset[str] = frozenset(),
+) -> list[WatchlistItem]:
     """Issue #324: ACTIVE_CAPACITY_COUNT が cap を超えるとき、淘汰する項目を返す。
 
     **純粋関数**(削除・書き込みは行わない。削除は呼び出し側が、既存の自動削除と
@@ -1478,6 +1509,17 @@ def _evict_over_capacity(all_items: list[WatchlistItem], cap: int) -> list[Watch
       last_monitoring_score が None の項目は最も低い(0.0)として扱う。
     registration_source が欠落した旧形式の項目は、entity の既定どおり MANUAL
     (淘汰しない)として読まれている。
+
+    Issue #328(O-4。USER 決定 Q-1 = OPTION_A): `held_codes`(保有済みの銘柄コード)に
+    含まれる AUTO_SCREENING の項目を、**超過分の範囲内で**監視スコア順より先に淘汰する。
+      ・超過が無ければ何も淘汰しない(下の guard は不変。保有済みでも外さない)
+      ・MANUAL・旧形式・NOT_EVALUABLE は eligible に入らないため、保有済みでも淘汰されない
+      ・淘汰の件数は変わらない(超過分のまま)。変わるのは『どの項目か』だけ
+      ・`held_codes` が空(属性が無い batch 行・保有 0 件・dispatcher が保有を読めなかった)なら、
+        並べ替えのキーの先頭が全項目で同値になり、従来の順序と完全に同一
+    ★ `held_codes` は dispatch 時点のスナップショットである(finalize までの間の売買は反映
+    されない)。呼び出し側が淘汰の直前に登録元・ACTIVE を再確認する(MANUAL へ変わった項目を
+    誤って外さない)。
     """
     active_items = [item for item in all_items if _is_active_capacity_item(item)]
     overflow = len(active_items) - cap
@@ -1490,6 +1532,7 @@ def _evict_over_capacity(all_items: list[WatchlistItem], cap: int) -> list[Watch
     ]
     eligible.sort(
         key=lambda item: (
+            0 if item.stock_code in held_codes else 1,
             item.last_monitoring_score if item.last_monitoring_score is not None else 0.0,
             item.created_at,
         )
@@ -1721,7 +1764,14 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
     capacity_over_count_before = max(0, active_capacity_count - capacity_cap)
     capacity_evicted_count = 0
     capacity_eviction_skipped_count = 0
-    for victim in _evict_over_capacity(capacity_items, capacity_cap):
+    # Issue #328: 保有済みの AUTO_SCREENING を超過分の範囲内で先に淘汰する(dispatch 時点の
+    # スナップショット。batch 行に無ければ空 = 従来の順位)。ログ・監査には件数だけを出す。
+    held_codes = _held_codes_from_batch_item(maintenance_batch_item)
+    capacity_held_priority_candidate_count = _count_held_priority_candidates(
+        capacity_items, held_codes
+    )
+    capacity_held_priority_evicted_count = 0
+    for victim in _evict_over_capacity(capacity_items, capacity_cap, held_codes):
         # 判定に使った状態(この回の開始時点の走査)から、淘汰の直前までの間に
         # 登録元が変わった(手動で登録し直された等)項目を、誤って外さない。
         latest = watchlist_repo.get(victim.stock_code)
@@ -1766,6 +1816,8 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
             batch_id,
         )
         capacity_evicted_count += 1
+        if latest.stock_code in held_codes:
+            capacity_held_priority_evicted_count += 1
     capacity_over_count_after = max(
         0, _count_active_capacity(list(current_items.values())) - capacity_cap
     )
@@ -1839,6 +1891,9 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
             "capacity_evicted_count": capacity_evicted_count,
             "capacity_eviction_skipped_count": capacity_eviction_skipped_count,
             "capacity_over_count_after_eviction": capacity_over_count_after,
+            # Issue #328: 保有済み AUTO の優先淘汰。件数のみ(銘柄コードは出さない)。
+            "capacity_held_priority_candidate_count": capacity_held_priority_candidate_count,
+            "capacity_held_priority_evicted_count": capacity_held_priority_evicted_count,
         },
         now=now,
         batch_id=batch_id,
@@ -1857,7 +1912,8 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
         "removal_audit_completion_written=%d watchlist_total_count=%d auto_screening_count=%d "
         "blocked_by_minimum_age=%d blocked_by_count_condition=%d blocked_by_span_condition=%d "
         "eligible_for_removal=%d removed=%d capacity_cap=%d capacity_active=%d "
-        "capacity_evicted=%d capacity_over_after=%d",
+        "capacity_evicted=%d capacity_over_after=%d "
+        "capacity_held_priority_candidates=%d capacity_held_priority_evicted=%d",
         batch_id,
         outcome_counts,
         stale_unconfirmed_count,
@@ -1875,6 +1931,8 @@ def _finalize_maintenance_completed(batch_id: str, now: dt.datetime, config: App
         active_capacity_count,
         capacity_evicted_count,
         capacity_over_count_after,
+        capacity_held_priority_candidate_count,
+        capacity_held_priority_evicted_count,
     )
 
 

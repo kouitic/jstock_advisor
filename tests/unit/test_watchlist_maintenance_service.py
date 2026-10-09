@@ -9,6 +9,7 @@ MaintenanceScreeningSummaryを直接組み立てて呼び出す。
 from __future__ import annotations
 
 import datetime as dt
+from types import SimpleNamespace
 
 from jstock_advisor.config.models import AutoRemovalConfig
 from jstock_advisor.domain.entities.enums import WatchlistRegistrationSource
@@ -103,11 +104,15 @@ def test_manual_registration_is_excluded_from_maintenance_targets(
     monkeypatch.setattr(
         dispatcher_module, "WatchlistRepository", lambda: _FakeWatchlistRepository()
     )
+    # Issue #328: 保有の読取は本テストの関心ではない(保有なし)
+    monkeypatch.setattr(
+        dispatcher_module, "HoldingRepository", lambda: SimpleNamespace(list_all=lambda: [])
+    )
 
     codes, extra_kwargs = dispatcher_module._collect_maintenance_targets({})
 
     assert codes == ["1111"]
-    assert extra_kwargs == {}
+    assert extra_kwargs == {"held_stock_codes": []}
 
 
 # --- テストB/C: 最低継続期間(age)ゲート -----------------------------------------

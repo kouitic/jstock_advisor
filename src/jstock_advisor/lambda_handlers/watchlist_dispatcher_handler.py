@@ -85,6 +85,7 @@ from jstock_advisor.infrastructure.line.client import (
     QuickReplyButton,
     build_live_line_client_from_env,
 )
+from jstock_advisor.infrastructure.local_repository.holding_repository import HoldingRepository
 from jstock_advisor.infrastructure.local_repository.notification_claim_repository import (
     NotificationClaimRepository,
 )
@@ -450,6 +451,17 @@ def _collect_maintenance_targets(event: dict[str, Any]) -> tuple[list[str], dict
     起動された場合、event経由で渡される`triggered_by_batch_id`/`trigger_type`
     をBatchRunsTableへ記録するため、そのままextra_kwargsへ透過する
     (parent-child関係の監査用、6節)。
+
+    Issue #328(O-4): 総件数上限の淘汰で保有済みのAUTO_SCREENINGを超過分の範囲内で先に
+    外すため、『保有 ∩ 対象(AUTO_SCREENING)』の銘柄コードを`held_stock_codes`として
+    batch行へ記録する。finalizeを実行するWorker / TerminalFailureHandler / Reconcilerは
+    保有テーブルを読めず、保有を読めるのはDispatcherだけのため、ここで記録する。
+    ・記録するのは**銘柄コードのみ**(所有者・数量・取得単価を含めない)。**ログ・監査へは
+      一覧を出さない**(件数だけ)
+    ・『保有』は新規候補の収集と同じ定義(holdingsの行の存在。owner横断)
+    ・保有を読めなかった場合は`held_stock_codes=None`(優先なし)にして**続行する**
+      (保有の優先は付加的な機能であり、読取の失敗でmaintenance全体を止めない)
+    ・dispatch時点のスナップショット(finalizeまでの売買は反映されない)
     """
     watchlist_repo = WatchlistRepository()
     codes = [
@@ -458,11 +470,30 @@ def _collect_maintenance_targets(event: dict[str, Any]) -> tuple[list[str], dict
         if item.registration_source == WatchlistRegistrationSource.AUTO_SCREENING
     ]
     extra_kwargs: dict[str, Any] = {}
+    try:
+        held = {holding.stock_code for holding in HoldingRepository().list_all()}
+        extra_kwargs["held_stock_codes"] = sorted(set(codes) & held)
+    except Exception as exc:  # noqa: BLE001 - 保有を読めなくてもmaintenanceを続行する
+        extra_kwargs["held_stock_codes"] = None
+        logger.warning(
+            "watchlist dispatcher: held stock codes unavailable (maintenance continues "
+            "without held-first eviction priority) error_type=%s",
+            type(exc).__name__,
+        )
     triggered_by_batch_id = event.get("triggered_by_batch_id")
     if triggered_by_batch_id is not None:
         extra_kwargs["triggered_by_batch_id"] = triggered_by_batch_id
         extra_kwargs["trigger_type"] = event.get("trigger_type")
     return codes, extra_kwargs
+
+
+def _audit_safe_extra_kwargs(extra_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """監査(AuditLog)の output_values へ載せてよい extra_kwargs を返す。
+
+    Issue #328: `held_stock_codes`(保有済みの銘柄コード)はbatch行(BatchRunsTable)にだけ
+    記録し、監査・ログへは出さない(保有を露出しない。件数のみを別に出す)。
+    """
+    return {key: value for key, value in extra_kwargs.items() if key != "held_stock_codes"}
 
 
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
@@ -685,7 +716,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             output_values={
                 "execution_result": "no_candidates",
                 "job_type": job_type,
-                **extra_kwargs,
+                **_audit_safe_extra_kwargs(extra_kwargs),
             },
             now=now,
             batch_id=batch_id,
