@@ -204,6 +204,72 @@ def _patch_collector(
     )
 
 
+class _FrozenDateTime(dt.datetime):
+    """CLI の `dt.datetime.now(...)` だけを固定する(combine などは本物のまま)。"""
+
+    fixed: dt.datetime = dt.datetime(2026, 10, 9, 1, 0, tzinfo=dt.UTC)
+
+    @classmethod
+    def now(cls, tz: dt.tzinfo | None = None) -> dt.datetime:  # type: ignore[override]
+        return cls.fixed if tz is None else cls.fixed.astimezone(tz)
+
+
+def _freeze_cli_clock(monkeypatch: pytest.MonkeyPatch, fixed: dt.datetime) -> None:
+    _FrozenDateTime.fixed = fixed
+    monkeypatch.setattr(
+        cli_module,
+        "dt",
+        SimpleNamespace(
+            datetime=_FrozenDateTime,
+            UTC=dt.UTC,
+            date=dt.date,
+            time=dt.time,
+            timedelta=dt.timedelta,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("now_utc", "source_date", "expected"),
+    [
+        # 2026-10-09 10:00 JST: 9 日前
+        (
+            _utc(2026, 10, 9, 1, 0),
+            dt.date(2026, 9, 30),
+            "候補一覧のデータ: 公開日 2026-09-30(9日前)",
+        ),
+        # 23:59 JST(= 14:59 UTC)はまだ 0 日前 / 00:00 JST(= 15:00 UTC)で 1 日前
+        (
+            _utc(2026, 10, 9, 14, 59),
+            dt.date(2026, 10, 9),
+            "候補一覧のデータ: 公開日 2026-10-09(0日前)",
+        ),
+        (
+            _utc(2026, 10, 9, 15, 0),
+            dt.date(2026, 10, 9),
+            "候補一覧のデータ: 公開日 2026-10-09(1日前)",
+        ),
+        (
+            _utc(2026, 10, 9, 15, 30),
+            dt.date(2026, 10, 9),
+            "候補一覧のデータ: 公開日 2026-10-09(1日前)",
+        ),
+    ],
+)
+def test_the_cli_prints_the_literal_age_under_a_fixed_clock(
+    monkeypatch: pytest.MonkeyPatch, now_utc: dt.datetime, source_date: dt.date, expected: str
+) -> None:
+    """CLI 層でも期待日数をリテラルで固定する(被検査関数の戻り値から期待値を作らない)。
+    式が壊れたとき、unit 層だけでなく CLI の出力でも落ちる。"""
+    _patch_collector(monkeypatch, ["1234"], source_date)
+    _freeze_cli_clock(monkeypatch, now_utc)
+
+    result = base._runner.invoke(cli_module.app, ["run", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert expected in result.output.splitlines()
+
+
 def test_dry_run_prints_the_data_age_line_next_to_the_universe_counts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

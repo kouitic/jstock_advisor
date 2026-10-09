@@ -264,10 +264,28 @@ def test_cli_path_is_left_unchanged() -> None:
     CLI は `if added_items and ...` で囲われており追加 0 件では通知に入らない。
     失敗日フラグを渡さない = 既定値 False のままであることを固定する。
     """
+    import ast
+
     from jstock_advisor.cli import watchlist_screening
 
     with open(watchlist_screening.__file__, encoding="utf-8") as f:
         text = f.read()
     assert "if added_items and wc.notification_enabled:" in text
     assert "universe_fetch_failed" not in text
-    assert "universe_source_date" not in text
+
+    # Issue #373: CLI の run は、評価に使った候補一覧データの古さを要約へ表示するため、
+    # 公開日(universe_source_date)を _print_summary(画面表示)にだけ渡す。#234 の趣旨は
+    # 『通知の経路・監査へ失敗日フラグ / 公開日を渡さない』であり、文字列の有無ではなく
+    # 呼び出しの引数で固定する: universe_source_date をキーワード引数に持つ呼び出しは
+    # _print_summary だけ(LINE の要約 builder・通知 service・監査には渡さない)。
+    tree = ast.parse(text)
+    callees_with_source_date: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and any(
+            kw.arg == "universe_source_date" for kw in node.keywords
+        ):
+            func = node.func
+            callees_with_source_date.append(
+                func.id if isinstance(func, ast.Name) else getattr(func, "attr", "?")
+            )
+    assert callees_with_source_date == ["_print_summary"]
