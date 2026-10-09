@@ -4761,15 +4761,39 @@ resource policyを修正するChangeSetの適用自体が同じDenyの対象に�
                                         Secrets Manager の操作 = secretsmanager:GetResourcePolicy / DescribeSecret /
                                         PutResourcePolicy / DeleteResourcePolicy を含む)。この再確認は、identity policy 側の
                                         read-only の確認であり、resource policy 込みの end-to-end の確認ではない(下)
-                                      ★ 再確認の方法・資格情報・担当(#830 の案 C と同じ read-only の方法):
-                                          方法    新しい ADMIN role について、boundary の有無(iam:GetRole)・付いている managed policy
-                                                  (iam:ListAttachedRolePolicies)・inline policy(iam:ListRolePolicies)を確認し、
-                                                  管理者用 managed policy の内容を iam:GetPolicy / iam:GetPolicyVersion で読む
+                                      ★ 再確認の方法・資格情報・担当(#830 の段階 2a + 案 C と同じ read-only の方法):
+                                          方法    #830 の『段階 2a』と『案 C』を合わせたもの(2 つは別の段階で、一対一ではない)
+                                                  ・段階 2a: 新しい ADMIN role の permissions boundary の有無(iam:GetRole)・
+                                                    付いている managed policy(iam:ListAttachedRolePolicies)・
+                                                    inline policy(iam:ListRolePolicies)を確認する
+                                                  ・案 C: 管理者用 managed policy の内容を iam:GetPolicy / iam:GetPolicyVersion で読む
                                           資格情報 観測用(read-only)の認証情報。書込・権限の拡大・別の認証情報による迂回はしない
                                           担当    DEVELOPER_WITH_DEPLOY が行い、結果(許可 / 拒否 / 条件つきの区分のみ。
                                                   実 ARN・Account ID・ロール名・policy 名は記録しない)を Issue へ記録する
                                           拒否された場合  観測用の認証情報が上記の呼び出しを拒否したら、権限を拡大せず、別の認証情報で迂回せず、
                                                   その時点で停止して報告し、USER の判断(承認)を得る。承認なしに deploy 資格情報へ切り替えない
+                                      ★ 想定外の構成を検出した場合(fail-closed。上の拒否された場合と同じく、判定できないことを『確認済み』にしない):
+                                          想定する構成  #830 の案 C の実施時点(2026-10-08)と同等 = permissions boundary が無い /
+                                                  managed policy が管理者用の AWS 管理 policy 1 件のみ(他の managed policy は 0 件)/
+                                                  inline policy が 0 件 / その管理者用 policy が全 action を無条件に許可し Deny を持たない
+                                          想定外とみなす  次のいずれか 1 つでも当てはまる場合(判定できない場合を含む)
+                                                  ・permissions boundary が設定されている
+                                                  ・managed policy が上の 1 件でない(追加・差し替え・件数の変化、顧客管理 policy の付与)
+                                                  ・inline policy が 1 件以上ある
+                                                  ・管理者用 policy の内容が『全 action を無条件に許可・Deny なし』でない
+                                                    (Deny・Condition・NotAction・NotResource・Resource の限定のいずれかがある)
+                                                  ・結果を読めない・取得が完了しない(拒否・応答の欠落・ページングの未完・予期しない応答)
+                                          検出したら  1 『確認済み』として扱わない(OK・問題なしと記録しない。推測で補わない)
+                                                  2 先へ進まない(新しい ADMIN ARN を前提にする ChangeSet の提示・CREATE・EXECUTE、
+                                                    SecretResourcePolicyEnabled = true の activation、再有効化の手順の次の step へ進まない)
+                                                  3 その時点で停止して報告し、USER の判断を得る(検出した区分だけを書く。実 ARN・Account ID・
+                                                    ロール名・policy 名は記録しない)
+                                                  4 権限を拡大せず、別の認証情報で迂回して確認し直さず、自己判断で『支障なし』と解釈しない。
+                                                    構成が想定外でも identity policy が許可している可能性はあるが、それを根拠に進めない
+                                                  ※ 緊急回避(SecretResourcePolicyEnabled = false の ChangeSet)を行うかどうかも USER の判断
+                                                    (CREATE と EXECUTE は、それぞれ元から USER の Human Gate)
+                                          ※ この条件は、上の『案 C は resource policy 込みの end-to-end の確認ではない』『Organizations の SCP は
+                                            未確認』『DEPLOY principal は別の確認対象』『#830 の AC b は変更しない』の各記述を変更・緩和しない
   DEPLOY principal(IAM user)          ADMIN とは別の確認対象。上の ADMIN の案 C の結果を、DEPLOY について『同じ意味で確認済み』と読まない。
                                       通常復旧・緊急回避はいずれも DEPLOY principal に依存する(ChangeSet の CREATE / EXECUTE を行う主体)。
                                       #830 の AC b(IAM user である DEPLOY について、resource policy を含めた simulation =
@@ -4796,7 +4820,8 @@ resource policyを修正するChangeSetの適用自体が同じDenyの対象に�
   2  Permission Set / assignment を削除・再作成する作業の前に、AdminPrincipalArn の更新が必要になることを
      作業手順に含める(再作成の後ではなく、前に気付く)。再作成した後は、適用の判断の前に fresh に確認し直す
   3  Permission Set / assignment を再作成して ADMIN role が作り直された後は、新しい ADMIN role について、
-     identity policy 側を再確認する(事前確認の整理の ADMIN の項のとおり。以前の案 C の結果を引き継がない)
+     identity policy 側を再確認する(事前確認の整理の ADMIN の項のとおり。以前の案 C の結果を引き継がない)。
+     想定外の構成を検出したら、同じ項の fail-closed 条件に従い、確認済みとして扱わず先へ進まない
   4  下の『確認できていないこと』を、適用を判断する人が把握していること
 
 通常復旧(ADMIN の ARN が変わって lockout したが、deploy principal は allow-list に残っている場合)
@@ -4808,7 +4833,8 @@ resource policyを修正するChangeSetの適用自体が同じDenyの対象に�
   3  実 ARN を Issue・PR・手順書へ記録せず、既存のルール(上の予防の 1)に従い、照合値で対象 ARN を確認する
   4  新しい ADMIN role について、identity policy 側を再確認する(secretsmanager:GetResourcePolicy / DescribeSecret /
      PutResourcePolicy / DeleteResourcePolicy を含む。以前の案 C の結果を、新しい role の確認として扱わない。
-     方法・資格情報・担当は、事前確認の整理の ADMIN の項のとおり)
+     方法・資格情報・担当・想定外の構成を検出したときの fail-closed 条件〔確認済みとして扱わない・先へ進まない・
+     停止して報告し USER の判断を得る〕は、事前確認の整理の ADMIN の項のとおり)
   5  AdminPrincipalArn を新しい ARN へ更新した ChangeSet を CREATE し、EXECUTE する
      (CREATE と EXECUTE は、それぞれ USER の Human Gate)
   6  修正後、ADMIN が対象シークレットへアクセスできることを read-only で確認する
@@ -4827,7 +4853,8 @@ resource policyを修正するChangeSetの適用自体が同じDenyの対象に�
   2  新しい ADMIN role の ARN を取得し、照合値で確認する(通常復旧の 2・3 と同じ)
   3  template / parameter(AdminPrincipalArn)を新しい ARN へ更新する
   4  #830 の activation preflight を再実施する(ADMIN の確認 1・2・4、新しい ADMIN role の identity policy 側の確認
-     〔secretsmanager:GetResourcePolicy / DescribeSecret / PutResourcePolicy / DeleteResourcePolicy を含む〕、
+     〔secretsmanager:GetResourcePolicy / DescribeSecret / PutResourcePolicy / DeleteResourcePolicy を含む。
+     想定外の構成を検出したら、事前確認の整理の ADMIN の項の fail-closed 条件に従い先へ進まない〕、
      DEPLOY 側の確認状態の再評価、未確認事項〔下〕の再評価など。前回の結果を流用しない)
   5  exact な ChangeSet を作る
   6  USER の CREATE の Human Gate
