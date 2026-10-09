@@ -74,6 +74,13 @@ class CollectorResult:
     rotation_cursor_after: RotationCursor | None = None
     rotation_wrapped: bool = False
 
+    # --- Issue #373 で追加 ---
+    # 候補一覧(ユニバース)の元データの公開日(CandidateUniverseResult.source_date)。CLI が
+    # 『使っているデータの古さ』を表示するために使う。公開日の概念が無い provider(CSV)や
+    # 日付が不明な場合は None(0 や今日の日付で埋めない)。既存の呼び出し元(dispatcher など)は
+    # この field を読まず、既定値つきの追加のため挙動は変わらない。
+    universe_source_date: dt.date | None = None
+
 
 @dataclass(frozen=True)
 class RotationSelection:
@@ -202,6 +209,7 @@ class WatchlistCandidateCollector:
             rotation_cursor_before=rotation_cursor,
             rotation_cursor_after=rotation_cursor_after,
             rotation_wrapped=rotation_wrapped,
+            universe_source_date=universe.source_date,
         )
 
     def fetch_screening_data(self, stock_code: str, now: dt.datetime) -> ScreeningDataResult:

@@ -19,6 +19,7 @@ from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.entities.enums import WatchlistRegistrationSource
 from jstock_advisor.domain.entities.watchlist import WatchlistItem
+from jstock_advisor.domain.jst import JST
 from jstock_advisor.domain.ranking import RankingCalculator
 from jstock_advisor.domain.signals.watchlist_screening import (
     RankingEntry,
@@ -411,6 +412,8 @@ def run(
         universe_provider_name=wc.candidate_universe.provider,
         csv_path=wc.candidate_universe.csv_path,
         policy_name=wc.screening_policy,
+        universe_source_date=collector_result.universe_source_date,
+        now=now,
         universe_count=collector_result.universe_count,
         duplicate_count=collector_result.duplicate_count,
         holding_excluded_count=collector_result.holding_excluded_count,
@@ -516,12 +519,40 @@ def run(
         raise typer.Exit(code=1)
 
 
+def _universe_data_age_days(source_date: dt.date, now: dt.datetime) -> int:
+    """候補一覧の元データの公開日からの経過日数(切り捨て)。公開日の JST 00:00 を起点にする。
+
+    Issue #373: watchlist_dispatcher_handler._cache_age_days と同じ式(Issue #578 / #612 で
+    JST の暦日基準へ統一済み)。lambda_handlers の private 関数を CLI から import しない
+    (#430 の OD1 = B と同方針)ため CLI 内に持ち、同値であることはテストで固定する。
+    表示用のため、時計のずれで公開日が未来に見える場合は 0 日に丸める。
+    """
+    elapsed = now - dt.datetime.combine(source_date, dt.time(), tzinfo=JST)
+    return max(0, int(elapsed.total_seconds() // 86400))
+
+
+def _universe_data_age_line(source_date: dt.date | None, now: dt.datetime) -> str:
+    """CLI が評価に使った候補一覧データの古さを表す 1 行(Issue #373。USER 決定 A)。
+
+    ★ CLI は Downloader を実行せず、既存の cache を読むだけである。したがって『今回の取得に
+    失敗した』とは書かない(その事実は CLI の実行時点では定義できない)。成功した日も失敗した
+    日も、追加 0 件の日も、同じ形で出す。公開日が分からない場合(CSV の provider など)は、
+    0 日前と誤読されないよう『不明』と書く。
+    """
+    if source_date is None:
+        return "候補一覧のデータ: 公開日 不明"
+    age_days = _universe_data_age_days(source_date, now)
+    return f"候補一覧のデータ: 公開日 {source_date.isoformat()}({age_days}日前)"
+
+
 def _print_summary(
     *,
     dry_run: bool,
     universe_provider_name: str,
     csv_path: str,
     policy_name: str,
+    universe_source_date: dt.date | None,
+    now: dt.datetime,
     universe_count: int,
     duplicate_count: int,
     holding_excluded_count: int,
@@ -547,6 +578,7 @@ def _print_summary(
     typer.echo(f"Policy: {policy_name}")
     typer.echo()
     typer.echo(f"対象ユニバース: {universe_count}件(重複除去: {duplicate_count}件)")
+    typer.echo(_universe_data_age_line(universe_source_date, now))
     typer.echo(f"保有銘柄除外: {holding_excluded_count}件")
     typer.echo(f"既登録除外: {watchlist_excluded_count}件")
     typer.echo(f"評価対象: {evaluation_target_count}件")
