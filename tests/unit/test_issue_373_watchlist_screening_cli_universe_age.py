@@ -204,18 +204,18 @@ def _patch_collector(
     )
 
 
-class _FrozenDateTime(dt.datetime):
-    """CLI の `dt.datetime.now(...)` だけを固定する(combine などは本物のまま)。"""
-
-    fixed: dt.datetime = dt.datetime(2026, 10, 9, 1, 0, tzinfo=dt.UTC)
-
-    @classmethod
-    def now(cls, tz: dt.tzinfo | None = None) -> dt.datetime:  # type: ignore[override]
-        return cls.fixed if tz is None else cls.fixed.astimezone(tz)
-
-
 def _freeze_cli_clock(monkeypatch: pytest.MonkeyPatch, fixed: dt.datetime) -> None:
-    _FrozenDateTime.fixed = fixed
+    """CLI の `dt.datetime.now(...)` だけを固定する(combine などは本物のまま)。
+
+    固定値は呼び出しごとに作るサブクラスの閉包に持たせ、モジュール / クラスの可変
+    状態を残さない(test 間・他 module へ漏れない)。
+    """
+
+    class _FrozenDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz: dt.tzinfo | None = None) -> dt.datetime:  # type: ignore[override]
+            return fixed if tz is None else fixed.astimezone(tz)
+
     monkeypatch.setattr(
         cli_module,
         "dt",

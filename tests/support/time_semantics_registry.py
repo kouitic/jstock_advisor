@@ -240,6 +240,17 @@ _REGISTRY: tuple[_Entry, ...] = (
         cohort="SOLO:jpx_vintage_gap_cache_age_jst_basis",
         wall_clock_policy=_FORBIDDEN,
     ),
+    # Issue #373: 手動CLI(watchlist-screening run)の要約に出す『候補一覧データの
+    # 経過日数』(公開日のJST 0時からの暦日・切り捨て)。T4 = JST/UTC暦日境界の9時間
+    # window(14:59/15:00/15:30 UTC)を跨ぐ固定clockとliteralの期待日数を新規に導入
+    # した(T1〜T3は該当なし: 表示用の算術のみで業務分岐しない)。可変の
+    # module-level stateを持たないため、cohortの相手はいない(SOLO。先例 #578/#690)。
+    _Entry(
+        module="tests/unit/test_issue_373_watchlist_screening_cli_universe_age.py",
+        triggers=("T4",),
+        cohort="SOLO:watchlist_screening_cli_universe_age",
+        wall_clock_policy=_FORBIDDEN,
+    ),
 )
 
 # V8: registry から静かに削除して guard を無効化する経路を塞ぐ。
