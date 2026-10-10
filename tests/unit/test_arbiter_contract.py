@@ -38,6 +38,7 @@ import pytest
 
 from jstock_advisor.domain.exit_architecture import arbiter
 from jstock_advisor.domain.exit_architecture.arbiter import (
+    _CLASS_ORDER,
     ALLOWED_CLASSES_BY_TRIGGER,
     FLOOR_ORIGINS,
     MAX_STRENGTH_BY_TRIGGER,
@@ -1606,3 +1607,81 @@ def test_mitigation_and_the_timing_layer_are_distinguishable_in_the_trace() -> N
     assert _softening_reasons(only_timing) == [SuppressionReason.TIMING_LAYER]
     neither = _single(kind, Strength.FULL, soft=_soft())
     assert _softening_reasons(neither) == []
+
+
+# ---------------------------------------------------------------------------
+# 出力の『並び』の決定性(集合の比較では固定できない性質。#894 の SHOULD-1 の型の確認で追加)
+# ---------------------------------------------------------------------------
+
+
+def test_the_supporting_triggers_follow_the_fixed_tie_order_for_any_input_order() -> None:
+    """supporting_triggers は表示・trace に出る tuple。入力の並びが違っても、固定の順序
+    (TRIGGER_TIE_ORDER)で同じ並びになる。集合の比較では並びを固定できない。"""
+    kinds = [
+        TriggerKind.PRICE_UPSIDE_MATRIX,
+        TriggerKind.PARTIAL_CONDITIONS,
+        TriggerKind.FAIR_VALUE_PARTIAL_GATE,
+        TriggerKind.PROFIT_PROTECTION_STRONG,
+    ]
+    expected_all = tuple(k for k in TRIGGER_TIE_ORDER if k in kinds)
+    for ordering in itertools.permutations(kinds):
+        decision = _decide(_inp([_proposal(k, Strength.PARTIAL) for k in ordering]))
+        assert decision.trigger_kind is expected_all[0]
+        assert decision.supporting_triggers == expected_all[1:], ordering
+
+
+def test_dedupe_evidence_returns_a_canonical_order_across_different_facts() -> None:
+    """異なる事実が複数あるとき、出力の並びは統合キーの順で、入力の並びに依存しない(同じ事実の
+    統合だけでなく、結果の tuple の並びを固定する)。"""
+    items = [
+        _ev(RootFactor.CASHFLOW, "b"),
+        _ev(RootFactor.EARNINGS, "a", event="E2"),
+        _ev(RootFactor.EARNINGS, "c"),
+        _ev(RootFactor.EARNINGS, "z", event="E1"),
+        _ev(RootFactor.BALANCE_SHEET, "d"),
+    ]
+    expected = tuple(sorted(items, key=dedupe_key))
+    for ordering in itertools.permutations(items):
+        assert dedupe_evidence(ordering) == expected, [dedupe_key(i) for i in ordering]
+    # 並びは入力順そのものではない(入力順を保つ実装では、この期待と一致しない入力がある)
+    assert tuple(items) != expected
+
+
+def test_collect_evidence_returns_a_canonical_order_for_any_layer_order_of_the_same_facts() -> None:
+    a, b_, c = (
+        _ev(RootFactor.EARNINGS, "a"),
+        _ev(RootFactor.CASHFLOW, "b"),
+        _ev(RootFactor.BALANCE_SHEET, "c"),
+    )
+    reference = None
+    for thesis_items in itertools.permutations([a, b_]):
+        layers = _layers(
+            thesis=_thesis(ThesisState.WEAKENING, tuple(thesis_items)),
+            er=_er(exhaustion=True, evidence=(c,)),
+        )
+        merged = collect_evidence(layers)
+        reference = reference or merged
+        assert merged == reference
+    assert reference is not None
+    assert reference == tuple(sorted(reference, key=dedupe_key))
+
+
+def test_the_suppressed_trace_is_in_the_documented_order_for_any_input_order() -> None:
+    """suppressed は(class の固定の順 -> 強さの降順 -> 理由)で並ぶ。入力の並びに依存しない。"""
+    proposals = [
+        _proposal(TriggerKind.FULL_MODERATE_CONDITIONS, Strength.FULL),
+        _proposal(TriggerKind.PROFIT_PROTECTION_STRONG, Strength.PARTIAL),
+        _proposal(TriggerKind.PRICE_UPSIDE_MATRIX, Strength.PARTIAL),
+        _proposal(TriggerKind.PARTIAL_CONDITIONS, Strength.WATCH),
+    ]
+    reference = None
+    for ordering in itertools.permutations(proposals):
+        decision = _decide(_inp(list(ordering), layers=_fe1_layers(), softening=_soft(steps=1)))
+        keys = [
+            (_CLASS_ORDER.index(s.exit_class), -int(s.strength), s.reason.value)
+            for s in decision.suppressed
+        ]
+        assert keys == sorted(keys), ordering
+        assert len(decision.suppressed) >= 3
+        reference = reference or decision.suppressed
+        assert decision.suppressed == reference
