@@ -18,7 +18,6 @@ wall clock・freezegun・営業日カレンダーを使わない(C-BS: 実際に
 from __future__ import annotations
 
 import ast
-import itertools
 import math
 import subprocess
 import sys
@@ -381,17 +380,6 @@ def test_r3_disabled_by_config() -> None:
         state(gate_confirmations=gates(A=_C)), state(), config=with_config(on_new_hard_gate=False)
     )
     assert result.result_of(R3) == mod.ConditionResult(ConditionStatus.NOT_MET, Reason.DISABLED)
-
-
-def test_r3_same_gate_set_in_any_input_order_gives_the_same_result() -> None:
-    items = [("A", _C), ("B", _C), ("C", _B)]
-    results = {
-        decide(
-            state(gate_confirmations=frozenset(order)), state(gate_confirmations=gates(A=_C))
-        ).evaluations
-        for order in itertools.permutations(items)
-    }
-    assert len(results) == 1
 
 
 # ===========================================================================
@@ -781,8 +769,29 @@ def test_serialization_order_is_the_canonical_sorted_order() -> None:
     assert keys == sorted(_MANY_CODES)
 
 
+def _outputs_across_hash_seeds(program: str) -> set[str]:
+    """program を PYTHONHASHSEED の違う別プロセスで走らせ、標準出力の集合を返す。
+
+    集合の要素が 1 つなら、出力は seed に依存しない。
+
+    str の hash はプロセスごとにランダム化され、set / frozenset の反復順はその hash で決まる。
+    同一プロセス内で集合を作り直して比べても、反復順の違いは見えない(同じ要素の集合は同じ順で並ぶ)。
+    """
+    outputs = set()
+    for seed in ("1", "2", "3"):
+        completed = subprocess.run(
+            [sys.executable, "-c", program],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={"PYTHONHASHSEED": seed, "PYTHONPATH": str(_SRC_ROOT.parent)},
+        )
+        outputs.add(completed.stdout)
+    return outputs
+
+
 def test_serialization_is_identical_across_processes_with_different_hash_seeds() -> None:
-    """str の hash はプロセスごとにランダム化される。同じ状態は、どの seed でも同じ text になる。
+    """同じ状態は、どの seed でも同じ text になる。
 
     保存した記録の text が実行ごとに変わると、差分比較・hash・監査の再現が崩れる(PR-2 の前提)。
     """
@@ -805,17 +814,75 @@ state = HdNotifyState(
 )
 print(json.dumps(serialize_hd_state(state)))
 """
-    outputs = set()
-    for seed in ("1", "2", "3"):
-        completed = subprocess.run(
-            [sys.executable, "-c", program],
-            capture_output=True,
-            text=True,
-            check=True,
-            env={"PYTHONHASHSEED": seed, "PYTHONPATH": str(_SRC_ROOT.parent)},
+    assert len(_outputs_across_hash_seeds(program)) == 1
+
+
+def test_decision_output_is_identical_across_processes_with_different_hash_seeds() -> None:
+    """決定の出力(並びのあるもの・集合を並べたもの・各条件の結果)は、hash の seed に依存しない。
+
+    evaluations は固定の CONDITION_ORDER の順、conditions_met は昇順に並べて比べる。
+    複数の hard gate・全条件の成立・前回が使えない場合・R4 の鮮度違いを 1 度に通す。
+    """
+    program = f"""
+import json
+from datetime import date
+
+from jstock_advisor.domain.signals.holding_decision_renotification import (
+    DecisionChangeScope, EarningsDataFreshness, EarningsMode, GateConfirmation, HdNotifyState,
+    KeywordOnlyHandling, PeriodicPolicy, Reason, RenotificationConfig, RenotificationPolicy,
+    ScoreBasis, SellPriceReference, SellReference, StateUnavailable, decide_hd_renotification,
+)
+
+codes = {_MANY_CODES!r}
+kinds = list(GateConfirmation)
+
+
+def make(score, gate_count, earnings, ref_price, rec):
+    return HdNotifyState(
+        scoring_model_version="m1",
+        base_score=score,
+        final_score=score,
+        recommendation_type=rec,
+        category="C",
+        decision_severity=1,
+        gate_confirmations=frozenset(
+            (code, kinds[n % len(kinds)]) for n, code in enumerate(codes[:gate_count])
+        ),
+        earnings_key=earnings,
+        earnings_freshness=EarningsDataFreshness.FRESH,
+        sell_reference=SellReference("k", ref_price),
+        market_price=1000.0,
+    )
+
+
+config = RenotificationConfig(10.0, True, True, True, 5.0)
+rows = []
+for keyword_only in KeywordOnlyHandling:
+    for periodic in PeriodicPolicy:
+        policy = RenotificationPolicy(
+            periodic, DecisionChangeScope.ANY_CHANGE, EarningsMode.FIRST_EVALUATION_AFTER_EARNINGS,
+            ScoreBasis.BASE_SCORE, keyword_only, SellPriceReference.TARGET_PRICE_ONLY,
         )
-        outputs.add(completed.stdout)
+        previous = make(-20.0, 4, date(2026, 3, 31), 1000.0, "A")
+        current = make(-40.0, 16, date(2026, 6, 30), 1200.0, "B")
+        for prev in (previous, StateUnavailable(Reason.PREVIOUS_IS_LEGACY)):
+            d = decide_hd_renotification(current, prev, config, policy, periodic_due=True)
+            rows.append(
+                {{
+                    "evaluations": [
+                        [c.value, r.status.value, r.reason.value if r.reason else None]
+                        for c, r in d.evaluations
+                    ],
+                    "met": sorted(c.value for c in d.conditions_met),
+                    "periodic_due": d.periodic_due,
+                    "send": d.send_by_policy,
+                }}
+            )
+print(json.dumps(rows))
+"""
+    outputs = _outputs_across_hash_seeds(program)
     assert len(outputs) == 1
+    assert '"MET"' in next(iter(outputs))  # 空振り防止: 実際に成立する場面を通している
 
 
 def test_extract_none_means_no_previous_delivery() -> None:
