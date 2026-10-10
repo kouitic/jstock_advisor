@@ -1163,6 +1163,13 @@ jstock holding-decision set-mode active --changed-by <あなたの名前> \
 (`services/hd_renotification_provisional_policy.py`)です。**`mode=active`にする承認の前に、各項目を
 確定してください**(併せて #888・#889 の是正、通知件数の見込みも前提です)。
 
+**運用制約(2026-10-11追記、10/12のProduction反映に伴う)**: 次回のProduction反映(前回fbd08cbe以降の変更を含む)の後も、
+**`mode=active`にしないでください**。反映後のコードは`mode=active`を受け入れる状態になっており、`mode=active`にすると上の再通知の
+条件(暫定の値)が実際の通知を決めます。次のすべてが満たされるまで`mode=shadow`(または`legacy`)のままにします:
+#888・#889の是正(新方式のハードゲートの確認の扱い)と、その独立評価・承認 / 再通知の方針の各項目の確定(上記) /
+確認に至らない重大リスクの通知設計(#901)の判断 / USERによる`mode=active`切替の明示的な承認。
+`mode=shadow`の間は、保有判断の通知を作る処理も再通知の判断も実行されません(従来方式の通知のみ)。
+
 ロールバックは`set-mode legacy`の1コマンドで即座に行えます(再デプロイ不要)。
 
 ```bash
@@ -1253,6 +1260,24 @@ jstock holding-decision init-runtime-config --changed-by <あなたの名前> \
 
 ### 10.6 compare実行方法(Shadow比較レポート)
 
+> **暫定制約(2026-10-11追記、Issue #886 の是正が完了するまで)**: `jstock holding-decision compare` と
+> `jstock holding-decision backtest`(`--start-date`を付けないliveモード)は、環境変数`AWS_LAMBDA_FUNCTION_NAME`が
+> 空でない値で設定されたシェルでは**実行しないでください**。保存先は同変数の有無だけで決まり(`collection_store.py`の
+> `running_on_lambda`)、設定されていてAWS資格情報が有効だと、ProductionのDynamoDBへ監査記録・投資ストーリー・baselineを
+> 書き込みます(拒否のguardがありません)。非保有銘柄を`--stock-code`に指定しても書き込まれ、後日の購入時の初回評価の扱いが
+> 変わりうります。実行前に`echo $AWS_LAMBDA_FUNCTION_NAME`(PowerShell: `$env:AWS_LAMBDA_FUNCTION_NAME`)が空であることを
+> 確認し、`shareholder-benefit import-csv`など「環境変数を設定して実行」と案内される手順の後のシェルは使い回さず、
+> 新しいシェルで実行する(またはその変数をunsetする)。Productionデータの確認が必要な場合は、読取専用の観測用profileを
+> 使う別の手段で行い、本コマンドでは行わない。`--target aws`はruntime-config系の4コマンド専用で、本制約の対象外
+> (意図したProduction操作)。
+>
+> **変数が空であることは、Productionへ安全であることの保証ではありません**。上の確認は、この2コマンドの保存先が
+> ローカルになるための条件の1つにすぎません。実行の前に、次も確認してください: `AWS_PROFILE`・`AWS_ACCESS_KEY_ID`などの
+> 資格情報の設定、接続先(リージョン・エンドポイント・`DYNAMODB_TABLE_PREFIX`)が意図したものか。Productionの状態を調べる
+> ときは、許可された読取専用の経路(観測用profile)を使い、書込みが起こりうるコマンドで調べないでください。
+>
+> 本制約は#886の拒否guardがmerge・反映された時点で解除または書き換える。
+
 Shadow運用中に新旧の判定差分を確認するためのコマンドです。指定銘柄
 (または全保有銘柄)を現在のデータで両エンジンにかけ、判定・score・
 通知差分に加えて、coverage・ハードゲート・主な加点/減点理由を表示します。
@@ -1284,6 +1309,10 @@ jstock holding-decision compare --csv compare_result.csv
 推奨します)。
 
 ### 10.7 バックテスト手順
+
+> **暫定制約(2026-10-11追記、Issue #886 の是正まで)**: 10.6節の暫定制約(変数の確認、およびその注意書きにある
+> 資格情報・接続先の確認を含む)を、本節の`backtest`にも適用する(liveモードは上記の環境で実行しない)。replayモード(`--start-date`指定)と`jstock rules backtest`は読取りのみだが、
+> 上記の環境変数が設定されたシェルではProductionを読むため、同様に避ける。
 
 過去に実際に保存された判定結果を再生する`backtest`コマンドです。**このシステムは
 財務・配当・優待データを現在値としてのみ保持しており、過去の任意時点の
