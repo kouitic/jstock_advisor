@@ -270,6 +270,24 @@ _REGISTRY: tuple[_Entry, ...] = (
         cohort="SOLO:hd_renotification_wiring",
         wall_clock_policy=_FORBIDDEN,
     ),
+    # Issue #603(Q'。購入側 Shadow の『枠』): Lambda の残り時間のガード(120 秒。119.9 / 120.0 /
+    # 120.1 秒の境界)と、協調的な期限(30 秒。29.9 / 30.0 秒の境界)。T4 = 注入した clock
+    # (_Clock)と remaining_time_ms、literal の期待値を新規に導入した(T1〜T3 は該当なし:
+    # 暦日・営業日・時刻の業務分岐を持たない)。wall clock・freezegun は使わない。可変の
+    # module-level state を持たないため、cohort の相手はいない(SOLO。先例 #373 / #890)。
+    _Entry(
+        module="tests/unit/test_allocation_shadow_service.py",
+        triggers=("T4",),
+        cohort="SOLO:allocation_shadow_service",
+        wall_clock_policy=_FORBIDDEN,
+    ),
+    # 同上。handler 側の配線(残り時間の受け渡しと、残り 119.9 秒でスキップが記録されること)。
+    _Entry(
+        module="tests/unit/test_allocation_shadow_wiring.py",
+        triggers=("T4",),
+        cohort="SOLO:allocation_shadow_wiring",
+        wall_clock_policy=_FORBIDDEN,
+    ),
 )
 
 # V8: registry から静かに削除して guard を無効化する経路を塞ぐ。
