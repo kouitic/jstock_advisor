@@ -5,6 +5,11 @@
   confirmation_rule_version を見ない(版を見ずに比べる〔(i)〕)。
   #889 PR-2 が CONFIRMATION_RULE_VERSION を 1 から 2 に上げる前に、
   版 1 の前回 × 版 2 の今回の場面を固定する。
+  さらに、版の引き上げは R3 だけでなく判定全体(R1〜R5 の各結果・conditions_met・
+  periodic_due・send_by_policy)を変えないことも固定する。R1 はモデル版
+  (scoring_model_version)、R4 は earnings_key の大小を比べるだけで、確認の規則の版は
+  どの条件も読まない。判定全体の比較は、期待値を HdRenotifyDecision のリテラルで組む
+  (R3 以外の期待値は、これらの入力に対する現行の出力)。
 
 場面(設計 rev1.4: https://github.com/kouitic/jstock_advisor/issues/889#issuecomment-6098535651)
   ① 同じ理由コード・同じ確認状態                -> 差なし -> NOT_MET
@@ -33,13 +38,16 @@ from datetime import date
 import pytest
 
 from jstock_advisor.domain.signals.holding_decision_renotification import (
+    CONDITION_ORDER,
     Condition,
+    ConditionResult,
     ConditionStatus,
     DecisionChangeScope,
     EarningsDataFreshness,
     EarningsMode,
     GateConfirmation,
     HdNotifyState,
+    HdRenotifyDecision,
     KeywordOnlyHandling,
     PeriodicPolicy,
     Reason,
@@ -101,12 +109,48 @@ def state(gate_confirmations: Gates, version: int | None) -> HdNotifyState:
     )
 
 
+def decision_of(
+    current: HdNotifyState, previous: HdNotifyState, *, periodic_due: bool = False
+) -> HdRenotifyDecision:
+    return decide_hd_renotification(current, previous, CFG, POLICY, periodic_due=periodic_due)
+
+
 def r3_of(
     current: HdNotifyState, previous: HdNotifyState
 ) -> tuple[ConditionStatus, Reason | None, bool]:
-    decision = decide_hd_renotification(current, previous, CFG, POLICY, periodic_due=False)
+    decision = decision_of(current, previous)
     result = decision.result_of(R3)
     return result.status, result.reason, R3 in decision.conditions_met
+
+
+#: R3 以外の条件の期待値。state() の入力(モデル版・点数・判断・決算期・売り参照が前回と今回で
+#: 同じ)に対する現行の出力で、確認の規則の版にも gate_confirmations にも依らない。
+_OTHERS = {
+    Condition.R1_SCORE_DETERIORATION: ConditionResult(ConditionStatus.NOT_MET),
+    Condition.R2_DECISION_CHANGE: ConditionResult(ConditionStatus.NOT_MET),
+    Condition.R4_AFTER_EARNINGS: ConditionResult(ConditionStatus.NOT_MET),
+    Condition.R5_SELL_PRICE_CHANGE: ConditionResult(
+        ConditionStatus.NOT_EVALUABLE, Reason.PRICE_NOT_COMPARABLE
+    ),
+}
+
+
+def expected_decision(
+    r3: tuple[ConditionStatus, Reason | None, bool], *, periodic_due: bool
+) -> HdRenotifyDecision:
+    """R3 の期待値から、判定全体の期待値をリテラルで組む(実装の関数は使わない)。"""
+    r3_result = ConditionResult(r3[0], r3[1])
+    evaluations = tuple(
+        (condition, r3_result if condition is R3 else _OTHERS[condition])
+        for condition in CONDITION_ORDER
+    )
+    met = frozenset({R3}) if r3[2] else frozenset()
+    return HdRenotifyDecision(
+        evaluations=evaluations,
+        conditions_met=met,
+        periodic_due=periodic_due,  # 方針の周期は KEEP(D-1)
+        send_by_policy=bool(met) or periodic_due,
+    )
 
 
 _MET = (ConditionStatus.MET, None, True)
@@ -179,10 +223,43 @@ def test_r3_does_not_look_at_the_confirmation_rule_version(
     assert actual == expected, (name, previous_version, current_version)
 
 
+@pytest.mark.parametrize("periodic_due", [False, True])
+@pytest.mark.parametrize("previous_version", _VERSIONS)
+@pytest.mark.parametrize("current_version", _VERSIONS)
+@pytest.mark.parametrize(
+    ("name", "previous_gates", "current_gates", "expected"),
+    SCENARIOS,
+    ids=[scenario[0] for scenario in SCENARIOS],
+)
+def test_no_condition_of_the_decision_looks_at_the_confirmation_rule_version(
+    name: str,
+    previous_gates: Gates,
+    current_gates: Gates,
+    expected: tuple[ConditionStatus, Reason | None, bool],
+    previous_version: int | None,
+    current_version: int | None,
+    periodic_due: bool,
+) -> None:
+    """版の引き上げは判定全体(R1〜R5・conditions_met・periodic_due・send_by_policy)を変えない。"""
+    actual = decision_of(
+        state(current_gates, current_version),
+        state(previous_gates, previous_version),
+        periodic_due=periodic_due,
+    )
+    assert actual == expected_decision(expected, periodic_due=periodic_due), (
+        name,
+        previous_version,
+        current_version,
+    )
+
+
 def test_the_crossing_scenarios_are_exactly_version_1_to_version_2() -> None:
     """設計 rev1.4 の ①〜③ は『前回 = 版 1 / 今回 = 版 2』の組を名指しで固定する。"""
     for name, previous_gates, current_gates, expected in SCENARIOS:
         assert r3_of(state(current_gates, 2), state(previous_gates, 1)) == expected, name
+        assert decision_of(state(current_gates, 2), state(previous_gates, 1)) == expected_decision(
+            expected, periodic_due=False
+        ), name
 
 
 def test_a_real_b_confirmation_is_met_while_the_previous_stays_at_version_1() -> None:
