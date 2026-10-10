@@ -194,6 +194,45 @@ def test_periodic_resend_is_kept_by_the_provisional_policy(
     assert decide(tmp_path, current=state(), previous=state(), days=days) is expected
 
 
+@pytest.mark.parametrize(
+    ("label", "sent_at", "now", "expected"),
+    [
+        (
+            # JST 暦日差 N / UTC 暦日差 N-1（JST 0 時ちょうどを跨ぐ）
+            "JST では N 日・UTC では N-1 日",
+            dt.datetime(2026, 9, 1, 14, 59, tzinfo=dt.UTC),
+            dt.datetime(2026, 9, 1, 15, 0, tzinfo=dt.UTC)
+            + dt.timedelta(days=_RESEND_AFTER_DAYS - 1),
+            NotificationStatus.SENT,
+        ),
+        (
+            # JST 暦日差 N-1 / UTC 暦日差 N（UTC 日付だけが先に進む）
+            "JST では N-1 日・UTC では N 日",
+            dt.datetime(2026, 9, 1, 15, 0, tzinfo=dt.UTC),
+            dt.datetime(2026, 9, 1, 14, 59, tzinfo=dt.UTC) + dt.timedelta(days=_RESEND_AFTER_DAYS),
+            NotificationStatus.DUPLICATE_SUPPRESSED,
+        ),
+    ],
+)
+def test_periodic_resend_counts_jst_calendar_days_not_utc_days(
+    tmp_path: Path,
+    label: str,
+    sent_at: dt.datetime,
+    now: dt.datetime,
+    expected: NotificationStatus,
+) -> None:
+    """周期の再送は JST 暦日の差で数える（UTC 暦日の差ではない）。
+
+    T4 の境界（14:59/15:00 UTC）を跨ぐ組。
+
+    固定 clock（_NOW = 08:00 UTC）だけでは JST と UTC の暦日差が常に一致し、取り違えを検出できない。
+    """
+    service = make_service(tmp_path, 1, sent_at=sent_at)
+    current = hd_recommendation(_SELL, state(), identifier="22222222-2222-4222-8222-222222222222")
+    previous = hd_recommendation(_SELL, state(), identifier="33333333-3333-4333-8333-333333333333")
+    assert service._notification_status_for_send(current, previous, now) is expected, label
+
+
 def test_a_different_recommendation_type_still_sends_as_before(tmp_path: Path) -> None:
     """既存の『種別が違えば送る』は保有判断でも前に効く(状態の比較より先)。"""
     assert decide(

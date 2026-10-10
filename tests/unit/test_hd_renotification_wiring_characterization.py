@@ -142,11 +142,20 @@ def make_recommendation(
 
 
 def make_service(
-    store_dir: Path, days_ago: int, *, holding_id: str | None = None
+    store_dir: Path,
+    days_ago: int,
+    *,
+    holding_id: str | None = None,
+    sent_at: dt.datetime | None = None,
 ) -> LineNotificationService:
-    """通知の種類ごとに『days_ago 日前に送った』実績を置いたストアで、サービスを作る。"""
+    """通知の種類ごとに『days_ago 日前に送った』実績を置いたストアで、サービスを作る。
+
+    sent_at を渡すと days_ago より優先する(JST/UTC の暦日境界を跨ぐ組を作るため。
+    既定 None は従来と同じ)。
+    """
     log_repo = NotificationLogRepository(store_dir=store_dir)
-    sent_at = _NOW - dt.timedelta(days=days_ago)
+    if sent_at is None:
+        sent_at = _NOW - dt.timedelta(days=days_ago)
     for n, notification_type in enumerate(NotificationType):
         log_repo.save(
             NotificationLog(
