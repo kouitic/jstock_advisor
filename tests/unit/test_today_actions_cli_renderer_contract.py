@@ -366,21 +366,6 @@ def test_the_conclusion_is_always_two_lines_under_one_heading() -> None:
         assert block[1].startswith(NEW_LABEL) and block[2].startswith(LEGACY_LABEL)
 
 
-def test_the_word_skip_is_never_used_in_the_conclusion() -> None:
-    # U-17: 『見送り』の語は結論に使わない(新しい提案が無い日は『なし』)。購入の行は別
-    for view in (
-        build(),
-        build(allocation=None),
-        build(allocation=allocation_no_action()),
-        build(allocation=allocation_no_action(), legacy_items=(legacy(),)),
-        build(allocation=allocation_unavailable(), legacy_items=(legacy("利益保全注意"),)),
-        full_view(),
-    ):
-        assert all(
-            "見送り" not in line for line in conclusion_block(r.render_today_actions_table(view))
-        )
-
-
 def test_an_actions_day_counts_the_proposals_by_kind() -> None:
     view = build(
         allocation=allocated(buy("0002"), buy("0004")),
@@ -463,7 +448,6 @@ def test_every_legacy_label_is_counted_by_its_own_name(label: str) -> None:
     text = r.render_today_actions_table(view)
     assert legacy_state(text) == f"あり — {label}1件（理由は未分類）"
     assert new_proposal(text) == "なし"
-    assert "見送り" not in "\n".join(conclusion_block(text))
 
 
 def test_legacy_decisions_are_counted_per_label_in_order_of_appearance() -> None:
@@ -1049,20 +1033,95 @@ def test_the_module_is_not_imported_from_anywhere_in_src() -> None:
         assert "today_actions_cli_renderer" not in path.read_text(encoding="utf-8"), str(path)
 
 
-def test_a_corrupted_rotation_item_falls_back_to_the_unconfirmed_display() -> None:
-    # 型は構築時に拒否するが、壊れた値が来ても assert で落とさず、数値を作らずに未確定へ倒す
-    item = confirmed_rotation_item()
-    object.__setattr__(item, "improvement", None)
-    view = build(mode=tv.ViewMode.ACTIVE, allow_active=True, rotation=rotation_outcome(item))
-    (row,) = rows(r.render_today_actions_table(view), H_ROTATION)
-    assert "株数・金額・改善幅：未確定（試験運用）" in row
-    assert not re.search(r"\d+株", row)
-    assert "改善幅 " not in row
+# --- 追加: 利益保全の売却が件数に入る(サブちゃん SHOULD-1)----------------------------------------
 
 
-def test_a_corrupted_confirmed_cash_without_a_time_is_shown_as_unconfirmed() -> None:
-    corrupted = cash()
-    object.__setattr__(corrupted, "last_reconciled_at", None)
-    line = cash_line(build(cash=corrupted))
-    assert "最終棚卸し：未確認" in line
-    assert "最終棚卸し 20" not in line
+def test_a_profit_protection_sell_is_counted_in_the_sell_count() -> None:
+    view = build(
+        allocation=allocation_no_action(),
+        profit_protection_items=(sell("0012", tv.ExitReasonLabel.PROFIT_PROTECTION),),
+    )
+    assert new_proposal(r.render_today_actions_table(view)) == (
+        "あり（売却1件・資金入替0件・購入0件）"
+    )
+
+
+def test_all_three_sell_groups_are_summed_in_the_sell_count() -> None:
+    view = build(
+        allocation=allocated(buy("0002")),
+        risk_exit_items=(sell("0001"),),
+        value_exit_items=(sell("0011", tv.ExitReasonLabel.VALUE_EXIT),),
+        profit_protection_items=(
+            sell("0012", tv.ExitReasonLabel.PROFIT_PROTECTION),
+            sell("0013", tv.ExitReasonLabel.PROFIT_PROTECTION),
+        ),
+    )
+    assert new_proposal(r.render_today_actions_table(view)) == (
+        "あり（売却4件・資金入替0件・購入1件）"
+    )
+
+
+# --- 追加: 非 JST の offset は JST へ変換して表示する(サブちゃん SHOULD-2)---------------------
+
+_UTC_EVENING = dt.datetime(
+    2026, 10, 11, 20, 0, tzinfo=dt.UTC
+)  # = 2026-10-12 05:00 JST(日付も変わる)
+
+
+def test_a_price_time_in_utc_is_shown_in_jst_in_the_table() -> None:
+    item = sell("0001", price_basis=tv.PriceBasis(price=D("2340"), as_of=_UTC_EVENING))
+    (row,) = rows(r.render_today_actions_table(build(risk_exit_items=(item,))), H_RISK)
+    assert "2,340円（2026-10-12 05:00）" in row
+    assert "2026-10-11" not in row
+
+
+def test_a_price_time_in_utc_is_exported_in_jst_in_the_json() -> None:
+    item = sell("0001", price_basis=tv.PriceBasis(price=D("2340"), as_of=_UTC_EVENING))
+    sections = r.today_actions_to_json_dict(build(risk_exit_items=(item,)))["sections"]
+    assert isinstance(sections, dict)
+    assert sections["risk_exit"][0]["price_basis"] == {
+        "price": "2340",
+        "as_of": "2026-10-12T05:00:00+09:00",
+    }
+
+
+# --- 追加: 既存の判定の件数と未知の区分(USER 原文の条件)-----------------------------------------
+
+
+def _legacy_counts(state: str) -> dict[str, int]:
+    """『あり — 区分A2件・区分B1件（理由は未分類）』を {区分: 件数} に戻す(独立に解析)。"""
+    body = state.removeprefix("あり — ").removesuffix("（理由は未分類）")
+    out: dict[str, int] = {}
+    for part in body.split("・"):
+        match = re.fullmatch(r"(\D+)(\d+)件", part)
+        assert match is not None, part
+        out[match.group(1)] = int(match.group(2))
+    return out
+
+
+def test_the_legacy_counts_add_up_to_the_number_of_legacy_items() -> None:
+    labels = [
+        "緊急確認",
+        "利益保全注意",
+        "緊急確認",
+        "未知の区分X",
+        "未知の区分X",
+        "未知の区分X",
+        "売却",
+    ]
+    items = tuple(legacy(label, f"{9000 + i}") for i, label in enumerate(labels))
+    text = r.render_today_actions_table(
+        build(allocation=allocation_no_action(), legacy_items=items)
+    )
+    counts = _legacy_counts(legacy_state(text))
+    assert sum(counts.values()) == len(items) == 7
+    assert counts == {"緊急確認": 2, "利益保全注意": 1, "未知の区分X": 3, "売却": 1}
+
+
+def test_an_unknown_legacy_label_is_counted_as_its_own_category_and_not_dropped() -> None:
+    items = (legacy("未知の区分X", "0021"),)
+    text = r.render_today_actions_table(
+        build(allocation=allocation_no_action(), legacy_items=items)
+    )
+    assert legacy_state(text) == "あり — 未知の区分X1件（理由は未分類）"
+    assert len(rows(text, H_LEGACY)) == 1

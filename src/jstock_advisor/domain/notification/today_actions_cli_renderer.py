@@ -51,7 +51,6 @@ from jstock_advisor.domain.notification.today_actions_view import (
     SCHEMA_VERSION,
     BuyFinalAction,
     BuyItemView,
-    CashReconciliationState,
     CashView,
     LegacyDecisionItemView,
     PriceBasis,
@@ -112,15 +111,10 @@ def _sell_shares_text(shares: int | None) -> str:
 
 
 def _cash_line(cash: CashView) -> str:
-    confirmed = (
-        cash.reconciliation_state is CashReconciliationState.CONFIRMED
-        and cash.last_reconciled_at is not None
-    )
-    if confirmed and cash.last_reconciled_at is not None:
-        reconciled = f"最終棚卸し {to_jst(cash.last_reconciled_at):%Y-%m-%d}"
-    else:
-        # 日時が無い『確認済み』は型が構築時に拒否する。壊れた値でも確認済みとは表示しない
-        reconciled = "最終棚卸し：未確認"
+    # 確認済みの買付余力は棚卸し日時を持ち、未確認は持たない(605-A の型が構築時に保証する)。
+    # 日時の有無で分けると、型の絞り込みになり、到達しない分岐を作らない
+    last = cash.last_reconciled_at
+    reconciled = f"最終棚卸し {to_jst(last):%Y-%m-%d}" if last is not None else "最終棚卸し：未確認"
     amount = "未登録" if cash.amount is None else f"{_money(cash.amount)}円"
     return f"買付余力: {amount}（{reconciled}）"
 
@@ -184,14 +178,15 @@ def _leg_text(leg: RotationLeg, *, with_numbers: bool) -> str:
 
 
 def _rotation_row(item: RotationItemView) -> str:
-    # 数値を出すのは、確定していて、改善幅と算入割合が揃っているときだけ(型が構築時に保証する)。
-    # 揃っていない壊れた値は、assert で落とさず、未確定の表示へ倒す(数値を作らない)
-    confirmed = (
-        item.numbers_confirmed and item.improvement is not None and item.counted_ratio is not None
-    )
-    if confirmed and item.improvement is not None and item.counted_ratio is not None:
-        detail = f"改善幅 {item.improvement:f}・算入割合 {item.counted_ratio:f}"
+    # 確定済みの Rotation だけが改善幅と算入割合を持つ(605-A の型が構築時に保証する)。
+    # 値の有無で分けると、型の絞り込みになり、到達しない分岐を作らない。未確定は数値を出さない
+    improvement = item.improvement
+    ratio = item.counted_ratio
+    if improvement is not None and ratio is not None:
+        confirmed = True
+        detail = f"改善幅 {improvement:f}・算入割合 {ratio:f}"
     else:
+        confirmed = False
         detail = _ROTATION_UNCONFIRMED
     return _row(
         [
