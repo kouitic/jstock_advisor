@@ -815,19 +815,19 @@ def test_the_omission_words_never_appear_even_with_a_huge_day() -> None:
 
 
 def test_an_oversized_item_is_split_and_counted_once() -> None:
-    long_note = "あ" * 900
+    long_note = "ぬ" * 900
     huge = sell("0001", summary_reasons=(long_note,))
     view = build(allocation=allocation_no_action(), risk_exit_items=(huge,))
     out = render(view, budget=400)
     assert len(out) >= 3
     assert all(len(m) <= 400 for m in out)
     assert parse_items(out).count(("risk", ("0001",))) == 1  # 識別は 1 回だけ
-    # 内容は失われない: 断片を全部足すと元の 900 文字(この view に他の『あ』は無い)
-    assert sum(m.count("あ") for m in out) == 900
+    # 内容は失われない: 断片を全部足すと元の 900 文字(この view に他の『ぬ』は無い)
+    assert sum(m.count("ぬ") for m in out) == 900
 
 
 def test_continuation_markers_are_used_only_for_an_oversized_item() -> None:
-    huge = sell("0001", summary_reasons=("あ" * 900,))
+    huge = sell("0001", summary_reasons=("ぬ" * 900,))
     out = render(build(allocation=allocation_no_action(), risk_exit_items=(huge,)), budget=400)
     assert any("（続く）" in m for m in out)
     normal = render(full_view())
@@ -900,3 +900,38 @@ def test_the_module_is_imported_from_nowhere_in_src() -> None:
             continue
         if "today_actions_line_renderer" in path.read_text(encoding="utf-8"):
             assert path.relative_to(src).as_posix() in _ALLOWED_IMPORTERS, str(path)
+
+
+# --- 追加: 件数ヘッダの『うち購入』・見出しの重複・異常時の分割の境界 --------------------
+
+
+def test_the_purchase_count_in_the_header_excludes_the_skipped_candidates() -> None:
+    skipped = (buy("0007", tv.BuyFinalAction.SKIP), buy("0008", tv.BuyFinalAction.SKIP))
+    view = build(allocation=allocated(buy("0002"), buy("0003"), buy("0004"), *skipped))
+    match = count_line(render(view)[0])
+    assert int(match.group(6)) == 5  # 購入欄 = 購入 3 + 見送り 2
+    assert int(match.group(7)) == 3  # うち購入 = 3(見送りを数えない)
+
+
+def test_a_group_header_appears_once_per_message_however_many_items_it_holds() -> None:
+    items = tuple(sell(f"{6000 + i}") for i in range(25))
+    out = render(build(allocation=allocation_no_action(), risk_exit_items=items), budget=700)
+    assert len(out) > 1
+    for message in out:
+        risk_headers = [x for x in lines_of(message) if section_of(x) == cli.HEADER_RISK]
+        assert len(risk_headers) <= 1
+    plain = sum(cli.HEADER_RISK in lines_of(m) for m in out)
+    assert plain == 1  # 『（続き）』でない見出しは、群の最初の通に 1 回だけ
+
+
+@pytest.mark.parametrize("budget", [200, 260, 400, 1000])
+@pytest.mark.parametrize("note_length", [1, 120, 333, 900, 2500])
+def test_an_oversized_item_never_breaks_the_limit_and_loses_nothing(
+    budget: int, note_length: int
+) -> None:
+    huge = sell("0001", summary_reasons=("ぬ" * note_length,))
+    view = build(allocation=allocation_no_action(), risk_exit_items=(huge,))
+    out = render(view, budget=budget)
+    assert all(len(m) <= budget for m in out), [len(m) for m in out]
+    assert parse_items(out).count(("risk", ("0001",))) == 1
+    assert sum(m.count("ぬ") for m in out) == note_length

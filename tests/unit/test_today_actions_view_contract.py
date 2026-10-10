@@ -834,6 +834,7 @@ def test_the_module_reads_no_clock_and_uses_no_float_or_io() -> None:
 # 後続の PR(605-C / 605-D)が自分の module をここへ足す。それ以外の module からの import は禁止
 _ALLOWED_IMPORTERS = {
     "domain/notification/today_actions_cli_renderer.py",  # 605-B
+    "domain/notification/today_actions_line_renderer.py",  # 605-C
 }
 
 

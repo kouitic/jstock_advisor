@@ -1025,12 +1025,20 @@ def test_the_module_reads_no_clock_and_does_no_io_and_uses_no_float() -> None:
             assert node.id != "logger"
 
 
-def test_the_module_is_not_imported_from_anywhere_in_src() -> None:
+# この renderer を import してよい src の module の明示リスト(いずれも未配線の dormant)。
+# 後続の PR(605-D)が自分の module をここへ足す。それ以外の module からの import は禁止
+_ALLOWED_IMPORTERS = {
+    "domain/notification/today_actions_line_renderer.py",  # 605-C(表示の語彙を共有する)
+}
+
+
+def test_the_module_is_imported_only_by_its_own_siblings_in_src() -> None:
     src = _REPO / "src" / "jstock_advisor"
     for path in src.rglob("*.py"):
         if path == _MODULE_PATH:
             continue
-        assert "today_actions_cli_renderer" not in path.read_text(encoding="utf-8"), str(path)
+        if "today_actions_cli_renderer" in path.read_text(encoding="utf-8"):
+            assert path.relative_to(src).as_posix() in _ALLOWED_IMPORTERS, str(path)
 
 
 # --- 追加: 利益保全の売却が件数に入る(サブちゃん SHOULD-1)----------------------------------------
