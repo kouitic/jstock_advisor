@@ -288,6 +288,12 @@ def test_sell_reference_uses_only_target_price_levels() -> None:
         assert state.sell_reference is None
 
 
+def test_the_state_records_the_confirmation_rule_version() -> None:
+    """Issue #890 PR-3(#897 の SHOULD-1): 消費側が版を区別できるよう、記録に版を載せる。"""
+    state = _state_of(_recommendation())
+    assert state.confirmation_rule_version == gate_module.CONFIRMATION_RULE_VERSION
+
+
 def test_gate_confirmations_are_recorded_per_reason_code() -> None:
     result = _gate_result(("BANKRUPTCY_FILING", "DEBT_EXCESS"))
     recommendation = _recommendation(
@@ -342,6 +348,7 @@ def test_the_state_carries_values_only_no_identifiers() -> None:
         "earnings_freshness",
         "sell_reference",
         "market_price",
+        "confirmation_rule_version",
     }
 
 

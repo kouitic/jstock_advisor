@@ -885,6 +885,36 @@ print(json.dumps(rows))
     assert '"MET"' in next(iter(outputs))  # 空振り防止: 実際に成立する場面を通している
 
 
+def test_confirmation_rule_version_round_trips_and_defaults_to_none() -> None:
+    """Issue #890 PR-3(#897 の SHOULD-1): 確認の規則の版を記録に載せる(任意。無い記録は None)。"""
+    with_version = state(confirmation_rule_version=2)
+    stored = serialize_hd_state(with_version)
+    assert stored["confirmation_rule_version"] == 2
+    assert extract_hd_state({HD_RENOTIFY_STATE_KEY: stored}) == with_version
+    # 版を持たない記録(#897 で作った記録)は None(版不明)として読める
+    legacy_stored = dict(serialize_hd_state(state()))
+    legacy_stored.pop("confirmation_rule_version")
+    extracted = extract_hd_state({HD_RENOTIFY_STATE_KEY: legacy_stored})
+    assert isinstance(extracted, HdNotifyState)
+    assert extracted.confirmation_rule_version is None
+    assert state().confirmation_rule_version is None
+
+
+@pytest.mark.parametrize("bad", ["1", 1.5, True, 0, -1])
+def test_invalid_confirmation_rule_version_is_not_comparable(bad: object) -> None:
+    stored = dict(serialize_hd_state(state(confirmation_rule_version=1)))
+    stored["confirmation_rule_version"] = bad
+    assert extract_hd_state({HD_RENOTIFY_STATE_KEY: stored}) == StateUnavailable(
+        Reason.STATE_MALFORMED
+    )
+
+
+@pytest.mark.parametrize("bad", [0, -1, True])
+def test_invalid_confirmation_rule_version_is_rejected_on_construction(bad: object) -> None:
+    with pytest.raises(ValueError):
+        state(confirmation_rule_version=bad)
+
+
 def test_extract_none_means_no_previous_delivery() -> None:
     assert extract_hd_state(None) == StateUnavailable(Reason.NO_PREVIOUS_HD_STATE)
 
@@ -965,22 +995,26 @@ def _module_tree() -> ast.Module:
     return ast.parse(_MODULE_PATH.read_text(encoding="utf-8"))
 
 
-# PR-2(Issue #890)で意図して接続した import 元。保存形式の『書く側』(builder)と、確認状態の
-# 型を共有する分類(gate_confirmation)だけ。判定の側(decide_hd_renotification)は、PR-3 で
-# 通知の判断へ接続するまで、どこからも参照されない。
+# 意図して接続した import 元。
+#   PR-2: 保存形式の『書く側』(builder)と、確認状態の型を共有する分類(gate_confirmation)
+#   PR-3: 通知の判断(line_notification_service)と、その暫定の方針(1 か所)
+# 判定の側(decide_hd_renotification)を使うのは、通知の判断(line_notification_service)だけ。
 _ALLOWED_IMPORTERS = frozenset(
     {
         "domain/signals/holding_decision_gate_confirmation.py",
+        "services/hd_renotification_provisional_policy.py",
         "services/holding_decision_notification_builder.py",
+        "services/line_notification_service.py",
     }
 )
+_ALLOWED_DECISION_USERS = frozenset({"services/line_notification_service.py"})
 
 
 def test_module_is_referenced_only_by_the_intended_writers() -> None:
-    """PR-1 の『どこからも import されない』を、PR-2 の意図した接続に合わせて更新した固定。
+    """PR-1 の『どこからも import されない』を、PR-2・PR-3 の意図した接続に合わせて更新した固定。
 
-    許可する参照元は、保存形式を書く builder と、確認状態を共有する分類の 2 つだけ。
-    それ以外の src からの参照が増えたら落ちる(配線の拡大は意図した変更として更新する)。
+    許可する参照元は、保存形式を書く builder・確認状態を共有する分類・通知の判断とその暫定の方針
+    だけ。それ以外の src からの参照が増えたら落ちる(配線の拡大は意図した変更として更新する)。
     """
     offenders = {
         path.relative_to(_SRC_ROOT).as_posix()
@@ -990,14 +1024,14 @@ def test_module_is_referenced_only_by_the_intended_writers() -> None:
     assert offenders == _ALLOWED_IMPORTERS
 
 
-def test_decision_function_is_still_not_referenced_outside_the_module() -> None:
-    """判定の側(decide_hd_renotification)は、PR-3 の接続まで、どこからも使われない。"""
-    offenders = [
+def test_decision_function_is_used_only_by_the_notification_judgment() -> None:
+    """判定の側(decide_hd_renotification)を使うのは、通知の判断(PR-3)だけ。"""
+    users = {
         path.relative_to(_SRC_ROOT).as_posix()
         for path in _SRC_ROOT.rglob("*.py")
         if path != _MODULE_PATH and "decide_hd_renotification" in path.read_text(encoding="utf-8")
-    ]
-    assert offenders == []
+    }
+    assert users == _ALLOWED_DECISION_USERS
 
 
 def test_module_imports_only_the_standard_library() -> None:

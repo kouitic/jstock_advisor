@@ -50,6 +50,9 @@ from jstock_advisor.domain.signals.historical_valuation import (
     historical_valuation_config_values,
     historical_valuation_result_to_metrics,
 )
+from jstock_advisor.domain.signals.holding_decision_gate_confirmation import (
+    CONFIRMATION_RULE_VERSION,
+)
 from jstock_advisor.domain.signals.holding_decision_renotification import (
     EarningsDataFreshness,
     GateConfirmation,
@@ -194,6 +197,7 @@ def _build_hd_renotify_state(
         earnings_freshness=EarningsDataFreshness(freshness.result.verdict.value),
         sell_reference=_sell_reference(recommendation_type, sell_prices),
         market_price=market_price if math.isfinite(market_price) and market_price > 0 else None,
+        confirmation_rule_version=CONFIRMATION_RULE_VERSION,
     )
     return serialize_hd_state(state)
 
