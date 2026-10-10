@@ -393,6 +393,65 @@ _TARGETS_BOUNDARY: list[tuple[Decimal | None, float | None]] = [
 ]
 
 
+def gate_cases() -> Iterator[Case]:
+    """適正価格ベースの経路の gate が『単独で』効く入力(一般の抽出では現れにくい)。
+
+    - 一部利確の gate(`partial_count >= min or fv_partial_gate_ok` の右の項): 件数条件の票を
+      持たない(利回り・トレンド悪化・集中度・成長鈍化の票なし)入力で、適正価格の gate だけが
+      PARTIAL へ導く。強気適正価格超過の閾値ちょうど(25.0%)とその前後を含む
+    - 上限価格(ceiling)が使えない業種区分(`industry_classification` 未指定かつ業種モデル未適用)
+      でも、GENERAL 業種なら gate は開く(Issue #583)。このとき価格 × 上値余地の経路は WATCH 止まり
+      になり、適正価格の gate が単独で最終判定を決める
+    - 全株の強い条件(FAIR_VALUE_STRONG): 高信頼度・強気超過・業績予想の下方修正・最新決算の反映
+    """
+    combinations = itertools.product(
+        [Decimal(p) for p in ("1624", "1625", "1626", "1700", "1800", "2100")],
+        ["medium_3", "high_3_tight", "high_3_wide"],
+        [None, TrendClassification.UPTREND],
+        [(False, False), (True, False), (False, True)],
+        [3, 10],
+        [True, False],
+        [True, False],
+        [True, False],
+    )
+    for index, (
+        price,
+        fair_value,
+        trend,
+        (guidance, severe),
+        days,
+        executable,
+        reflects,
+        ceiling_usable,
+    ) in enumerate(combinations):
+        kwargs = build_kwargs(
+            price=price,
+            fair_value=fair_value,
+            trend=trend,
+            pp="none_given",
+            executable=executable,
+            days=days,
+            counter=False,
+            industry_model=ceiling_usable,
+            sector=None if ceiling_usable else ProfitTakingIndustrySector.GENERAL,
+            stock_types=(),
+            guidance=guidance,
+            severe=severe,
+            dividend_outcome=None,
+            cashflow=None,
+            concentration=False,
+            earnings_rationale=False,
+            reflects=reflects,
+            yield_pct=4.0,
+            mitigation="none",
+            target_price=None,
+            target_rate=None,
+            premise_broken=False,
+            accounting=False,
+        )
+        yield Case(f"gate-{index:05d}", kwargs)
+
+
 def missing_input_cases() -> Iterator[Case]:
     """入力が欠けた場合を全て列挙する(含み損・適正価格が使えない・bull 等の欠落・momentum なし・
     候補なし)。hard_overvalued の式を uptrend の枝の外で常に算出しても、例外を出さない。"""
