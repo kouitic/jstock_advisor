@@ -41,6 +41,15 @@ DISCLOSURE_RULE_BY_REASON_CODE: dict[str, str] = {
 #: 開示の確認の段階を表す値(sell_signal の DisclosureRiskConfirmationLevel の値)。
 MATERIAL_EVENT_CONFIRMED = "MATERIAL_EVENT_CONFIRMED"
 
+#: 『確認の規則の版』。段階の文字列(MATERIAL_EVENT_CONFIRMED)の質が、規則の是正で変わることを
+#: 消費側(#882 の adapter など)が区別できるようにする。**所有者は #890 / #889 の側**
+#: (本 module)。消費側は読むだけ。
+#:   1 = 是正前。確認語が別の開示・否定文・『継続企業』の自己充足でも成立する弱い確認(#889)
+#:   2 = 是正後(#889 PR-2 で旧方式の分類を新しい部品に切り替える時に上げる)。同じ開示の中で
+#:       結びつき、否定を伴わず、『継続企業』を除いた確認語がある確認
+#: 上げるのは #889 の PR-2(本番の分類が変わる PR)で、PR-1(dormant)では上げない。
+CONFIRMATION_RULE_VERSION = 1
+
 #: 評価の根拠(SellRuleEvaluation)の metric_name のうち、開示の確認の段階を載せるもの。
 DISCLOSURE_LEVEL_METRIC_NAME = "disclosure_risk_confirmation_level"
 

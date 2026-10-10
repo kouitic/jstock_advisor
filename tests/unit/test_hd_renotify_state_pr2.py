@@ -155,6 +155,12 @@ def test_every_hard_gate_reason_code_is_classified() -> None:
     assert set(_REASON_LABELS) == explicit
 
 
+def test_confirmation_rule_version_is_pinned_until_the_889_correction_lands() -> None:
+    """確認の規則の版は 1(是正前)。#889 PR-2(旧方式の分類の切替)で 2 へ上げる時に、
+    このテストを意図した変更として更新する(消費側が弱い確認と是正後の確認を区別するため)。"""
+    assert gate_module.CONFIRMATION_RULE_VERSION == 1
+
+
 def test_no_codes_means_no_confirmations() -> None:
     assert classify_gate_confirmations([], {"major_scandal": _MATERIAL}) == ()
 
