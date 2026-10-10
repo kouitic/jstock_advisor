@@ -307,6 +307,36 @@ def test_a_deeper_drawdown_never_gives_a_lighter_state(
             previous = state
 
 
+@pytest.mark.parametrize("trend", _TRENDS)
+@pytest.mark.parametrize("peak_gain", [None, 8.0, 30.0])
+def test_the_suppressed_candidate_under_unusable_reliability_follows_the_drawdown(
+    trend: TrendReading | None, peak_gain: float | None
+) -> None:
+    """UNUSABLE では状態が常に UNDETERMINED になる。監査に残るのは suppressed の候補なので、
+    その候補が(信頼性が使えるときの状態と同じで)下落に対して単調であることを固定する。"""
+    previous: RegimeState | None = None
+    for drawdown in _DRAWDOWNS:
+        current_gain = (
+            None if peak_gain is None else _current_gain_after_drawdown(peak_gain, drawdown)
+        )
+        facts = _facts(drawdown, peak_gain=peak_gain, current_gain=current_gain, trend=trend)
+        suppressed = _classify(facts, ReliabilityClass.UNUSABLE).suppressed
+        usable_state = _state(_classify(facts, ReliabilityClass.RELIABLE))
+        if usable_state is None or usable_state is RegimeState.HEALTHY:
+            # 一度候補を残したあとで、候補が消える(軽くなる)ことはない
+            assert previous is None, drawdown
+            assert suppressed == ()
+            continue
+        assert len(suppressed) == 1, drawdown
+        assert suppressed[0].reason is SuppressionReason.RELIABILITY_CAP
+        # 抑えた候補は、信頼性が使えるときの状態そのもの(一段軽くして残さない)
+        assert suppressed[0].candidate is usable_state, drawdown
+        if previous is not None:
+            assert severity_rank(suppressed[0].candidate) >= severity_rank(previous), drawdown
+        previous = suppressed[0].candidate
+    assert previous is RegimeState.BREAKDOWN
+
+
 def test_the_state_reaches_the_heaviest_state_after_the_gain_is_gone() -> None:
     sequence = [
         _state(
@@ -666,3 +696,36 @@ def test_results_are_finite_numbers_only() -> None:
     for drawdown in _DRAWDOWNS:
         ratio = giveback_ratio_pct(_d(30.0), _d(drawdown))
         assert math.isfinite(ratio.unwrap())
+
+
+# 公開関数 giveback_ratio_pct は、PriceFacts を通らない入力からも『確定した値』を捏造しない
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), -100.1, -1e9])
+def test_giveback_ratio_rejects_a_peak_gain_that_is_not_finite_or_out_of_range(bad: float) -> None:
+    with pytest.raises(ValueError):
+        giveback_ratio_pct(_d(bad), _d(10.0))
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), -0.1, 100.1, 250.0])
+def test_giveback_ratio_rejects_a_drawdown_that_is_not_finite_or_out_of_range(bad: float) -> None:
+    with pytest.raises(ValueError):
+        giveback_ratio_pct(_d(30.0), _d(bad))
+
+
+@pytest.mark.parametrize("tiny", [1e-310, 5e-324])
+def test_giveback_ratio_is_undetermined_when_it_cannot_be_represented(tiny: float) -> None:
+    """peak の含み益が極小の正の値だと桁があふれる。inf を『確定した値』にしない。"""
+    ratio = giveback_ratio_pct(_d(tiny), _d(10.0))
+    assert not ratio.is_determined
+    assert ratio.reason is UndeterminedReason.GUARD_NOT_MET
+
+
+def test_giveback_ratio_never_returns_a_determined_non_finite_value() -> None:
+    peak_gains = [None, -100.0, -50.0, 0.0, 5e-324, 1e-300, 1e-9, 1.0, 30.0, 1e6, 1e300]
+    drawdowns = [None, 0.0, 1e-300, 0.5, 50.0, 100.0]
+    for peak_gain, drawdown in itertools.product(peak_gains, drawdowns):
+        ratio = giveback_ratio_pct(_d(peak_gain), _d(drawdown))
+        if ratio.is_determined:
+            assert math.isfinite(ratio.unwrap()), (peak_gain, drawdown)
+            assert ratio.unwrap() >= 0, (peak_gain, drawdown)

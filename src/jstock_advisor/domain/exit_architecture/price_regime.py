@@ -78,9 +78,17 @@ def severity_rank(state: RegimeState) -> int:
     return REGIME_ORDER.index(state)
 
 
-def _finite(name: str, value: float) -> None:
+def _check_drawdown(value: float) -> None:
+    # NaN は比較が常に偽になるため、この範囲の検査が NaN と inf も拒否する
+    if not 0 <= value <= 100:
+        raise ValueError(f"drawdown_from_peak_pct は 0 以上 100 以下: {value}")
+
+
+def _check_gain(name: str, value: float) -> None:
     if not math.isfinite(value):
         raise ValueError(f"{name} は有限の数値でなければならない: {value!r}")
+    if value < -100:
+        raise ValueError(f"{name} は -100 以上(価格 0 が下限): {value}")
 
 
 @dataclass(frozen=True)
@@ -124,18 +132,13 @@ class PriceFacts:
 
     def __post_init__(self) -> None:
         if self.drawdown_from_peak_pct.is_determined:
-            drawdown = self.drawdown_from_peak_pct.unwrap()
-            if not 0 <= drawdown <= 100:
-                raise ValueError(f"drawdown_from_peak_pct は 0 以上 100 以下: {drawdown}")
+            _check_drawdown(self.drawdown_from_peak_pct.unwrap())
         for name, gain in (
             ("peak_gain_pct", self.peak_gain_pct),
             ("current_gain_pct", self.current_gain_pct),
         ):
             if gain.is_determined:
-                value = gain.unwrap()
-                _finite(name, value)
-                if value < -100:
-                    raise ValueError(f"{name} は -100 以上(価格 0 が下限): {value}")
+                _check_gain(name, gain.unwrap())
 
 
 @dataclass(frozen=True)
@@ -169,17 +172,28 @@ def giveback_ratio_pct(
     """peak の含み益のうち、失った割合(%)。peak からの下落と peak の含み益の従属量。
 
     d = 下落率、g = peak の含み益率(いずれも比率)のとき d * (1 + g) / g。peak に含み益が
-    無い(g <= 0)ときは『失う利益が無い』ので定義できず、UNDETERMINED とする。
+    無い(g <= 0)ときは『失う利益が無い』ので定義できず、UNDETERMINED とする。結果が有限の
+    数値にならないとき(g が極小の正の値)も UNDETERMINED。非有限・範囲外の入力は拒否する
+    (PriceFacts と同じ範囲。確定した値を捏造しない)。
     """
     if not peak_gain_pct.is_determined or not drawdown_from_peak_pct.is_determined:
         return Determination.undetermined(UndeterminedReason.INPUT_MISSING, "入力が確定していない")
+    # 公開関数なので、PriceFacts を通らない入力も検証する(非有限・範囲外から値を作らない)
+    _check_gain("peak_gain_pct", peak_gain_pct.unwrap())
+    _check_drawdown(drawdown_from_peak_pct.unwrap())
     gain = peak_gain_pct.unwrap() / 100
     drawdown = drawdown_from_peak_pct.unwrap() / 100
     if gain <= 0:
         return Determination.undetermined(
             UndeterminedReason.GUARD_NOT_MET, "peak に含み益が無く、吐き出し率は定義できない"
         )
-    return Determination.of(drawdown * (1 + gain) / gain * 100)
+    ratio = drawdown * (1 + gain) / gain * 100
+    if not math.isfinite(ratio):
+        # peak の含み益が極小の正の値だと桁があふれる。表せない値を『確定した値』にしない
+        return Determination.undetermined(
+            UndeterminedReason.GUARD_NOT_MET, "吐き出し率が有限の数値として表せない"
+        )
+    return Determination.of(ratio)
 
 
 def _drawdown_state(
