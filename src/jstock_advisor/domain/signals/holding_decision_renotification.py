@@ -242,6 +242,11 @@ class HdNotifyState:
     earnings_freshness: EarningsDataFreshness = EarningsDataFreshness.UNKNOWN
     sell_reference: SellReference | None = None
     market_price: float | None = None
+    # 確認状態の分類の規則の版(holding_decision_gate_confirmation.CONFIRMATION_RULE_VERSION)。
+    # 記録を読む側が『是正前の弱い確認』と『是正後の確認』を区別するための任意の項目
+    # (Issue #890 PR-3。#897 の独立 review の SHOULD-1)。無い記録(#897 で作った記録を含む)は
+    # None(版不明)。
+    confirmation_rule_version: int | None = None
 
     def __post_init__(self) -> None:
         if not self.scoring_model_version:
@@ -258,6 +263,9 @@ class HdNotifyState:
             math.isfinite(self.market_price) and self.market_price > 0
         ):
             raise ValueError(f"market_price は 0 より大きい有限な数: {self.market_price!r}")
+        version = self.confirmation_rule_version
+        if version is not None and (isinstance(version, bool) or version < 1):
+            raise ValueError(f"confirmation_rule_version は 1 以上の整数または None: {version!r}")
 
     @property
     def decision_key(self) -> tuple[str, str]:
@@ -298,6 +306,7 @@ def serialize_hd_state(state: HdNotifyState) -> dict[str, object]:
             else None
         ),
         "market_price": state.market_price,
+        "confirmation_rule_version": state.confirmation_rule_version,
     }
     return out
 
@@ -339,6 +348,14 @@ def _optional_number(value: object) -> float | None:
     return None if value is None else _number(value)
 
 
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("整数ではない")
+    return value
+
+
 def _text(value: object) -> str:
     if not isinstance(value, str):
         raise TypeError("文字列ではない")
@@ -377,6 +394,7 @@ def _state_from_mapping(raw: Mapping[str, object]) -> HdNotifyState:
         earnings_freshness=EarningsDataFreshness(_text(raw["earnings_freshness"])),
         sell_reference=sell_reference,
         market_price=_optional_number(raw["market_price"]),
+        confirmation_rule_version=_optional_int(raw.get("confirmation_rule_version")),
     )
 
 
