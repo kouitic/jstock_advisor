@@ -51,6 +51,7 @@ from jstock_advisor.domain.exit_architecture.arbiter import (
     arbitrate,
     collect_evidence,
     eligible_full_evidence,
+    regime_claimed_strength,
     undetermined_layers,
 )
 from jstock_advisor.domain.exit_architecture.decision import (
@@ -112,7 +113,6 @@ def _policy(**over: object) -> ArbiterPolicy:
         "fe1_broken_needs_primary_root": False,
         "degraded_downgrade_steps": 1,
         "timing_downgrade_steps": 1,
-        "earnings_window_downgrade_steps": 1,
         "regime_strength": dict(_REGIME),
     }
     base.update(over)
@@ -344,7 +344,7 @@ def test_policy_rejects_a_non_positive_or_non_integer_root_count(field: str, bad
 
 @pytest.mark.parametrize(
     "field",
-    ["degraded_downgrade_steps", "timing_downgrade_steps", "earnings_window_downgrade_steps"],
+    ["degraded_downgrade_steps", "timing_downgrade_steps"],
 )
 @pytest.mark.parametrize("bad", [-1, True, 0.5])
 def test_policy_rejects_a_negative_or_non_integer_step_count(field: str, bad: object) -> None:
@@ -1073,22 +1073,47 @@ def test_there_is_no_floor_for_the_other_conditions_origin() -> None:
     assert decision.strength is Strength.WATCH
 
 
+def test_a_signal_is_never_softened_below_a_watch() -> None:
+    """現行: 『緩和でHOLDになっても、最低でもWATCH』。タイミング層のあとも同じ。"""
+    for kind in (TriggerKind.PARTIAL_CONDITIONS, TriggerKind.PRICE_UPSIDE_MATRIX):
+        decision = _single(kind, Strength.WATCH, soft=_soft(steps=3, uptrend=True))
+        assert decision.action is ExitAction.HOLD
+        assert decision.strength is Strength.WATCH, kind
+    full = _single(TriggerKind.PARTIAL_CONDITIONS, Strength.FULL, soft=_soft(steps=9, uptrend=True))
+    assert full.strength is Strength.WATCH
+
+
 def test_the_floor_needs_a_raw_partial_or_higher() -> None:
     decision = _single(TriggerKind.PRICE_UPSIDE_MATRIX, Strength.WATCH, soft=_soft(steps=1))
     assert decision.action is ExitAction.HOLD
+    assert decision.strength is Strength.WATCH
 
 
-def test_the_timing_layer_runs_after_the_floor_and_can_lower_below_it() -> None:
-    """現行の順序: 緩和 -> 下限 -> タイミング層。タイミング層の降格は下限より後。"""
+def test_the_final_floor_holds_even_after_the_timing_layer() -> None:
+    """現行: 最終の床は『緩和 + タイミングの合計でも PARTIAL 未満へ落とさない』
+    (タイミング層の後)。"""
     decision = _single(
         TriggerKind.PRICE_UPSIDE_MATRIX, Strength.PARTIAL, soft=_soft(steps=1, uptrend=True)
     )
+    assert decision.action is ExitAction.PARTIAL
+    full = _single(
+        TriggerKind.FAIR_VALUE_STRONG,
+        Strength.FULL,
+        soft=_soft(steps=1, uptrend=True),
+        policy=_policy(timing_downgrade_steps=3),
+    )
+    assert full.action is ExitAction.PARTIAL
+
+
+def test_the_timing_layer_can_lower_an_origin_without_a_floor() -> None:
+    decision = _single(TriggerKind.PARTIAL_CONDITIONS, Strength.PARTIAL, soft=_soft(uptrend=True))
     assert decision.action is ExitAction.HOLD
+    assert decision.strength is Strength.WATCH
 
 
 def test_a_hard_overvalued_position_is_not_lowered_by_the_timing_layer() -> None:
     decision = _single(
-        TriggerKind.PRICE_UPSIDE_MATRIX,
+        TriggerKind.PARTIAL_CONDITIONS,
         Strength.PARTIAL,
         soft=_soft(uptrend=True, hard=True),
     )
@@ -1098,23 +1123,45 @@ def test_a_hard_overvalued_position_is_not_lowered_by_the_timing_layer() -> None
 def test_the_timing_layer_lowers_by_the_policy_steps_only_in_an_uptrend() -> None:
     steps2 = _policy(timing_downgrade_steps=2)
     full = _single(
-        TriggerKind.FAIR_VALUE_STRONG, Strength.FULL, soft=_soft(uptrend=True), policy=steps2
+        TriggerKind.FULL_MODERATE_CONDITIONS,
+        Strength.FULL,
+        soft=_soft(uptrend=True),
+        policy=steps2,
     )
     assert full.strength is Strength.WATCH
-    no_trend = _single(TriggerKind.FAIR_VALUE_STRONG, Strength.FULL, soft=_soft(), policy=steps2)
+    no_trend = _single(
+        TriggerKind.FULL_MODERATE_CONDITIONS, Strength.FULL, soft=_soft(), policy=steps2
+    )
     assert no_trend.action is ExitAction.FULL
+    zero = _single(
+        TriggerKind.FULL_MODERATE_CONDITIONS,
+        Strength.FULL,
+        soft=_soft(uptrend=True),
+        policy=_policy(timing_downgrade_steps=0),
+    )
+    assert zero.action is ExitAction.FULL
 
 
-def test_the_earnings_window_lowers_the_winner() -> None:
-    layers = dataclasses.replace(
+def test_the_arbiter_adds_no_downgrade_of_its_own_for_the_earnings_window() -> None:
+    """決算直前は降格として持たない(現行は E2 の入力側の gate = ceiling の利用可否)。
+    Arbiter が二重に降格しない(現行の売却比率・action を変えない)。"""
+    near = dataclasses.replace(
         _fe1_layers(),
         context=PortfolioContext(
             concentrated=False, trading_unit_feasible=True, earnings_window_near=True
         ),
     )
-    decision = _single(TriggerKind.FAIR_VALUE_STRONG, Strength.FULL, soft=_soft(), layers=layers)
-    assert decision.action is ExitAction.PARTIAL
-    assert SuppressionReason.EARNINGS_WINDOW in {s.reason for s in decision.suppressed}
+    away = _fe1_layers()
+    for kind in (TriggerKind.FAIR_VALUE_STRONG, TriggerKind.PARTIAL_CONDITIONS):
+        a = _single(kind, Strength.FULL, soft=_soft(), layers=near)
+        c = _single(kind, Strength.FULL, soft=_soft(), layers=away)
+        assert (a.action, a.strength, a.trigger_kind) == (c.action, c.strength, c.trigger_kind)
+    assert SuppressionReason.EARNINGS_WINDOW not in {
+        s.reason
+        for s in _single(
+            TriggerKind.FAIR_VALUE_STRONG, Strength.FULL, soft=_soft(), layers=near
+        ).suppressed
+    }
 
 
 def test_the_critical_origin_is_never_softened() -> None:
@@ -1128,10 +1175,7 @@ def test_the_critical_origin_is_never_softened() -> None:
     decision = _single(TriggerKind.FULL_STRONG_CRITICAL, Strength.FULL, soft=soft, layers=layers)
     assert decision.action is ExitAction.FULL
     assert decision.exit_class is ExitClass.RISK_EXIT
-    assert not any(
-        s.reason in (SuppressionReason.MITIGATION, SuppressionReason.EARNINGS_WINDOW)
-        for s in decision.suppressed
-    )
+    assert not any(s.reason is SuppressionReason.MITIGATION for s in decision.suppressed)
 
 
 def test_a_critical_full_still_needs_an_eligible_fe() -> None:
@@ -1166,7 +1210,34 @@ def test_softening_never_runs_before_the_selection() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_heavier_regime_never_gives_a_weaker_decision() -> None:
+def _regime_proposal(
+    state: RegimeState, kind: TriggerKind, policy: ArbiterPolicy | None = None
+) -> CandidateProposal | None:
+    """adapter の役割の最小の再現: regime の強さを claimed_strength にして、現行の経路に対応する
+    TriggerKind で候補を載せる。"""
+    strength = regime_claimed_strength(state, policy or _policy())
+    if strength < Strength.WATCH:
+        return None
+    return _prop(kind, ExitClass.PROFIT_PROTECTION, strength, ExitLayer.L3_PRICE_REGIME)
+
+
+def test_the_arbiter_does_not_create_a_candidate_from_the_regime_by_itself() -> None:
+    """M-1: TriggerKind(= origin)は『現行のどの経路で成立したか』という現行の事実で、
+    adapter が付ける。
+    Arbiter が regime の状態から候補を作ると、現行と違う origin(= 売却比率)になりうる。"""
+    for state in RegimeState:
+        decision = _decide(_inp(layers=_layers(regime=_regime(state))))
+        assert decision.action is ExitAction.HOLD
+        assert decision.strength is Strength.NONE
+        assert decision.trigger_kind is None
+
+
+def test_the_regime_strength_function_is_the_policy_mapping() -> None:
+    policy = _policy()
+    assert {s: regime_claimed_strength(s, policy) for s in RegimeState} == _REGIME
+
+
+def test_a_heavier_regime_never_claims_a_weaker_strength() -> None:
     previous = Strength.NONE
     for state in (
         RegimeState.HEALTHY,
@@ -1174,29 +1245,76 @@ def test_a_heavier_regime_never_gives_a_weaker_decision() -> None:
         RegimeState.DOWNTREND_CONFIRMED,
         RegimeState.BREAKDOWN,
     ):
-        decision = _decide(_inp(layers=_layers(regime=_regime(state))))
-        assert decision.strength >= previous, state
-        previous = decision.strength
-        assert decision.action is not ExitAction.FULL
+        strength = regime_claimed_strength(state, _policy())
+        assert strength >= previous, state
+        previous = strength
+        assert strength < Strength.FULL
 
 
-def test_the_regime_alone_never_gives_full_even_with_an_eligible_fe_elsewhere() -> None:
-    layers = dataclasses.replace(_fe1_layers(), regime=_regime(RegimeState.BREAKDOWN))
-    decision = _decide(_inp(layers=layers))
+@pytest.mark.parametrize("state", [RegimeState.DOWNTREND_CONFIRMED, RegimeState.BREAKDOWN])
+def test_the_regime_alone_never_gives_full_even_with_an_eligible_fe_elsewhere(
+    state: RegimeState,
+) -> None:
+    layers = dataclasses.replace(_fe1_layers(), regime=_regime(state))
+    proposal = _regime_proposal(state, TriggerKind.PROFIT_PROTECTION_STRONG)
+    assert proposal is not None
+    decision = _decide(_inp([proposal], layers=layers))
     assert decision.action is ExitAction.PARTIAL
     assert decision.exit_class is ExitClass.PROFIT_PROTECTION
-    assert decision.trigger_kind is TriggerKind.PROFIT_PROTECTION_STRONG
 
 
-def test_a_healthy_regime_creates_no_candidate_and_an_undetermined_one_none_either() -> None:
-    assert _decide(_inp(layers=_layers(regime=_regime(RegimeState.HEALTHY)))).strength is (
-        Strength.NONE
+def test_a_regime_candidate_filed_as_other_conditions_keeps_the_light_origin() -> None:
+    """現行の PX-4 / PX-5(利益保全 candidate + トレンド等)は OTHER_CONDITIONS の経路。
+    adapter がその TriggerKind で載せる限り、origin は OTHER_CONDITIONS のまま
+    (売却比率が変わらない)。"""
+    proposal = _regime_proposal(RegimeState.BREAKDOWN, TriggerKind.PARTIAL_CONDITIONS)
+    assert proposal is not None
+    decision = _decide(_inp([proposal], layers=_layers(regime=_regime(RegimeState.BREAKDOWN))))
+    assert decision.trigger_kind is TriggerKind.PARTIAL_CONDITIONS
+    assert ORIGIN_OF_TRIGGER[decision.trigger_kind] is Origin.OTHER_CONDITIONS
+
+
+def test_a_profit_protection_strong_candidate_beats_a_regime_candidate_of_the_same_strength() -> (
+    None
+):
+    """M-1 ③: 同じ強さの『利益保全 strong』候補と regime 候補(OTHER_CONDITIONS)が並んだとき、
+    現行と同じく origin の優先順位が高いほうが勝つ。売却比率に効く origin も現行と一致する。"""
+    strong = _prop(
+        TriggerKind.PROFIT_PROTECTION_STRONG,
+        ExitClass.PROFIT_PROTECTION,
+        Strength.PARTIAL,
+        ExitLayer.L3_PRICE_REGIME,
     )
-    assert _decide(_inp(layers=_layers(regime=_regime(None)))).strength is Strength.NONE
+    regime = _regime_proposal(RegimeState.DOWNTREND_CONFIRMED, TriggerKind.PARTIAL_CONDITIONS)
+    assert regime is not None
+    layers = _layers(regime=_regime(RegimeState.DOWNTREND_CONFIRMED))
+    for order in itertools.permutations([strong, regime]):
+        decision = _decide(_inp(order, layers=layers))
+        assert decision.trigger_kind is TriggerKind.PROFIT_PROTECTION_STRONG
+        assert ORIGIN_OF_TRIGGER[decision.trigger_kind] is Origin.PROFIT_PROTECTION_STRONG
+        assert decision.supporting_triggers == (TriggerKind.PARTIAL_CONDITIONS,)
+    # regime 候補だけのときは、現行の OTHER_CONDITIONS の経路のまま
+    alone = _decide(_inp([regime], layers=layers))
+    assert ORIGIN_OF_TRIGGER[alone.trigger_kind] is Origin.OTHER_CONDITIONS  # type: ignore[index]
+
+
+def test_a_healthy_or_undetermined_regime_claims_nothing() -> None:
+    assert regime_claimed_strength(RegimeState.HEALTHY, _policy()) is Strength.NONE
+    assert _regime_proposal(RegimeState.HEALTHY, TriggerKind.PARTIAL_CONDITIONS) is None
+    undetermined = _prop(
+        TriggerKind.PARTIAL_CONDITIONS,
+        ExitClass.PROFIT_PROTECTION,
+        Strength.PARTIAL,
+        ExitLayer.L3_PRICE_REGIME,
+    )
+    decision = _decide(_inp([undetermined], layers=_layers(regime=_regime(None))))
+    assert decision.action is ExitAction.HOLD
 
 
 def test_the_watch_regime_is_a_watch_not_an_action() -> None:
-    decision = _decide(_inp(layers=_layers(regime=_regime(RegimeState.PEAK_WARNING))))
+    proposal = _regime_proposal(RegimeState.PEAK_WARNING, TriggerKind.PARTIAL_CONDITIONS)
+    assert proposal is not None
+    decision = _decide(_inp([proposal], layers=_layers(regime=_regime(RegimeState.PEAK_WARNING))))
     assert decision.action is ExitAction.HOLD
     assert decision.strength is Strength.WATCH
     assert decision.trigger_kind is None

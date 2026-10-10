@@ -13,8 +13,22 @@
     信頼性が使えない入力に依存する候補は作らない・DEGRADED の入力に依存する候補は降格
   4 ★ 勝者の選択 ★: 強さ最大 -> origin の優先順位最大 -> TriggerKind の固定の順序。
     選択に使う強さは (b) の降格の前の値
-  5 ★ 勝者にだけ降格 (b) ★: 緩和要因 -> 下限の保証(origin 別の床)-> タイミング層 -> 決算直前
+  5 ★ 勝者にだけ降格 (b) ★(現行の profit_taking.py と同じ順序): 緩和要因 -> 監視の下限 ->
+    origin 別の床 -> タイミング層 -> 監視の下限 -> origin 別の最終の床。決算直前は降格として
+    持たない(現行は ceiling の利用可否 = E2 の入力側の gate。Arbiter が二重に降格しない)
   6 trace: 選ばれなかった候補・上限・降格を suppressed に理由つきで残す
+
+候補の出所と強さ
+  ・候補(CandidateProposal)は adapter(PR-3)が、現行エンジンのどの経路で成立したかを表す
+    TriggerKind と、その経路が主張する強さ(claimed_strength)で出す。TriggerKind = origin は
+    『現行の事実』であり、Arbiter が層の状態から決めない(売却比率が origin で決まるため、
+    Arbiter が origin を作ると現行の比率が変わりうる)
+  ・regime の状態 -> 強さの写像は policy.regime_strength。regime_claimed_strength() は、adapter が
+    claimed_strength を作るときに使う純粋関数(Arbiter 自身は regime 候補を作らない)
+  ・root 数ベースの強さの算出(M1: 冗長な根拠で強さが増えない・M2・M6)は adapter の契約(PR-3)。
+    Arbiter は主張された強さを受け、資格の上限・選択・降格を決める
+  ・L0 の入力が空(inputs = ())は『上限なし』として進む(現行のエンジンに L0 が無いため)。
+    UNDECIDABLE は『全ての入力グループが UNUSABLE』のときだけ
 
 型が決めること(C0)と Arbiter が決めること
   型  語彙の対応・裏づけの verdict が確定した値であること
@@ -206,8 +220,7 @@ class ArbiterPolicy:
     fe1_min_primary_confirmed_roots        同、一次情報で確認された root の数(どちらかで適格)
     fe1_broken_needs_primary_root          BROKEN の FE-1 に、一次情報で確認された root を要するか
     degraded_downgrade_steps               L0 が DEGRADED の入力に依存する候補の降格の段数
-    timing_downgrade_steps                 タイミング層(上昇トレンド)の降格の段数
-    earnings_window_downgrade_steps        決算直前の降格の段数
+    timing_downgrade_steps                 タイミング層(上昇トレンド)の降格の段数(現行は 1)
     regime_strength                        regime の状態 -> 候補の強さ(単調・FULL を含まない)
     """
 
@@ -216,7 +229,6 @@ class ArbiterPolicy:
     fe1_broken_needs_primary_root: bool
     degraded_downgrade_steps: int
     timing_downgrade_steps: int
-    earnings_window_downgrade_steps: int
     regime_strength: Mapping[RegimeState, Strength]
 
     def __post_init__(self) -> None:
@@ -230,7 +242,6 @@ class ArbiterPolicy:
         for name in (
             "degraded_downgrade_steps",
             "timing_downgrade_steps",
-            "earnings_window_downgrade_steps",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -305,6 +316,7 @@ def collect_evidence(
 ) -> tuple[Evidence, ...]:
     """全ての根拠を集め、同じ事実(event_id があればそれ、無ければ fact_key)を 1 件にする。
 
+    adapter・trace 用の公開関数(arbitrate 自身は検証にだけ使う: _validate_evidence)。
     入力の並び順に依存しない。ユーザー設定の目標の根拠が混ざっていたら拒否する(M14)。
     """
     items: list[Evidence] = [
@@ -317,6 +329,11 @@ def collect_evidence(
         items.extend(proposal.evidence)
     _reject_user_directive(tuple(items))
     return dedupe_evidence(items)
+
+
+def _validate_evidence(layers: LayerVerdicts, proposals: tuple[CandidateProposal, ...]) -> None:
+    """入力の検証だけ(戻りは使わない)。ユーザー設定の目標の根拠が混ざっていたら拒否する。"""
+    collect_evidence(layers, proposals)
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +455,11 @@ def _reliability_by_group(layers: LayerVerdicts) -> dict[str, ReliabilityClass]:
 
 
 def _all_unusable(layers: LayerVerdicts) -> bool:
+    """全ての入力グループが UNUSABLE のときだけ True。入力が空は『上限なし』(False)。
+
+    現行のエンジンに L0 が無いため、L0 の入力が無い(= inputs が空)ことは使えないことを
+    意味しない。
+    """
     inputs = layers.reliability.inputs
     return bool(inputs) and all(i.reliability is ReliabilityClass.UNUSABLE for i in inputs)
 
@@ -474,20 +496,13 @@ def undetermined_layers(layers: LayerVerdicts) -> tuple[ExitLayer, ...]:
 # ---------------------------------------------------------------------------
 
 
-def _regime_proposal(layers: LayerVerdicts, policy: ArbiterPolicy) -> CandidateProposal | None:
-    state = layers.regime.state.value
-    if state is None:
-        return None
-    strength = policy.regime_strength[state]
-    if strength < Strength.WATCH:
-        return None
-    return CandidateProposal(
-        trigger_kind=TriggerKind.PROFIT_PROTECTION_STRONG,
-        exit_class=ExitClass.PROFIT_PROTECTION,
-        claimed_strength=strength,
-        layer=ExitLayer.L3_PRICE_REGIME,
-        evidence=_regime_vote(layers),
-    )
+def regime_claimed_strength(state: RegimeState, policy: ArbiterPolicy) -> Strength:
+    """regime の状態が主張する候補の強さ(policy.regime_strength。単調・FULL を含まない)。
+
+    adapter が claimed_strength を作るときに使う純粋関数。どの TriggerKind(= 現行のどの経路)で
+    候補を出すかは adapter が現行の結果から決める(Arbiter は決めない)。
+    """
+    return policy.regime_strength[state]
 
 
 def build_candidates(
@@ -496,13 +511,9 @@ def build_candidates(
     """資格の上限 (a) を適用して候補を作る。作れなかった・上限で下がったものは trace に残す。"""
     layers, policy = inp.layers, inp.policy
     groups = _reliability_by_group(layers)
-    proposals = list(inp.proposals)
-    regime = _regime_proposal(layers, policy)
-    if regime is not None:
-        proposals.append(regime)
     candidates: list[Candidate] = []
     trace: list[SuppressedCandidate] = []
-    for proposal in proposals:
+    for proposal in inp.proposals:
         claimed = proposal.claimed_strength
         cls = proposal.exit_class
         if not _layer_determined(layers, proposal.layer):
@@ -541,30 +552,38 @@ def select_winner(candidates: tuple[Candidate, ...]) -> Candidate | None:
 def apply_softening(
     winner: Candidate, inp: ArbiterInput
 ) -> tuple[Strength, tuple[SuppressionReason, ...]]:
-    """緩和要因 -> 下限の保証 -> タイミング層 -> 決算直前、の順で勝者にだけ適用する(現行と同じ)。"""
+    """勝者にだけ降格 (b) を適用する。順序は現行の profit_taking.py と同じ。
+
+    現行コードとの対応(evaluate_profit_taking の raw_level 決定のあと)
+      1 緩和要因 = _apply_mitigating_factors(合計の段数だけ下げる。FUNDAMENTAL_CRITICAL_RISK は
+        downgrade_disabled)
+      2 監視の下限 = 『緩和でHOLDになっても、最低でもWATCH』(raw_level > HOLD のとき)
+      3 origin 別の床(1 回目)= PRICE_POSITION / FAIR_VALUE_STRONG / PROFIT_PROTECTION_STRONG で
+        raw が PARTIAL 以上なら PARTIAL 未満にしない(緩和直後の fundamental_level に適用)
+      4 タイミング層 = 上昇トレンドで 1 段降格(FUNDAMENTAL_CRITICAL_RISK と hard_overvalued は除く)
+      5 監視の下限(2 回目)= タイミング層でHOLDに落とさない
+      6 origin 別の最終の床(2 回目)= 緩和 + タイミングの合計でも PARTIAL 未満にしない
+    決算直前は降格として持たない(現行は E2 の入力側の gate = ceiling の利用可否)。
+    """
     if winner.origin in SOFTENING_EXEMPT_ORIGINS:
         return winner.strength, ()
     facts, policy = inp.softening, inp.policy
-    before = winner.strength
-    strength = before
+    raw = winner.strength
+    floor = winner.origin in FLOOR_ORIGINS and raw >= Strength.PARTIAL
     reasons: list[SuppressionReason] = []
-    if facts.mitigation_steps and strength > Strength.NONE:
+    strength = raw
+    if facts.mitigation_steps:
         strength = _down(strength, facts.mitigation_steps)
         reasons.append(SuppressionReason.MITIGATION)
-    if (
-        winner.origin in FLOOR_ORIGINS
-        and before >= Strength.PARTIAL
-        and strength < Strength.PARTIAL
-    ):
-        strength = Strength.PARTIAL
-    timing = facts.uptrend and not facts.hard_overvalued and policy.timing_downgrade_steps
-    if timing and strength > Strength.NONE:
+    strength = max(strength, Strength.WATCH)
+    if floor:
+        strength = max(strength, Strength.PARTIAL)
+    if facts.uptrend and not facts.hard_overvalued and policy.timing_downgrade_steps:
         strength = _down(strength, policy.timing_downgrade_steps)
         reasons.append(SuppressionReason.MITIGATION)
-    earnings = inp.layers.context.earnings_window_near and policy.earnings_window_downgrade_steps
-    if earnings and strength > Strength.NONE:
-        strength = _down(strength, policy.earnings_window_downgrade_steps)
-        reasons.append(SuppressionReason.EARNINGS_WINDOW)
+    strength = max(strength, Strength.WATCH)
+    if floor:
+        strength = max(strength, Strength.PARTIAL)
     return strength, tuple(reasons)
 
 
@@ -602,8 +621,9 @@ def arbitrate(inp: ArbiterInput) -> Determination[Decision]:
         return Determination.undetermined(
             UndeterminedReason.RELIABILITY_UNUSABLE, "L0 が全体として使えないため決められない"
         )
-    # 検証(ユーザー目標の根拠を拒否)と重複排除。FE の適格判定は層ごとの根拠から行う
-    collect_evidence(layers, inp.proposals)
+    # 検証だけ(ユーザー目標の根拠を拒否)。重複排除の結果は使わない: FE の適格判定は層ごとの
+    # 根拠(層の verdict の evidence)から行い、強さは adapter が主張した値を受ける
+    _validate_evidence(layers, inp.proposals)
     full_evidence = eligible_full_evidence(layers, policy)
     candidates, trace = build_candidates(inp, full_evidence)
     winner = select_winner(candidates)
@@ -710,6 +730,7 @@ __all__ = [
     "build_candidates",
     "collect_evidence",
     "eligible_full_evidence",
+    "regime_claimed_strength",
     "select_winner",
     "undetermined_layers",
 ]
