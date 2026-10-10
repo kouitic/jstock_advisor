@@ -44,6 +44,7 @@ from jstock_advisor.domain.exit_architecture.vocabulary import (
     Strength,
     SuppressionReason,
     ThesisState,
+    TriggerKind,
 )
 
 #: FULL の独立根拠に使えない root(価格由来・ユーザー目標・データ品質・時機・集中)
@@ -159,12 +160,35 @@ class Decision:
     suppressed: tuple[SuppressedCandidate, ...] = ()
     review_flag: ReviewFlag = ReviewFlag.NONE
     hold_optimal: bool = False
+    # UJ-15: 『RISK_EXIT の候補 + review_flag』を、action と別の軸で表す(review_flag は売却の推奨
+    # ではなく、人の確認を要することを表す)。review_class を持つなら review_flag != NONE が要る。
+    # 逆(review_flag だけ)は既存の構築経路〔C0〕のために許し、Arbiter は常に両方を設定する
+    # (P-4。additive)
+    review_class: ExitClass | None = None
+    # HOLD の根拠が確定(hold_optimal)か不明かを区別する。評価できなかった層の一覧。空でない間は
+    # hold_optimal = True にならない(不明は HOLD_OPTIMAL ではない)(P-4。additive)
+    undetermined_layers: tuple[ExitLayer, ...] = ()
+    # 勝った候補の種別(HOLD のとき None)。N5 が成立経路〔origin〕へ戻すために使う。
+    # supporting_triggers = 同じ強さに達した、勝たなかった種別(表示・trace 用。
+    # 強さの算出には使わない)(P-5。additive)
+    trigger_kind: TriggerKind | None = None
+    supporting_triggers: tuple[TriggerKind, ...] = ()
 
     def __post_init__(self) -> None:
         if (self.action is ExitAction.HOLD) != (self.exit_class is ExitClass.NONE):
             raise ContractViolationError("HOLD と class NONE は同値(HOLD_OPTIMAL)")
         if self.hold_optimal and self.action is not ExitAction.HOLD:
             raise ContractViolationError("hold_optimal は HOLD のときだけ")
+        if self.hold_optimal and self.undetermined_layers:
+            raise ContractViolationError("評価できなかった層がある間は hold_optimal にならない")
+        if self.review_class is not None and self.review_flag is ReviewFlag.NONE:
+            raise ContractViolationError("review_class を持つには review_flag が要る")
+        if self.action is ExitAction.HOLD and (self.trigger_kind or self.supporting_triggers):
+            raise ContractViolationError("HOLD には勝った候補の種別がない")
+        if self.supporting_triggers and self.trigger_kind is None:
+            raise ContractViolationError("supporting_triggers は trigger_kind とともに持つ")
+        if self.trigger_kind in self.supporting_triggers:
+            raise ContractViolationError("勝った種別を supporting_triggers に重ねて持たない")
         if self.action is ExitAction.HOLD and self.strength > Strength.WATCH:
             raise ContractViolationError("HOLD の strength は WATCH 以下")
         if self.action is ExitAction.PARTIAL and self.strength is not Strength.PARTIAL:

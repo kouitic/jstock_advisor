@@ -149,6 +149,7 @@ _VOCABULARY: dict[type, set[str]] = {
         "NO_FULL_EVIDENCE",
         "EARNINGS_WINDOW",
         "MITIGATION",
+        "TIMING_LAYER",
         "UNDETERMINED_INPUT",
         "DUPLICATE_EVIDENCE",
         "SUPERSEDED_BY_STRONGER",

@@ -93,6 +93,9 @@ class ExpectedReturnVerdict:
     valuation_exhaustion: Determination[bool]
     severely_low: Determination[bool]
     reliability: ReliabilityClass
+    # この verdict を支える根拠(FE-2 の FullEvidence の材料)。既定 () = 根拠なし
+    # (Issue #878 PR-2 の P-2。additive)
+    evidence: tuple[Evidence, ...] = ()
 
     def __post_init__(self) -> None:
         names = [c.component for c in self.components]
@@ -124,6 +127,8 @@ class RotationVerdict:
     """L4(機会費用)。未実装の間は UNDETERMINED。"""
 
     gap_clear: Determination[bool]
+    # この verdict を支える根拠(FE-3 の FullEvidence の材料)。既定 () = 根拠なし(P-2。additive)
+    evidence: tuple[Evidence, ...] = ()
 
 
 @dataclass(frozen=True)
