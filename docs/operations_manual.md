@@ -45,7 +45,7 @@ Copy-Item .env.example .env
 
 | 変数 | 用途 | 未設定時の挙動 |
 |---|---|---|
-| `LINE_CHANNEL_ACCESS_TOKEN` / `LINE_USER_ID` | LINE通知の送信 | 標準出力へのドライラン表示のみ(送信されない) |
+| `LINE_CHANNEL_ACCESS_TOKEN` / `LINE_USER_ID` | LINE通知の送信 | 標準出力へのドライラン表示のみ(送信されない)。ただし `jstock watchlist-screening` の `run` / `retry-finalize` / `retry-stock` / `retry-notification` は、標準出力へ切り替えず、送信が必要な場面で失敗する(4.1節。Issue #434) |
 | `EDINET_API_KEY` | 配当クロスバリデーション・適時開示(臨時報告書)の取得 | EDINET由来のデータが常に取得不可扱いになる |
 
 ### 2.3 設定ファイル(config/\*.yaml)
@@ -223,6 +223,22 @@ CLIでの手動実行・dry-run確認方法は変更ありません。
 jstock watchlist-screening run --dry-run   # 登録・通知・監査ログ記録を一切行わず結果のみ表示
 jstock watchlist-screening run             # 実際にウォッチリストへ登録・LINE通知
 ```
+
+**LINE認証情報が無い環境で実行したとき(2026-10-10追加。Issue #434)**: `jstock watchlist-screening` の `run` / `retry-finalize` / `retry-stock` / `retry-notification` は、
+`.env` 等から `LINE_CHANNEL_ACCESS_TOKEN` / `LINE_USER_ID` を読めない環境でも、標準出力へのドライラン表示(送信されない)へ黙って切り替えません。
+**送信が必要な場面でだけ失敗し、「送信しました」とは表示も記録もされません**。2.2節の「未設定時は標準出力へのドライラン表示のみ」は、この4コマンドには当てはまりません
+(`jstock analyze ... --notify` など他のコマンドの挙動は変わりません)。
+
+| コマンド | 認証情報が無いとき | 終了コード | バッチの状態 |
+|---|---|---|---|
+| `run`(`--dry-run` を除く) | 追加された銘柄があり、通知が有効なときだけ送信を試み、「LINE通知を送信していません(LINE認証情報が無いため)。」と表示する。ウォッチリストへの追加は確定・保持される。最後に「LINE通知: 送信していません」と表示する | 1 | `run` はバッチの状態を更新しない |
+| `retry-finalize` | finalizeは実行する。通知が不要なら通常どおり成功する。通知を送る段で失敗した場合は、「finalizeは実行しましたが、LINE通知は送信していません(LINE認証情報が無いため)。」と表示し、認証情報のある環境で `retry-notification` を実行するよう案内する | 通知を送る段で失敗: 1 / それ以外: 0 | 通知を送る段で失敗した場合は `NOTIFICATION_FAILED` |
+| `retry-stock` | 1銘柄の再評価の後、それが最後の未完了行だった場合に実行されるfinalizeで、`retry-finalize` と同じ | 通知を送る段で失敗: 1 / それ以外: 0 | 同上 |
+| `retry-notification` | 送信が唯一の目的のため、状態を変える前に失敗する。「LINE認証情報が無いため、通知を再試行できません(バッチの状態は変更していません)。」と表示する | 1 | 変更しない |
+
+- 通知の再試行(`retry-notification`)は、**認証情報のある環境で**実行してください(Issue #434 / PR #863 の実装による実行条件。23節の「手動の retry-notification が必要になる」契約〔USER承認済み。#117 issuecomment-5740407445〕を実際に実行するときの前提です。認証情報が読めない環境では、状態を変えずに終了します)。
+- `run` で送れなかった通知は、`retry-notification` では再送できません(`retry-notification` の対象は `NOTIFICATION_FAILED` のバッチだけで、`run` はバッチの状態を更新しないため)。この CLI には、`run` で送れなかった通知の再送手段はありません(`run` を再実行しても、追加済みの銘柄は除外されます)。
+- これらは Production の状態を更新する手動コマンドです。実行の可否は27.5節(Human Gate)に従います。
 
 **バッチの状態遷移**: DynamoDBの`jstock-batch_runs`テーブルの`status`属性で
 確認できます。
@@ -2907,6 +2923,15 @@ WeeklyReviewFunctionへの追加を検討中)。
 (1) WatchlistTerminalFailureDLQのメッセージ滞留監視 (2) LINE関連LambdaのErrors監視 (3) 「Errorsが止まった=復旧」とは限らない点。
 **最新の状態は29節・#132の最新の記録を読むこと**(この節へ焼き込まない)。
 
+★ **2026-10-11更新**(Issue #188の点検。infra/template.yamlの実読): 上の「DLQの滞留Alarmは
+依然として存在しない」「Duration alarmはEvaluationFunctionのみ」は2026-09-24時点の記述で、現在は
+異なる。DLQの滞留Alarm 4本(WatchlistTerminalFailure / AsyncInvokeFailure /
+BuyCandidateTerminalFailure / HoldingsWatchlistTerminalFailure。Issue #349)が接続済みで、
+Duration alarmはEvaluationFunctionとWeeklyReviewFunctionの2本、Errors alarmはIncidentNotifier
+Functionを含む13本である。Alarmは合計19本で、すべてTreatMissingData = notBreaching・AlarmActions
+接続済み。per-item例外を握る6関数の内部異常がErrors alarmだけでは検知できない点は、この更新では
+確認していない(#132の最新の記録を読むこと)。
+
 ### 23.3 DLQ redrive(障害時の候補案。★未検証。正式な復旧手順ではない)
 
 ```
@@ -2915,7 +2940,7 @@ REDRIVE_VERIFIED = NO
 
 ★ **この節は、正式な復旧手順ではない。** 検証(下記の6項目)を経るまでは「障害時の候補案」としてのみ扱う。
 なお、通知だけが欠落した場合(NOTIFICATION_FAILED)は、credential復旧前に既存のretry上限へ達すると
-自動通知されず、手動の retry-notification が必要になる(USER承認済みの契約。#117 issuecomment-5740407445)。
+自動通知されず、手動の retry-notification が必要になる(USER承認済みの契約。#117 issuecomment-5740407445)。手動の retry-notification は認証情報のある環境で実行する(認証情報が無いと、状態を変えずに終了コード1で終了する。4.1節。Issue #434)。
 
 worker・terminal_failureの連鎖(#430)でDLQに溜まったメッセージについて、認証情報を直した後にWatchlistScreeningQueueへ
 戻す(SQSのDLQ redrive。移動先を指定する)ことで、dispatchから24時間以内でバッチがRUNNINGのままなら、workerが再評価して
@@ -3210,6 +3235,10 @@ jstock judgment-safety-shadow report --source dynamodb         # Production(read
   AlarmActions(IncidentNotificationTopic経由のLINE通知)が接続され、上記「どちらもAlarmActions
   が空」は解消済み。DLQの滞留Alarmは依然として無い(未解消のまま)。per-item例外を握る6関数の
   内部異常はErrors alarmだけでは検知できない点も未解消(#506/#507が担当)。
+  ★ **2026-10-11更新**: DLQの滞留Alarm 4本が接続済み(#349)で、上の「DLQの滞留Alarmは依然として
+  無い」は解消済み。Alarmは合計19本(23〜24節の2026-10-11更新・27.3.2を参照)。全Alarmが
+  TreatMissingData = notBreachingのため、動くはずの日に関数が起動しなかった場合(missed schedule)は
+  Alarmでは検知されない(27.3.1の読み方)。
 ・したがって「通知が来ない = 正常」ではない。24.1 と同じく、**見に行かなければ気づかない**異常がある。
 ・通知が入った後も、対象外がある。秘密の取得失敗(SECRET_UNAVAILABLE)は LINE では知らせない方針(Issue #117)。
   監視の対象は段階的に広がる(Lambda は 12 本あり、最初から全てではない)。
@@ -3275,7 +3304,7 @@ aws cloudwatch get-metric-statistics --namespace AWS/Lambda --metric-name Errors
 #### 27.3.2 Alarm の状態は、観測用 role では読めない
 
 - 観測用 role では、CloudWatch Alarm の状態(`DescribeAlarms`)を読めない(AccessDenied を 2026-09-21 に実測。**権限を広げて回避しない**)。
-- Alarm の定義(どの関数のどの値を見ているか)は `infra/template.yaml` で確認する。現在の Alarm は evaluation Lambda の 2 本だけである(27.1)。Alarm が鳴っていないことは「他の関数も正常」を意味しない。
+- Alarm の定義(どの関数のどの値を見ているか)は `infra/template.yaml` で確認する。現在の Alarm は 19 本である(Lambda の Errors 13・Duration 2・DLQ の滞留 4。2026-10-11 に template を実読。27.1)。すべて TreatMissingData = notBreaching のため、データ点が無い期間(関数が起動しなかった日)は OK のままで、Alarm では検知されない(27.3.1)。Alarm が鳴っていないことは「他の関数も正常」を意味しない。
 - Alarm の状態を確認する必要があるときは、確認できる人(AWS の画面を見られる権限を持つ人)へ依頼する。
 
 #### 27.3.3 ログを読む(認証情報の欠落の件数)
