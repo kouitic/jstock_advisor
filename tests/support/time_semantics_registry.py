@@ -251,6 +251,25 @@ _REGISTRY: tuple[_Entry, ...] = (
         cohort="SOLO:watchlist_screening_cli_universe_age",
         wall_clock_policy=_FORBIDDEN,
     ),
+    # Issue #890 PR-3: 保有判断の通知の再送判断(_notification_status_for_send)の
+    # 保有判断の分岐。T3 = 既存のJST暦日差(>= resend_after_days)を periodic_due として
+    # 判断に渡すconsumer(経過日数の計算そのものは変えていない)。T4 = 固定clock(_NOW =
+    # 2026-09-09 08:00 UTC)と、そこからの経過日数N-1/N/N+1の期待値を新規に導入した
+    # (PR #899 の独立reviewでT4該当と指摘された。先例 #873 / #373)。可変のmodule-level
+    # stateを持たないため、cohortの相手はいない(SOLO)。characterizationのmoduleは
+    # 固定clockの定義元、wiringのmoduleはそれをimportして日数を振る。
+    _Entry(
+        module="tests/unit/test_hd_renotification_wiring_characterization.py",
+        triggers=("T3", "T4"),
+        cohort="SOLO:hd_renotification_wiring_characterization",
+        wall_clock_policy=_FORBIDDEN,
+    ),
+    _Entry(
+        module="tests/unit/test_hd_renotification_wiring.py",
+        triggers=("T3", "T4"),
+        cohort="SOLO:hd_renotification_wiring",
+        wall_clock_policy=_FORBIDDEN,
+    ),
 )
 
 # V8: registry から静かに削除して guard を無効化する経路を塞ぐ。
