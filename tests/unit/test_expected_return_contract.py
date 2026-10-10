@@ -31,6 +31,7 @@ from pathlib import Path
 
 import pytest
 
+from jstock_advisor.domain.entities.enums import ConfidenceLevel
 from jstock_advisor.domain.entities.valuation import FairValueUnusableReasonCode
 from jstock_advisor.domain.price_freshness import PriceFreshnessVerdict
 from jstock_advisor.domain.valuation import expected_return as er
@@ -85,9 +86,13 @@ def fv(
     *,
     usable: bool = True,
     code: FairValueUnusableReasonCode | None = None,
+    confidence: ConfidenceLevel | None = None,
 ) -> FairValueInput:
     return FairValueInput(
-        neutral=neutral, usable_for_trading_judgment=usable, unusable_reason_code=code
+        neutral=neutral,
+        usable_for_trading_judgment=usable,
+        unusable_reason_code=code,
+        confidence=confidence,
     )
 
 
@@ -444,3 +449,37 @@ def test_only_the_allowed_modules_import_expected_return() -> None:
         if "valuation.expected_return" in text or "valuation import expected_return" in text:
             importers.add(path.relative_to(_SRC / "jstock_advisor").as_posix())
     assert importers <= allowed, importers
+
+
+def test_a_usable_fair_value_with_low_confidence_keeps_the_value_and_records_the_confidence() -> (
+    None
+):
+    """USER 決定 D-601-5: usable なら LOW でも値と信頼度を記録する。信頼度では値を変えない。"""
+    results = {
+        level: compute_expected_return(
+            evaluation_date=date(2026, 1, 5),
+            current_price=Decimal("100"),
+            price_freshness=_NORMAL,
+            fair_value=fv(Decimal("150"), confidence=level),
+            income=IncomeInput(2.0, None, _NO),
+        )
+        for level in ConfidenceLevel
+    }
+    for result in results.values():
+        assert result.upside.value == pytest.approx(50.0)  # 信頼度で UPSIDE を調整しない
+    for level, result in results.items():
+        assert result.fair_value_confidence is level
+    unknown = compute_expected_return(
+        evaluation_date=date(2026, 1, 5),
+        current_price=Decimal("100"),
+        price_freshness=_NORMAL,
+        fair_value=fv(Decimal("150")),
+        income=IncomeInput(2.0, None, _NO),
+    )
+    assert unknown.fair_value_confidence is None
+
+
+def test_a_fair_value_that_is_not_usable_is_unavailable_even_when_the_confidence_is_high() -> None:
+    result = upside(Decimal("100"), Decimal("150"), usable=False)
+    assert result.value is None
+    assert result.reasons == (ReasonCode.FAIR_VALUE_NOT_USABLE,)

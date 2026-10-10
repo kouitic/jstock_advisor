@@ -35,6 +35,7 @@ from datetime import date
 from decimal import Decimal
 from enum import StrEnum
 
+from jstock_advisor.domain.entities.enums import ConfidenceLevel
 from jstock_advisor.domain.entities.valuation import FairValueUnusableReasonCode
 from jstock_advisor.domain.price_freshness import PriceFreshnessVerdict
 from jstock_advisor.domain.valuation.yield_calc import BenefitProgramState, compute_total_yield_pct
@@ -62,8 +63,9 @@ class Note(StrEnum):
 
     PRICE_FRESHNESS_WARNING = "PRICE_FRESHNESS_WARNING"  # 価格が 1 取引セッション前(判定は継続)
     BENEFIT_NO_PROGRAM_OR_UNREGISTERED = "BENEFIT_NO_PROGRAM_OR_UNREGISTERED"
-    # 優待は『制度なし(未登録を含む)』として寄与 0 で確定している(既存の契約。登録は少数のため、
-    # 非保有銘柄の INCOME は配当のみの下限値になりうる)
+    # 優待は『制度なし(未登録を含む)』として寄与 0 で確定している(既存の NO_PROGRAM 契約の再利用。
+    # USER 決定 D-601-4)。**未登録を制度が存在しない確証にしない**: 登録は少数のため、非保有銘柄の
+    # INCOME は配当のみの下限値になりうる。この注記が付いた INCOME は、その事実を区別して扱うこと
 
 
 @dataclass(frozen=True)
@@ -94,6 +96,9 @@ class FairValueInput:
     neutral: Decimal | None
     usable_for_trading_judgment: bool
     unusable_reason_code: FairValueUnusableReasonCode | None = None
+    # Fair Value の信頼度。**記録するだけ**で、UPSIDE の値は変えない(信頼度による調整は
+    # #602 の RAER)。USER 決定 D-601-5: usable なら信頼度 LOW でも値と信頼度を記録する
+    confidence: ConfidenceLevel | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +122,7 @@ class ExpectedReturnResult:
     composite: ComponentResult
     annualized: ComponentResult
     notes: tuple[Note, ...] = ()
+    fair_value_confidence: ConfidenceLevel | None = None
 
     @property
     def unavailable_reasons(self) -> tuple[ReasonCode, ...]:
@@ -224,4 +230,5 @@ def compute_expected_return(
         composite=ComponentResult(reasons=(ReasonCode.COMPOSITION_RULE_NOT_DECIDED,)),
         annualized=ComponentResult(reasons=(ReasonCode.HORIZON_NOT_ESTIMATED,)),
         notes=tuple(notes),
+        fair_value_confidence=fair_value.confidence,
     )
