@@ -839,6 +839,7 @@ _ALLOWED_IMPORT_ROOTS = {
     "__future__",
     "dataclasses",
     "enum",
+    "math",
     "typing",
     "collections",
     "jstock_advisor",
