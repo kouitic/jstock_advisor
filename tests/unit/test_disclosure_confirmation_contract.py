@@ -730,6 +730,17 @@ def test_sentence_boundary_expectations(summary: str, expected: dc.AccountingLev
     assert _acc(_d("不適切な会計処理", summary)).level is expected
 
 
+def test_known_limit_restatement_split_across_two_sentences_is_detected_only() -> None:
+    """KNOWN_LIMIT(見逃し方向): 『過年度の訂正』と『誤りの理由』が別の文にあると、決算訂正の限定
+    (同じ文に過年度・訂正・誤りが揃う)を満たさず、確認要止まりになる(検出は残る)。同じ内容を
+    1 文で書けば A になる。限定を開示単位へ広げるかは PR review での判断(USER)。"""
+    risk = "不適切な会計処理"
+    split = "過年度の決算を訂正します。会計処理の誤りによるものです"
+    one_sentence = "過年度の決算を、会計処理の誤りにより訂正します"
+    assert _acc(_d(risk, split)).level is ACC_DETECTED
+    assert _acc(_d(risk, one_sentence)).level is SERIOUS
+
+
 def test_two_stage_negation_in_a_comma_joined_sentence_is_a_known_limit() -> None:
     """KNOWN_LIMIT: 読点で繋いだ 1 文の中に否定と確定が同居すると、その文の出現は数えない
     (格上げしない側)。"""
