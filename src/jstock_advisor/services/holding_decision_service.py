@@ -39,6 +39,10 @@ from jstock_advisor.domain.signals.company_quality_scoring import (
     CompanyQualityInputs,
     score_company_quality,
 )
+from jstock_advisor.domain.signals.holding_decision_gate_confirmation import (
+    classify_gate_confirmations,
+    disclosure_levels,
+)
 from jstock_advisor.domain.signals.holding_decision_hard_gate import (
     HardGateInputs,
     evaluate_hard_gate,
@@ -121,6 +125,11 @@ class HoldingDecisionEvaluationOutcome:
     result: HoldingDecisionResult | None
     data_error: str | None = None
     integrity_error: bool = False
+    # Issue #890 PR-2: 発動した hard gate の理由コードごとの確認状態(GateConfirmation の値)。
+    # 再通知条件 R3 の前回/今回の比較に使う付属情報で、保存される評価結果
+    # (HoldingDecisionResult)の形は変えない。評価の根拠(既に求めた値)から導くだけで、
+    # 新しいデータ取得はしない。hard gate が発動していなければ空。
+    gate_confirmations: tuple[tuple[str, str], ...] = ()
 
 
 class HoldingDecisionService:
@@ -380,6 +389,13 @@ class HoldingDecisionService:
             )
         )
 
+        # Issue #890 PR-2: 発動した理由コードごとの確認状態。開示キーワード由来の 3 つは、評価の
+        # 根拠(SellRuleEvaluation.current_value)に載る確認の段階から導く。hard gate の発動の
+        # 条件そのものは変えない(上の evaluate_hard_gate の入力は無変更)。
+        gate_confirmations = classify_gate_confirmations(
+            hard_gate.reason_codes, disclosure_levels(sell_rule_inputs.evaluations)
+        )
+
         # Issue #468(U17): 財務データが報告サイクル上の最新でない(STALE)場合、confidenceに
         # HIGHを許可しない(上限MEDIUM)。判定は SELL / 利確と同じ共通部品
         # (assess_financial_freshness。同じ猶予日数・同じ入力・同じ監査項目)を使い、
@@ -468,4 +484,6 @@ class HoldingDecisionService:
             timestamp=now,
         )
 
-        return HoldingDecisionEvaluationOutcome(holding.stock_code, result)
+        return HoldingDecisionEvaluationOutcome(
+            holding.stock_code, result, gate_confirmations=gate_confirmations
+        )
