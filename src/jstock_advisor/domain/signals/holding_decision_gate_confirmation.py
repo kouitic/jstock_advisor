@@ -10,8 +10,12 @@
       なら CONFIRMED、『キーワード一致のみ(RISK_KEYWORD_DETECTED)』なら KEYWORD_ONLY。
       段階が読めない(根拠が無い・未知の値)ときも KEYWORD_ONLY(キーワード一致だけで『確認済み』に
       しない: USER 指定)
-  DEBT_EXCESS / GOING_CONCERN_DOUBT / DIVIDEND_OMISSION_AND_CASHFLOW_CRISIS
-      財務・一次情報の旗に基づく(発動の時点で確認済み)ため CONFIRMED
+  DEBT_EXCESS / DIVIDEND_OMISSION_AND_CASHFLOW_CRISIS
+      評価の根拠が一次情報の確認(primary_source_confirmed)を要件にして発動するため CONFIRMED
+  GOING_CONCERN_DOUBT
+      財務データの判定フラグ(FinancialSummary.is_going_concern_doubt)をそのまま入力にしており、
+      一次情報の確認を経ていない(現行の無料 provider は判定不可として常に False)。出所が
+      確認できない旗として UNVERIFIED(数えない側)
   INVESTMENT_THESIS_COLLAPSE
       人が承認した baseline と投資ストーリーの点による(外部の証拠ではない)ため BASELINE_CONFIRMED
   上記にない理由コード
@@ -60,10 +64,12 @@ def disclosure_levels(evaluations: Mapping[str, Any]) -> dict[str, str | None]:
     return levels
 
 
-_CONFIRMED_BY_FLAG = frozenset(
-    {"DEBT_EXCESS", "GOING_CONCERN_DOUBT", "DIVIDEND_OMISSION_AND_CASHFLOW_CRISIS"}
+CONFIRMED_BY_PRIMARY_SOURCE_CODES = frozenset(
+    {"DEBT_EXCESS", "DIVIDEND_OMISSION_AND_CASHFLOW_CRISIS"}
 )
-_BASELINE_CONFIRMED = frozenset({"INVESTMENT_THESIS_COLLAPSE"})
+BASELINE_CONFIRMED_CODES = frozenset({"INVESTMENT_THESIS_COLLAPSE"})
+#: 一次情報の確認を経ない旗(出所が確認できない)。明示の規則として UNVERIFIED にする。
+UNVERIFIED_FLAG_CODES = frozenset({"GOING_CONCERN_DOUBT"})
 
 
 def classify_gate_confirmations(
@@ -84,9 +90,9 @@ def classify_gate_confirmations(
                 if level == MATERIAL_EVENT_CONFIRMED
                 else GateConfirmation.KEYWORD_ONLY
             )
-        elif code in _CONFIRMED_BY_FLAG:
+        elif code in CONFIRMED_BY_PRIMARY_SOURCE_CODES:
             confirmation = GateConfirmation.CONFIRMED
-        elif code in _BASELINE_CONFIRMED:
+        elif code in BASELINE_CONFIRMED_CODES:
             confirmation = GateConfirmation.BASELINE_CONFIRMED
         else:
             confirmation = GateConfirmation.UNVERIFIED

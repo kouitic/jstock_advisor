@@ -120,7 +120,8 @@ def test_unreadable_confirmation_level_falls_to_keyword_only(code: str, level: o
     ("code", "expected"),
     [
         ("DEBT_EXCESS", GateConfirmation.CONFIRMED),
-        ("GOING_CONCERN_DOUBT", GateConfirmation.CONFIRMED),
+        # 財務データの判定フラグをそのまま入力にしており、一次情報の確認を経ない旗
+        ("GOING_CONCERN_DOUBT", GateConfirmation.UNVERIFIED),
         ("DIVIDEND_OMISSION_AND_CASHFLOW_CRISIS", GateConfirmation.CONFIRMED),
         ("INVESTMENT_THESIS_COLLAPSE", GateConfirmation.BASELINE_CONFIRMED),
         ("A_CODE_NOBODY_KNOWS", GateConfirmation.UNVERIFIED),
@@ -142,12 +143,16 @@ def test_classification_is_sorted_deduplicated_and_deterministic() -> None:
 
 
 def test_every_hard_gate_reason_code_is_classified() -> None:
-    """hard gate が付けうる全ての理由コードに、明示の規則がある(UNVERIFIED に落ちない)。"""
+    """hard gate が付けうる全ての理由コードに、明示の規則がある(未知として落ちない)。"""
     from jstock_advisor.domain.signals.holding_decision_hard_gate import _REASON_LABELS
 
-    for code in _REASON_LABELS:
-        ((_, confirmation),) = classify_gate_confirmations([code], {})
-        assert confirmation != GateConfirmation.UNVERIFIED.value, code
+    explicit = (
+        set(gate_module.DISCLOSURE_RULE_BY_REASON_CODE)
+        | gate_module.CONFIRMED_BY_PRIMARY_SOURCE_CODES
+        | gate_module.BASELINE_CONFIRMED_CODES
+        | gate_module.UNVERIFIED_FLAG_CODES
+    )
+    assert set(_REASON_LABELS) == explicit
 
 
 def test_no_codes_means_no_confirmations() -> None:
