@@ -957,3 +957,9 @@ def test_the_module_is_not_imported_from_anywhere_in_src() -> None:
         if path == _MODULE_PATH:
             continue
         assert "today_actions_cli_renderer" not in path.read_text(encoding="utf-8"), str(path)
+
+
+def test_skipped_candidates_are_not_counted_as_purchase_proposals() -> None:
+    view = build(allocation=allocated(buy("0002"), buy("0003", tv.BuyFinalAction.SKIP)))
+    (line,) = conclusion(r.render_today_actions_table(view))
+    assert line == "本日の結論: 提案あり（売却0件・資金入替0件・購入1件）"
