@@ -5670,8 +5670,10 @@ shadow の記録は追記のみで削除しない。表・IAM は、既存の戻
 `tests/unit/test_issue_606_production_connection_gate.py` が、次をコード上で固定する(PR のたびに全走査):
 
 ```
-・有効化の経路の集合が増えていない: #128 の設定型・実行計画を作る/読む src は定義するモジュールの外に無い / 環境変数・template・config に
-  #128 の機能の有効化の入口が無い / 出荷 config は OFF / 購入側 Shadow の mode に ACTIVE が無い
+・有効化の経路の集合が増えていない: #128 の設定型・実行計画を作る/読む src は定義するモジュールの外に無い / src が読む環境変数の名前
+  (literal・module 定数・dict・helper の引数を解決した全件)と、template の Parameter・Lambda の環境変数の名前が、既知の一覧から増えていない
+  (新しい名前が現れたらテストが落ちて、人が確認する。名前の語には頼らない)/ config に #128 の機能の入口が無い / 出荷 config は OFF /
+  購入側 Shadow の mode に ACTIVE が無い。★名前を解決できない読取や、分類できない `os.environ` の使い方が現れた場合も落ちる★
 ・Production(Lambda handler・CLI を根とする import 連鎖の推移閉包)から、Expected Return・RAER・配分・入替・#605 の表示・Exit 統合の module に
   到達しない(到達できるのは、出荷 OFF の購入側 Shadow の枠だけ)
 ・本節が存在し、各段の入口・出口・記録・停止条件、USER の明示的な承認、戻し方、決めていないことを含み、閾値・期間の数値を書かないこと
