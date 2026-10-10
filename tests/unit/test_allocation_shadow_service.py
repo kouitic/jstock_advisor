@@ -49,7 +49,7 @@ from jstock_advisor.services.allocation_shadow_service import (
     ShadowOutcome,
     ShadowResult,
     ShadowRun,
-    SkipReason,
+    ShadowSkipReason,
     call_with_timeout,
     compute_not_implemented,
     observe_allocation_shadow,
@@ -227,7 +227,7 @@ def test_default_compute_records_not_implemented() -> None:
     }
     assert compute_not_implemented(
         ShadowRun(_BATCH, DEFAULT_OWNER, Deadline(30.0, _Clock()), 5.0)
-    ) == ShadowResult(ShadowOutcome.SKIPPED, SkipReason.COMPUTE_NOT_IMPLEMENTED)
+    ) == ShadowResult(ShadowOutcome.SKIPPED, ShadowSkipReason.COMPUTE_NOT_IMPLEMENTED)
 
 
 def test_audit_ids_are_deterministic_separate_for_result_and_skip_and_hide_the_owner() -> None:
@@ -595,7 +595,7 @@ def test_cash_read_none_is_not_registered_not_zero() -> None:
 
     assert result.status is CashReadStatus.NOT_REGISTERED
     assert result.amount is None
-    assert result.as_skip_reason() is SkipReason.CASH_NOT_REGISTERED
+    assert result.as_skip_reason() is ShadowSkipReason.CASH_NOT_REGISTERED
 
 
 def _client_error(code: str) -> ClientError:
@@ -610,7 +610,7 @@ def test_cash_read_access_denied_is_iam_missing(code: str) -> None:
     result = read_available_cash(DEFAULT_OWNER, timeout_seconds=1.0, get=get)
 
     assert result.status is CashReadStatus.IAM_MISSING
-    assert result.as_skip_reason() is SkipReason.IAM_MISSING
+    assert result.as_skip_reason() is ShadowSkipReason.IAM_MISSING
 
 
 def test_cash_read_other_errors_are_classified_without_raising() -> None:
@@ -623,7 +623,7 @@ def test_cash_read_other_errors_are_classified_without_raising() -> None:
     for getter in (throttled, broken):
         result = read_available_cash(DEFAULT_OWNER, timeout_seconds=1.0, get=getter)
         assert result.status is CashReadStatus.ERROR
-        assert result.as_skip_reason() is SkipReason.COMPUTATION_FAILED
+        assert result.as_skip_reason() is ShadowSkipReason.COMPUTATION_FAILED
 
 
 def test_cash_read_timeout_is_classified() -> None:
@@ -636,7 +636,7 @@ def test_cash_read_timeout_is_classified() -> None:
         release.set()
 
     assert result.status is CashReadStatus.TIMEOUT
-    assert result.as_skip_reason() is SkipReason.TIME_LIMIT
+    assert result.as_skip_reason() is ShadowSkipReason.TIME_LIMIT
 
 
 def test_run_cash_read_waits_for_the_smaller_of_io_limit_and_remaining_deadline() -> None:
@@ -672,7 +672,7 @@ def test_shadow_result_requires_a_reason_unless_computed() -> None:
     with pytest.raises(ValueError, match="理由"):
         ShadowResult(ShadowOutcome.FAILED)
     with pytest.raises(ValueError, match="理由"):
-        ShadowResult(ShadowOutcome.COMPUTED, SkipReason.TIME_LIMIT)
+        ShadowResult(ShadowOutcome.COMPUTED, ShadowSkipReason.TIME_LIMIT)
     ShadowResult(ShadowOutcome.COMPUTED)  # 例外にならない
 
 

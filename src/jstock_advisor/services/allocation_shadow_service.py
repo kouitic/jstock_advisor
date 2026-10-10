@@ -48,6 +48,10 @@
   (botocore の既定の timeout・再試行のまま走る)。害は、同じ決定的 ID の条件付き追記が後で成立
   しうることに限られる(上記の既知の振る舞い)。
 
+  既知の限界: 総予算が尽きた時点で記録するのは 1 件だけで、残りの owner は件数をログに出すのみ
+  (現在の owner は 1 人。複数 owner へ拡張する際に見直す)。finalize のみの再実行(recovery)の
+  経路には置かないため、再実行で finalize した batch は記録なし。
+
 ## 本 module に置かないもの
 
   配分の計算の式・閾値・優先順位(#603 の optimizer・#602 の RAER)・IAM・設定を ON に
@@ -78,6 +82,7 @@ from jstock_advisor.domain.signals.allocation_shadow_config import (
 from jstock_advisor.services.audit_service import AuditService
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 DECISION_TYPE: Final = "allocation_shadow"
 SKIP_ID_PREFIX: Final = "allocation_shadow_skip"
@@ -96,7 +101,7 @@ class ShadowOutcome(StrEnum):
     COMPUTED = "COMPUTED"
 
 
-class SkipReason(StrEnum):
+class ShadowSkipReason(StrEnum):
     """実行しなかった・できなかった理由(AuditLog に記録する)。"""
 
     TIME_BUDGET = "TIME_BUDGET"  # 残り時間が min_remaining_seconds 未満、または不明
@@ -116,7 +121,7 @@ class ShadowResult:
     """1 owner の結果。facts は scalar のみ(件数・理由コード・真偽。実名・金額・株数を入れない)。"""
 
     outcome: ShadowOutcome
-    reason: SkipReason | None = None
+    reason: ShadowSkipReason | None = None
     facts: Mapping[str, _Scalar] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -191,13 +196,13 @@ class CashRead:
     status: CashReadStatus
     amount: Decimal | None = None
 
-    def as_skip_reason(self) -> SkipReason | None:
+    def as_skip_reason(self) -> ShadowSkipReason | None:
         """計算に進めない状態を、スキップの理由へ写す(AVAILABLE は None)。"""
         return {
-            CashReadStatus.NOT_REGISTERED: SkipReason.CASH_NOT_REGISTERED,
-            CashReadStatus.IAM_MISSING: SkipReason.IAM_MISSING,
-            CashReadStatus.TIMEOUT: SkipReason.TIME_LIMIT,
-            CashReadStatus.ERROR: SkipReason.COMPUTATION_FAILED,
+            CashReadStatus.NOT_REGISTERED: ShadowSkipReason.CASH_NOT_REGISTERED,
+            CashReadStatus.IAM_MISSING: ShadowSkipReason.IAM_MISSING,
+            CashReadStatus.TIMEOUT: ShadowSkipReason.TIME_LIMIT,
+            CashReadStatus.ERROR: ShadowSkipReason.COMPUTATION_FAILED,
         }.get(self.status)
 
 
@@ -258,7 +263,7 @@ ShadowCompute = Callable[[ShadowRun], ShadowResult]
 
 def compute_not_implemented(run: ShadowRun) -> ShadowResult:
     """既定の差し込み先。配分の計算は未実装(optimizer・RAER は別 PR)。"""
-    return ShadowResult(ShadowOutcome.SKIPPED, SkipReason.COMPUTE_NOT_IMPLEMENTED)
+    return ShadowResult(ShadowOutcome.SKIPPED, ShadowSkipReason.COMPUTE_NOT_IMPLEMENTED)
 
 
 def result_audit_id(batch_id: str, owner: str) -> str:
@@ -318,16 +323,16 @@ def record_result(
 def _precheck(
     config: AllocationShadowConfig,
     remaining_time_ms: Callable[[], int] | None,
-) -> SkipReason | None:
+) -> ShadowSkipReason | None:
     """実行前の条件。満たさなければ、実行せずに記録するスキップの理由を返す。"""
     if remaining_time_ms is None:
-        return SkipReason.TIME_BUDGET  # 残り時間が不明なら実行しない(fail-closed)
+        return ShadowSkipReason.TIME_BUDGET  # 残り時間が不明なら実行しない(fail-closed)
     try:
         remaining_ms = remaining_time_ms()
     except Exception:  # noqa: BLE001
-        return SkipReason.TIME_BUDGET
+        return ShadowSkipReason.TIME_BUDGET
     if remaining_ms < config.min_remaining_seconds * 1000.0:
-        return SkipReason.TIME_BUDGET
+        return ShadowSkipReason.TIME_BUDGET
     return None
 
 
@@ -392,7 +397,7 @@ def _observe(
     for position, owner in enumerate(owners):
         precheck = _precheck(config, remaining_time_ms)  # owner ごとに毎回読む(Q-F)
         if deadline.expired():
-            result = ShadowResult(ShadowOutcome.SKIPPED, SkipReason.TIME_LIMIT)
+            result = ShadowResult(ShadowOutcome.SKIPPED, ShadowSkipReason.TIME_LIMIT)
         elif precheck is not None:
             result = ShadowResult(ShadowOutcome.SKIPPED, precheck)
         else:
@@ -402,7 +407,7 @@ def _observe(
             except Exception as exc:  # noqa: BLE001
                 result = ShadowResult(
                     ShadowOutcome.FAILED,
-                    SkipReason.COMPUTATION_FAILED,
+                    ShadowSkipReason.COMPUTATION_FAILED,
                     {"error_type": type(exc).__name__},
                 )
         # 各 I/O の直前に総予算を確認する。尽きていれば、記録は 1 件だけ(io_timeout を上限)許し、
