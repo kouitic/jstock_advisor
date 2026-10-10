@@ -166,6 +166,10 @@ class RaerEvaluation:
     """RAER の詳細な記録(shadow の記録に残す想定)。5 軸を固定順で必ず持つ。
 
     ★ B1 では value を持たない(合成式が未決)。`state` は常に UNAVAILABLE。
+
+    `comparison_key` は**記録用**で、適用軸が 1 つでもあれば state に依らず作る(どの軸で評価したかを
+    後から説明できるように)。比較に使う `RaerResult.comparison_key` は別物で、UNAVAILABLE では None
+    (UNAVAILABLE は比較の対象にならない)。
     """
 
     model_version: str
@@ -210,7 +214,11 @@ class RaerEvaluation:
 
 @dataclass(frozen=True)
 class RaerResult:
-    """#603 / #604 が受け取る最小の境界(rev1.1。JIRO の合意済み)。軸の中身(調整値)に依存しない。"""
+    """#603 / #604 が受け取る最小の境界(rev1.1。JIRO の合意済み)。軸の中身(調整値)に依存しない。
+
+    `comparison_key` は**比較に使う鍵**で、AVAILABLE / PROVISIONAL のときだけ持ち、UNAVAILABLE では
+    None(`RaerEvaluation.comparison_key` は記録用で、UNAVAILABLE でも作られる)。
+    """
 
     state: RaerState
     value: Decimal | None
