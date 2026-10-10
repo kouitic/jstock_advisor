@@ -612,6 +612,83 @@ def test_malformed_inputs_are_rejected_with_the_dedicated_exception(
             assert str(value) not in text
 
 
+# 拒否の全経路で、渡した入力の値そのものがメッセージに現れないことを固定する(#909 SHOULD-1)。
+# この関数は買付余力・保有評価額(利用者の資産情報)を受け、呼び出し側が例外を捕捉する前提のため、
+# 値がメッセージに入ると、将来ログへ出す実装が入ったときに資産情報が漏れる。
+# 値は他の文字列と衝突しない数字列にしてある(範囲表記『(0, 1]』のような固定の文言と混ざらない)。
+# 『この文字列だけ特別扱いする』形にしない: 探すのは常に『渡した値の文字列』である。
+_REJECTION_PATHS: list[tuple[str, dict[str, object]]] = [
+    ("cash is not a Decimal (float)", {"available_cash": 12345.678}),
+    ("cash is not a Decimal (int)", {"available_cash": 987654}),
+    ("cash is not a Decimal (bool)", {"available_cash": True}),
+    ("cash is not a Decimal (str)", {"available_cash": "S3CRET-424242"}),
+    ("cash is not finite (NaN)", {"available_cash": D("NaN")}),
+    ("cash is not finite (Infinity)", {"available_cash": D("Infinity")}),
+    ("cash is negative", {"available_cash": D("-424242.5")}),
+    ("price is not a Decimal", {"candidate_price": 313131}),
+    ("price is not finite", {"candidate_price": D("NaN")}),
+    ("price is not positive", {"candidate_price": D("-313131.5")}),
+    ("unit is a bool", {"minimum_trading_unit": True}),
+    ("unit is a float", {"minimum_trading_unit": 4321.5}),
+    ("unit is not positive", {"minimum_trading_unit": -4321}),
+    ("position value is negative", {"current_position_value": D("-717171.5")}),
+    ("position value is an int", {"current_position_value": 717171}),
+    ("portfolio value is negative", {"portfolio_value": D("-818181.5")}),
+    ("portfolio value is an int", {"portfolio_value": 818181}),
+    ("amount cap is negative", {"max_single_stock_amount": D("-919191.5")}),
+    ("amount cap is a float", {"max_single_stock_amount": 919191.5}),
+    ("ratio is above 1", {"max_single_stock_ratio": D("1.5551")}),
+    ("ratio is negative", {"max_single_stock_ratio": D("-0.7771")}),
+    ("ratio is a float", {"max_single_stock_ratio": 0.5551}),
+    ("ratio is not finite", {"max_single_stock_ratio": D("NaN")}),
+]
+
+
+def _needles(value: object) -> set[str]:
+    """渡した値が文言に現れうる形(str / repr / 数字だけを並べた形)。"""
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    found = {str(value), repr(value)}
+    if len(digits) >= 5:
+        found.add(digits)
+    return {n for n in found if n}
+
+
+@pytest.mark.parametrize(("label", "over"), _REJECTION_PATHS, ids=[p[0] for p in _REJECTION_PATHS])
+def test_no_rejection_message_contains_the_offending_value(
+    label: str, over: dict[str, object]
+) -> None:
+    with pytest.raises(ba.BuyAffordabilityInputError) as info:
+        call(**over)
+    text = str(info.value)
+    assert text, label
+    for value in over.values():
+        for needle in _needles(value):
+            assert needle not in text, f"{label}: the message must not contain the input value"
+
+
+def test_the_rejection_paths_cover_every_input_error_site_in_the_module() -> None:
+    # 拒否の経路を足して一覧へ足し忘れると値の漏れを見逃す。ソースの raise の数と突き合わせる。
+    tree = ast.parse(Path(ba.__file__).read_text(encoding="utf-8"))
+    sites = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Raise)
+        and isinstance(node.exc, ast.Call)
+        and getattr(node.exc.func, "id", None) == "BuyAffordabilityInputError"
+    ]
+    # _require_decimal の 3 経路 + 価格 + 単位 2 経路 + 比率の範囲
+    assert len(sites) == 7
+    # どの経路にも f-string の埋め込み(値の差し込み)が無い(name は変数名であり値ではない例外を除く)
+    for node in sites:
+        assert isinstance(node.exc, ast.Call)
+        for arg in node.exc.args:
+            if isinstance(arg, ast.JoinedStr):
+                interpolated = [v for v in arg.values if isinstance(v, ast.FormattedValue)]
+                assert all(
+                    isinstance(v.value, ast.Name) and v.value.id == "name" for v in interpolated
+                )
+
+
 def test_an_invalid_input_is_rejected_even_when_the_cash_is_unregistered() -> None:
     with pytest.raises(ba.BuyAffordabilityInputError):
         call(available_cash=None, candidate_price=D(0))
