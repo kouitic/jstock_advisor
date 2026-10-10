@@ -483,3 +483,29 @@ def test_a_fair_value_that_is_not_usable_is_unavailable_even_when_the_confidence
     result = upside(Decimal("100"), Decimal("150"), usable=False)
     assert result.value is None
     assert result.reasons == (ReasonCode.FAIR_VALUE_NOT_USABLE,)
+
+
+def test_a_non_finite_upside_is_unavailable_not_a_value() -> None:
+    """Decimal では有限でも、float にすると inf になる値は、値にせず理由を返す(review SHOULD-1)。"""
+    result = upside(Decimal("0.01"), Decimal("1e308"))
+    assert float(Decimal("1e308") / Decimal("0.01")) == math.inf  # 前提: float にすると inf
+    assert result.value is None
+    assert result.reasons == (ReasonCode.FAIR_VALUE_UNAVAILABLE,)
+    assert result.detail == "non-finite upside"
+
+
+def test_the_model_version_is_pinned_to_a_literal_that_marks_components_only() -> None:
+    """暫定の計算(composite 未決の『構成要素のみ』)を、モデル版で識別できる(#602 の必須条件)。
+
+    定数そのものとの比較では恒真になるため、文字列で固定する。composite の式が決まったら版を
+    変え、本テストも意図した変更として更新する。
+    """
+    assert er.MODEL_VERSION == "er-components-v1"
+    result = compute_expected_return(
+        evaluation_date=date(2026, 1, 5),
+        current_price=Decimal("100"),
+        price_freshness=_NORMAL,
+        fair_value=fv(Decimal("150")),
+        income=IncomeInput(2.0, None, _NO),
+    )
+    assert result.model_version == "er-components-v1"
