@@ -29,6 +29,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import datetime as dt
+import itertools
 from pathlib import Path
 from typing import Any
 
@@ -598,7 +599,8 @@ def test_total_yield_and_custom_conditions_create_no_evidence() -> None:
         _result(thesis_items=(_item("total_yield"), _item("custom_conditions"))),
     )
     assert adaptation.verdict.evidence == ()
-    assert adaptation.supporting_only == ("total_yield", "custom_conditions")
+    # 名前の昇順(入力の並びに依存しない)
+    assert adaptation.supporting_only == ("custom_conditions", "total_yield")
 
 
 def test_supporting_only_inputs_are_recorded_not_silently_dropped() -> None:
@@ -695,10 +697,10 @@ def test_the_result_is_deterministic_and_order_independent() -> None:
     )
     assert _adapt(a) == _adapt(a)
     assert _state(a) == _state(b)
+    # 集合ではなく結果そのもの(evidence・hard_gate_reasons・supporting_only・unmapped の tuple の
+    # 並びを含む)が一致する。frozenset / set の比較は反復順(= 保存・表示される並び)を固定できない
+    assert _adapt(a) == _adapt(b)
     assert distinct_roots(_adapt(a).verdict.evidence) == distinct_roots(_adapt(b).verdict.evidence)
-    assert {e.fact_key for e in _adapt(a).verdict.evidence} == {
-        e.fact_key for e in _adapt(b).verdict.evidence
-    }
 
 
 def test_the_result_input_is_not_modified() -> None:
@@ -825,3 +827,182 @@ def test_the_thesis_verdict_docstring_no_longer_claims_every_hard_gate_is_primar
     doc = ThesisVerdict.__doc__ or ""
     assert "一律に言えず" in doc
     assert "一次情報で確認できた場合のみ(既存の仕様)" not in doc
+
+
+# ---------------------------------------------------------------------------
+# 出力の並び・FactSpec の guard・許可 module の純度・不整合な hard_gate(#891 の review の是正)
+# ---------------------------------------------------------------------------
+
+
+def test_every_ordered_output_is_independent_of_the_input_order_for_all_permutations() -> None:
+    """全順列で結果が一致する(集合の比較ではなく tuple の並びまで)。evidence・hard_gate_reasons・
+    supporting_only・unmapped のどれも、入力の並びで変わらず、名前の昇順になる。"""
+    reasons = (
+        "continuous_operating_income_decline",
+        "unknown_rule_b",
+        "investment_premise_broken",
+        "regulatory_capital_breach",
+        "unknown_rule_a",
+    )
+    gates = ("GATE_UNKNOWN_B", "INVESTMENT_THESIS_COLLAPSE", "GATE_UNKNOWN_A")
+    items = (_item("total_yield"), _item("custom_conditions"), _item("profitability_roe"))
+    reference = _adapt(_result(reasons=reasons, gate=gates, thesis_items=items))
+    for reason_order in itertools.permutations(reasons):
+        for gate_order in itertools.permutations(gates):
+            adaptation = _adapt(
+                _result(reasons=reason_order, gate=gate_order, thesis_items=tuple(reversed(items)))
+            )
+            assert adaptation == reference, (reason_order, gate_order)
+    assert reference.supporting_only == tuple(sorted(reference.supporting_only))
+    assert reference.unmapped == tuple(sorted(reference.unmapped))
+    assert reference.verdict.hard_gate_reasons == tuple(sorted(gates))
+    assert len(reference.supporting_only) >= 3
+    assert len(reference.unmapped) >= 4
+
+
+def test_a_fact_spec_with_an_empty_fact_key_is_rejected() -> None:
+    """対応表を機械生成・外部化したとき、空の fact_key が黙って通ると全 Evidence が同じ事実に
+    統合される。空・空白だけを構築時に拒否する。"""
+    for key in ("", " ", "\t\n"):
+        with pytest.raises(ValueError):
+            thesis_adapter.FactSpec(RootFactor.EARNINGS, key, None, False)
+    ok = thesis_adapter.FactSpec(RootFactor.EARNINGS, "EARNINGS:x", None, False)
+    assert ok.fact_key == "EARNINGS:x"
+
+
+def test_every_fact_key_in_the_tables_is_non_empty() -> None:
+    for table in (SIGNAL_FACTS, HARD_GATE_FACTS, ITEM_FACTS):
+        assert all(spec.fact_key.strip() for spec in table.values())
+
+
+@pytest.mark.parametrize(
+    ("triggered", "codes"),
+    [(True, ()), (False, ("BANKRUPTCY_FILING",)), (False, ("A", "B"))],
+)
+def test_an_inconsistent_hard_gate_is_rejected_with_a_dedicated_error(
+    triggered: bool, codes: tuple[str, ...]
+) -> None:
+    """triggered と reason_codes の食い違いは、データ不足(UNDETERMINED)ではなく成り立たない状態。
+    専用の例外(ValueError のサブクラス)で拒否し、メッセージに記録の値を含めない。"""
+    base = _result()
+    broken = base.model_copy(
+        update={"hard_gate": HoldingDecisionHardGate(triggered=triggered, reason_codes=codes)}
+    )
+    with pytest.raises(thesis_adapter.InconsistentHardGateError) as caught:
+        adapt_holding_decision_to_thesis(broken, _POLICY)
+    assert isinstance(caught.value, ValueError)
+    message = str(caught.value)
+    assert all(code not in message for code in codes)
+    assert broken.stock_code not in message
+
+
+def test_a_consistent_hard_gate_is_not_rejected() -> None:
+    triggered = _result(gate=("BANKRUPTCY_FILING",))
+    assert adapt_holding_decision_to_thesis(triggered, _POLICY).verdict.hard_gate_triggered
+    clean = _result()
+    assert not adapt_holding_decision_to_thesis(clean, _POLICY).verdict.hard_gate_triggered
+
+
+# --- 許可した module の推移閉包が禁止層へ到達しない --------------------------------------------
+
+_SRC_ROOT = _ROOT / "src"
+#: adapter が import してよい module(C0 の許可と同じ。tests/unit/test_exit_architecture_c0.py)
+_ALLOWED_EXTERNAL = (
+    "jstock_advisor.domain.entities.enums",
+    "jstock_advisor.domain.entities.holding_decision",
+)
+#: 推移閉包がここへ到達してはならない(判定・保存・外部・設定・入口の層)
+_FORBIDDEN_PREFIXES = (
+    "jstock_advisor.services",
+    "jstock_advisor.infrastructure",
+    "jstock_advisor.lambda_handlers",
+    "jstock_advisor.providers",
+    "jstock_advisor.cli",
+    "jstock_advisor.config",
+    "jstock_advisor.migrations",
+)
+
+
+def _module_file(root: Path, module: str) -> Path | None:
+    relative = Path(*module.split("."))
+    package = root / relative / "__init__.py"
+    if package.is_file():
+        return package
+    plain = root / relative.with_suffix(".py")
+    return plain if plain.is_file() else None
+
+
+def _internal_imports(root: Path, module: str) -> set[str]:
+    """module が import する jstock_advisor 内の module(親 package の __init__ も含む)。"""
+    path = _module_file(root, module)
+    assert path is not None, module
+    found: set[str] = set()
+    # import すると親 package の __init__ も実行される
+    parts = module.split(".")
+    for end in range(1, len(parts)):
+        found.add(".".join(parts[:end]))
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            found.update(a.name for a in node.names if a.name.startswith("jstock_advisor"))
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and node.module
+            and node.level == 0
+            and node.module.startswith("jstock_advisor")
+        ):
+            found.add(node.module)
+            # `from pkg import submodule` は submodule も import する
+            for alias in node.names:
+                if _module_file(root, f"{node.module}.{alias.name}") is not None:
+                    found.add(f"{node.module}.{alias.name}")
+    return found
+
+
+def _transitive_closure(root: Path, starts: tuple[str, ...]) -> set[str]:
+    seen: set[str] = set()
+    stack = list(starts)
+    while stack:
+        module = stack.pop()
+        if module in seen:
+            continue
+        seen.add(module)
+        stack.extend(_internal_imports(root, module) - seen)
+    return seen
+
+
+def test_the_allowed_modules_transitive_closure_never_reaches_a_forbidden_layer() -> None:
+    """許可した 2 module(とその推移閉包)が、services / infrastructure / lambda_handlers /
+    providers / cli / config / migrations へ到達しない。C0 の走査は package 内のファイルだけを
+    見るため、許可した module が将来別の層を import しても気づけない(これを固定する)。"""
+    closure = _transitive_closure(_SRC_ROOT, _ALLOWED_EXTERNAL)
+    assert set(_ALLOWED_EXTERNAL) <= closure
+    offenders = sorted(m for m in closure if m.startswith(_FORBIDDEN_PREFIXES))
+    assert offenders == []
+    # 閉包は entities と、それを含む package の __init__ に限られる(走査が空振りしていない)
+    assert len(closure) >= 4
+    assert all(
+        m.startswith("jstock_advisor.domain.entities")
+        or m in ("jstock_advisor", "jstock_advisor.domain")
+        for m in closure
+    ), sorted(closure)
+
+
+def test_the_closure_check_detects_a_forbidden_import_in_a_fake_tree(tmp_path: Path) -> None:
+    """検査そのものの有効性: 許可 module が別の層を(直接・間接に)import する木で、閉包に現れる。"""
+    for rel, text in {
+        "jstock_advisor/__init__.py": "",
+        "jstock_advisor/domain/__init__.py": "",
+        "jstock_advisor/domain/entities/__init__.py": "",
+        "jstock_advisor/domain/entities/enums.py": "",
+        "jstock_advisor/domain/entities/holding_decision.py": (
+            "from jstock_advisor.domain.entities import helper\n"
+        ),
+        "jstock_advisor/domain/entities/helper.py": "import jstock_advisor.services.audit\n",
+        "jstock_advisor/services/__init__.py": "",
+        "jstock_advisor/services/audit.py": "",
+    }.items():
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    closure = _transitive_closure(tmp_path, _ALLOWED_EXTERNAL)
+    assert any(m.startswith(_FORBIDDEN_PREFIXES) for m in closure), sorted(closure)
