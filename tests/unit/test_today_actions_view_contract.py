@@ -159,6 +159,8 @@ def build(**over: object) -> tv.TodayActionsView:
         "evaluated_at": _NOW,
         "cash": cash(),
         "allocation": allocated(),
+        # 既定は『入替も評価済みで提案なし』。未評価(None)を試すときは rotation=None を明示する
+        "rotation": tv.RotationOutcome(status=tv.RotationOutcomeStatus.NO_ROTATION),
     }
     base.update(over)
     return tv.build_today_actions_view(**base)  # type: ignore[arg-type]
@@ -357,6 +359,7 @@ def view_with(**over: object) -> tv.TodayActionsView:
         "cash": cash(),
         "status": tv.ViewStatus.NO_ACTION,
         "reasons": (),
+        "rotation_evaluated": True,
     }
     base.update(over)
     return tv.TodayActionsView(**base)  # type: ignore[arg-type]
@@ -512,13 +515,15 @@ def test_the_state_matrix_never_shows_a_skip_for_an_unevaluated_day(
         )
     view = build(allocation=allocation, rotation=rotation)
     if view.status is tv.ViewStatus.NO_ACTION:
-        # 『見送り』を出せるのは、配分が評価済みで、入替も不能でないときだけ
+        # 『見送り』を出せるのは、配分と入替の両方が評価済みで、どちらも不能でないときだけ
         assert alloc_kind in {"no_action"}
         assert rotation_status in {
-            None,
             tv.RotationOutcomeStatus.NO_ROTATION,
             tv.RotationOutcomeStatus.SHADOW_ONLY,
         }
+    if rotation_status is None:
+        assert tv.ViewReason.ROTATION_NOT_EVALUATED in view.reasons
+        assert view.rotation_evaluated is False
     if alloc_kind in {"none", "unavailable"} and not view.rotation_items:
         assert view.status is tv.ViewStatus.UNAVAILABLE
 
@@ -654,6 +659,49 @@ def test_a_shadow_only_rotation_is_not_a_proposal() -> None:
     assert view.rotation_items == ()
     assert view.status is tv.ViewStatus.NO_ACTION
     assert view.rotation_evaluated is True
+
+
+def test_an_unevaluated_rotation_adds_its_own_reason_code() -> None:
+    # 既存の NOT_EVALUATED(該当日の評価記録なし)とは別の理由コード・別の日本語ラベル
+    reason = tv.ViewReason.ROTATION_NOT_EVALUATED
+    assert reason is not tv.ViewReason.NOT_EVALUATED
+    assert reason.label != tv.ViewReason.NOT_EVALUATED.label
+    assert "入替" in reason.label
+    view = build(allocation=allocated(), rotation=None)
+    assert view.status is tv.ViewStatus.ACTIONS  # 提案があれば提案は出す
+    assert view.reasons == (reason,)  # ただし未評価の旨を残す
+
+
+def test_no_action_needs_both_the_allocation_and_the_rotation_to_be_evaluated() -> None:
+    # 配分が NO_ACTION でも、入替が未評価なら見送りにしない(U-7: 未評価を見送りと混同しない)
+    unevaluated = build(allocation=allocation_no_action(), rotation=None)
+    assert unevaluated.status is tv.ViewStatus.UNAVAILABLE
+    assert unevaluated.reasons == (tv.ViewReason.ROTATION_NOT_EVALUATED,)
+    evaluated = build(
+        allocation=allocation_no_action(),
+        rotation=tv.RotationOutcome(status=tv.RotationOutcomeStatus.NO_ROTATION),
+    )
+    assert evaluated.status is tv.ViewStatus.NO_ACTION
+    assert evaluated.reasons == ()
+
+
+def test_both_unevaluated_reasons_are_kept_when_nothing_was_evaluated() -> None:
+    both = build(allocation=allocation_unavailable(tv.ViewReason.POLICY_INCOMPLETE), rotation=None)
+    assert both.status is tv.ViewStatus.UNAVAILABLE
+    assert both.reasons == (
+        tv.ViewReason.POLICY_INCOMPLETE,
+        tv.ViewReason.ROTATION_NOT_EVALUATED,
+    )
+    missing = build(allocation=None, rotation=None)
+    assert missing.reasons == (
+        tv.ViewReason.NOT_EVALUATED,
+        tv.ViewReason.ROTATION_NOT_EVALUATED,
+    )
+
+
+def test_a_no_action_view_cannot_be_built_with_an_unevaluated_rotation() -> None:
+    with pytest.raises(tv.TodayActionsViewError):
+        view_with(status=tv.ViewStatus.NO_ACTION, rotation_evaluated=False)
 
 
 def test_a_rotation_that_was_not_evaluated_is_recorded_as_such() -> None:

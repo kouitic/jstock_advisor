@@ -24,6 +24,8 @@ V605-v1 の不変条件『NO_ACTION => 全ての item が空』は、次のと�
   ・提案となる項目(リスク回避 / 割安解消 / 利益保全の売却・資金入替・購入〔PURCHASE〕)が空である
   ・見送りの購入候補(SKIP。理由つき)と既存の判定(legacy)は『情報』であり、NO_ACTION・UNAVAILABLE
     でも持てる(落とすと、緊急確認などの既存の情報が見えなくなるため)
+  ・『見送り』(NO_ACTION)は、配分と入替の両方が評価済みで提案が無いときだけ。入替が未評価〔None〕の
+    日は専用の理由 ROTATION_NOT_EVALUATED を積み、提案が無ければ UNAVAILABLE にする(U-7)
 ```
 
 例外のメッセージには、項目の名前だけを含め、金額・株数などの値を含めない(資産情報をログへ出さない)。
@@ -68,6 +70,7 @@ class ViewReason(StrEnum):
     BATCH_NOT_COMPLETED = "BATCH_NOT_COMPLETED"
     INPUT_CONTRACT_ERROR = "INPUT_CONTRACT_ERROR"
     COMPUTATION_FAILED = "COMPUTATION_FAILED"
+    ROTATION_NOT_EVALUATED = "ROTATION_NOT_EVALUATED"
 
     @property
     def label(self) -> str:
@@ -132,6 +135,7 @@ _REASON_LABELS: dict[ViewReason, str] = {
     ViewReason.BATCH_NOT_COMPLETED: "対象のバッチが完了していません",
     ViewReason.INPUT_CONTRACT_ERROR: "入力の形式が想定と異なります",
     ViewReason.COMPUTATION_FAILED: "計算に失敗しました",
+    ViewReason.ROTATION_NOT_EVALUATED: "資金入替が未評価です",
 }
 _SELL_ACTION_LABELS: dict[SellAction, str] = {
     SellAction.PARTIAL: "一部売却",
@@ -525,7 +529,7 @@ class TodayActionsView:
                 raise _fail("view.status", "actions need an actionable item")
         elif actionable:
             raise _fail("view.status", "a day without actions holds no proposal")
-        elif self.status is ViewStatus.NO_ACTION and self.reasons:
+        elif self.status is ViewStatus.NO_ACTION and (self.reasons or not self.rotation_evaluated):
             raise _fail("view.reasons", "no action holds no reason")
         elif self.status is ViewStatus.UNAVAILABLE and not self.reasons:
             raise _fail("view.reasons", "an unavailable view needs a reason")
@@ -597,7 +601,8 @@ def build_today_actions_view(
         buys = allocation.buys
         if allocation.status is AllocationOutcomeStatus.UNAVAILABLE:
             allocation_reasons = allocation.unavailable_reasons
-    rotation_reasons: tuple[ViewReason, ...] = ()
+    # 入替が未評価(None)のときは、専用の理由を積む。『見送り』は配分と入替の両方が評価済みの日だけ
+    rotation_reasons: tuple[ViewReason, ...] = (ViewReason.ROTATION_NOT_EVALUATED,)
     rotation_items: tuple[RotationItemView, ...] = ()
     if rotation is not None:
         rotation_items = rotation.items
