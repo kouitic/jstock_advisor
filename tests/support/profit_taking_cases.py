@@ -341,6 +341,58 @@ def focused_cases(count: int = 2000, seed: int = 878) -> Iterator[Case]:
         yield Case(f"focused-{index:05d}", kwargs)
 
 
+def boundary_cases() -> Iterator[Case]:
+    """閾値ちょうど・その前後の入力(ユーザー目標の到達、含み益・総合利回りの閾値、上限価格 bull との
+    比較)。比較演算子の境界(>= と >)を取り違える変更を捕まえるための格子。"""
+    combinations = itertools.product(
+        [
+            Decimal(p)
+            for p in ("1199", "1200", "1250", "1299", "1300", "1301", "1499", "1500", "1501")
+        ],
+        ["none", "medium_3", "high_3_tight"],
+        [None, TrendClassification.UPTREND, TrendClassification.DOWNTREND],
+        _TARGETS_BOUNDARY,
+        [None, 2.5, 2.4, 2.0, 1.9],
+    )
+    for index, (price, fair_value, trend, (target_price, target_rate), yield_pct) in enumerate(
+        combinations
+    ):
+        kwargs = build_kwargs(
+            price=price,
+            fair_value=fair_value,
+            trend=trend,
+            pp="none_given",
+            executable=True,
+            days=10,
+            counter=False,
+            industry_model=True,
+            sector=None,
+            stock_types=(),
+            guidance=False,
+            severe=False,
+            dividend_outcome=None,
+            cashflow=None,
+            concentration=False,
+            earnings_rationale=False,
+            reflects=True,
+            yield_pct=yield_pct,
+            mitigation="none",
+            target_price=target_price,
+            target_rate=target_rate,
+            premise_broken=False,
+            accounting=False,
+        )
+        yield Case(f"boundary-{index:05d}", kwargs)
+
+
+_TARGETS_BOUNDARY: list[tuple[Decimal | None, float | None]] = [
+    (None, None),
+    (Decimal("1300"), None),
+    (None, 30.0),
+    (None, 50.0),
+]
+
+
 def missing_input_cases() -> Iterator[Case]:
     """入力が欠けた場合を全て列挙する(含み損・適正価格が使えない・bull 等の欠落・momentum なし・
     候補なし)。hard_overvalued の式を uptrend の枝の外で常に算出しても、例外を出さない。"""

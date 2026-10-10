@@ -19,7 +19,7 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 
 from jstock_advisor.config.models import MitigatingFactors, ProfitTakingRulesConfig
 from jstock_advisor.domain.entities.common import PriceWithRationale, SellPriceLevels
@@ -271,6 +271,74 @@ class ProfitTakingResult:
     # 利用者への表示は最初の1つ(`fair_value_action_block_reason_code`)だけで、監査には全原因を残す。
     # 順序は`_FAIR_VALUE_ACTION_BLOCK_REASON_ORDER`で明示的に固定している。空 = 該当なし。
     fair_value_action_block_reason_codes: tuple[str, ...] = ()
+
+
+class CandidatePath(StrEnum):
+    """候補が成立した経路(Issue #878 PR-3a。trace 用)。
+
+    名前は exit_architecture の TriggerKind と同じ(値も同じ)。**本 module は exit_architecture を
+    import しない**(既存 src は package を import しない守り)ため、ここにローカルの定義を持ち、
+    adapter(PR-3b)が名前で TriggerKind へ写す。対応は契約テストで 1:1 に固定する。
+    """
+
+    PRICE_UPSIDE_MATRIX = "PRICE_UPSIDE_MATRIX"
+    FAIR_VALUE_STRONG = "FAIR_VALUE_STRONG"
+    FAIR_VALUE_PARTIAL_GATE = "FAIR_VALUE_PARTIAL_GATE"
+    PROFIT_PROTECTION_STRONG = "PROFIT_PROTECTION_STRONG"
+    PARTIAL_CONDITIONS = "PARTIAL_CONDITIONS"
+    FULL_MODERATE_CONDITIONS = "FULL_MODERATE_CONDITIONS"
+    FULL_STRONG_CRITICAL = "FULL_STRONG_CRITICAL"
+    USER_TARGET_PRICE = "USER_TARGET_PRICE"
+    USER_TARGET_RATE = "USER_TARGET_RATE"
+
+
+class VoteKind(StrEnum):
+    """件数条件の票の種別(trace 用。理由の文字列を解析せずに票の種別を区別する)。"""
+
+    FAIR_VALUE_WEAK = "FAIR_VALUE_WEAK"
+    GROWTH_SLOWDOWN = "GROWTH_SLOWDOWN"
+    TREND_WORSENING = "TREND_WORSENING"
+    LOW_YIELD = "LOW_YIELD"
+    CONCENTRATION = "CONCENTRATION"
+    EARNINGS_EVENT_RISK_REDUCTION = "EARNINGS_EVENT_RISK_REDUCTION"
+    PROFIT_PROTECTION_CANDIDATE = "PROFIT_PROTECTION_CANDIDATE"
+    VERY_LOW_YIELD = "VERY_LOW_YIELD"
+    STRONG_TREND_WORSENING = "STRONG_TREND_WORSENING"
+    GROWTH_COLLAPSE = "GROWTH_COLLAPSE"
+
+
+@dataclass(frozen=True)
+class TraceCandidate:
+    """候補が成立した地点の記録(判定には使わない)。level は 0〜3(HOLD〜FULL)の整数、origin は
+    _RawLevelOrigin の名前。full_strong は併合前の理由ごとに 1 件、件数条件は票の種別を持つ。"""
+
+    path: CandidatePath
+    level: int
+    origin: str
+    votes: tuple[VoteKind, ...] = ()
+
+
+@dataclass(frozen=True)
+class ExitTrace:
+    """evaluate_profit_taking_traced() が返す、判定の経過の記録(Issue #878 PR-3a)。
+
+    判定の結果そのものは変えない(ProfitTakingResult と同じ値)。adapter(PR-3b)が読んで、
+    判定を再計算せずに Arbiter の候補・降格の事実へ写すための構造化された記録。
+
+    candidates       候補が成立した各地点(成立した経路・level・origin・票の種別)
+    raw_level        勝者決定直後の level(0〜3)
+    origin           勝者の origin(_RawLevelOrigin の名前。ProfitTakingResult.origin と同じ)
+    mitigation_steps 緩和要因が下げた段数(= raw_level - 緩和直後の level。clamp 込み)
+    uptrend          上昇トレンド(STRONG_UPTREND / UPTREND)
+    hard_overvalued  上限価格を明確に超過し、信頼度が LOW でない(タイミング層の降格を免れる)
+    """
+
+    candidates: tuple[TraceCandidate, ...]
+    raw_level: int
+    origin: str
+    mitigation_steps: int
+    uptrend: bool
+    hard_overvalued: bool
 
 
 class InvalidProfitTakingInputError(ValueError):
@@ -626,14 +694,17 @@ def _apply_mitigating_factors(
     return new_level, applied
 
 
-def _count_partial_conditions(
+def _partial_votes(
     current_total_yield_pct: float | None,
     inputs: ProfitTakingConditionInputs,
     config: ProfitTakingRulesConfig,
     weak_fair_value_forward_return_reason: str | None,
-) -> tuple[int, list[str]]:
+) -> list[tuple[VoteKind, str]]:
     """一部利確(PARTIAL)の根拠となる、価格系(含み益率・適正価格超過率)以外の
-    独立条件を数える(要求仕様9節)。
+    独立条件(票)を、票の種別と理由の組で返す(要求仕様9節)。
+
+    票の数・理由は従来の _count_partial_conditions と同一(Issue #878 PR-3a で、票の種別を
+    構造化して持つために分離した。_count_partial_conditions はこの結果を写すだけ)。
 
     コードレビュー対応(2026-08、上値余地の導入): 含み益率・強気適正価格超過率の
     条件は_level_from_price_position()の2次元マトリクスへ統合したため、本関数
@@ -641,24 +712,24 @@ def _count_partial_conditions(
     """
     t = config.thresholds
     is_growth = StockType.GROWTH in inputs.stock_types
-    reasons: list[str] = []
+    reasons: list[tuple[VoteKind, str]] = []
 
     if weak_fair_value_forward_return_reason is not None:
         # 中立適正価格基準の期待リターンが閾値以下だが、強い条件としての要件(手法数・
         # 手法間一致度・信頼度等)を満たさない場合は、PARTIALの根拠の1つとしてのみ数える
         # (要求仕様レビュー対応: 中立適正価格単独でFULLの強条件にしない)。
-        reasons.append(weak_fair_value_forward_return_reason)
+        reasons.append((VoteKind.FAIR_VALUE_WEAK, weak_fair_value_forward_return_reason))
 
     # 成長株は業績予想の下方修正・急激な業績悪化があった場合のみ「成長鈍化」を条件化する
     # (要求仕様7節: GROWTHは配当利回り低下だけを利確理由にしない)。
     if is_growth and (inputs.guidance_revision_disclosed or inputs.severe_earnings_decline):
-        reasons.append("成長鈍化または業績予想の下方修正の可能性")
+        reasons.append((VoteKind.GROWTH_SLOWDOWN, "成長鈍化または業績予想の下方修正の可能性"))
 
     if inputs.momentum is not None and inputs.momentum.trend_classification in (
         TrendClassification.DOWNTREND,
         TrendClassification.STRONG_DOWNTREND,
     ):
-        reasons.append("株価トレンドが悪化")
+        reasons.append((VoteKind.TREND_WORSENING, "株価トレンドが悪化"))
 
     # GROWTHは配当・優待利回り低下を利確条件に含めない(要求仕様7節)。
     if (
@@ -666,13 +737,15 @@ def _count_partial_conditions(
         and current_total_yield_pct is not None
         and current_total_yield_pct < t.total_yield_caution_pct
     ):
-        reasons.append(f"総合利回りが{current_total_yield_pct:.2f}%まで低下")
+        reasons.append((VoteKind.LOW_YIELD, f"総合利回りが{current_total_yield_pct:.2f}%まで低下"))
 
     if inputs.portfolio_concentration_over_limit:
-        reasons.append("ポートフォリオ内の保有比率が上限を超過")
+        reasons.append((VoteKind.CONCENTRATION, "ポートフォリオ内の保有比率が上限を超過"))
 
     if inputs.earnings_event_risk_reduction_rationale:
-        reasons.append("決算イベントに備えたリスク低減の合理性")
+        reasons.append(
+            (VoteKind.EARNINGS_EVENT_RISK_REDUCTION, "決算イベントに備えたリスク低減の合理性")
+        )
 
     pp = inputs.profit_protection
     if pp is not None and pp.candidate_signal:
@@ -681,12 +754,15 @@ def _count_partial_conditions(
         assert pp.drawdown_from_peak_pct is not None
         assert pp.gain_giveback_ratio_pct is not None
         reasons.append(
-            f"最大含み益{pp.peak_gain_pct:.1f}%から現在{pp.current_gain_pct:.1f}%まで低下し、"
-            f"高値から{pp.drawdown_from_peak_pct:.1f}%下落、"
-            f"最大含み益の{pp.gain_giveback_ratio_pct:.1f}%を吐き出した(利益保全シグナル)"
+            (
+                VoteKind.PROFIT_PROTECTION_CANDIDATE,
+                f"最大含み益{pp.peak_gain_pct:.1f}%から現在{pp.current_gain_pct:.1f}%まで低下し、"
+                f"高値から{pp.drawdown_from_peak_pct:.1f}%下落、"
+                f"最大含み益の{pp.gain_giveback_ratio_pct:.1f}%を吐き出した(利益保全シグナル)",
+            )
         )
 
-    return len(reasons), reasons
+    return reasons
 
 
 def _extra_action_gates_met(
@@ -842,13 +918,13 @@ def _fair_value_strong_condition(
     return None, weak_reason
 
 
-def _full_strong_conditions(
+def _full_strong_paths(
     current_price: Decimal,
     pnl: UnrealizedPnl,
     inputs: ProfitTakingConditionInputs,
     config: ProfitTakingRulesConfig,
     fair_value_strong_reason: str | None,
-) -> list[tuple[str, _RawLevelOrigin]]:
+) -> list[tuple[CandidatePath, str, _RawLevelOrigin]]:
     """全株利確(FULL)を単独で正当化できる強い条件(要求仕様9節)。
 
     「含み益率が高い」というだけの条件はここに含めない(gain単独でFULLに
@@ -860,15 +936,25 @@ def _full_strong_conditions(
     FAIR_VALUE_STRONG、ユーザー設定目標到達は価格系トリガーのためPRICE_POSITION
     として扱う。
     """
-    reasons: list[tuple[str, _RawLevelOrigin]] = []
+    reasons: list[tuple[CandidatePath, str, _RawLevelOrigin]] = []
     is_income = StockType.INCOME in inputs.stock_types
 
     if inputs.investment_premise_broken:
-        reasons.append(("投資前提が明確に崩れた", _RawLevelOrigin.FUNDAMENTAL_CRITICAL_RISK))
+        reasons.append(
+            (
+                CandidatePath.FULL_STRONG_CRITICAL,
+                "投資前提が明確に崩れた",
+                _RawLevelOrigin.FUNDAMENTAL_CRITICAL_RISK,
+            )
+        )
 
     if inputs.accounting_or_scandal_or_delisting_risk:
         reasons.append(
-            ("会計・不祥事・上場維持リスクが発生", _RawLevelOrigin.FUNDAMENTAL_CRITICAL_RISK)
+            (
+                CandidatePath.FULL_STRONG_CRITICAL,
+                "会計・不祥事・上場維持リスクが発生",
+                _RawLevelOrigin.FUNDAMENTAL_CRITICAL_RISK,
+            )
         )
 
     if (
@@ -878,17 +964,25 @@ def _full_strong_conditions(
     ):
         reasons.append(
             (
+                CandidatePath.FULL_STRONG_CRITICAL,
                 "配当投資銘柄で確定的な減配とフリーキャッシュフロー悪化が重なった",
                 _RawLevelOrigin.FUNDAMENTAL_CRITICAL_RISK,
             )
         )
 
     if fair_value_strong_reason is not None:
-        reasons.append((fair_value_strong_reason, _RawLevelOrigin.FAIR_VALUE_STRONG))
+        reasons.append(
+            (
+                CandidatePath.FAIR_VALUE_STRONG,
+                fair_value_strong_reason,
+                _RawLevelOrigin.FAIR_VALUE_STRONG,
+            )
+        )
 
     if inputs.profit_target_price is not None and current_price >= inputs.profit_target_price:
         reasons.append(
             (
+                CandidatePath.USER_TARGET_PRICE,
                 f"ユーザー設定の全利確目標価格({inputs.profit_target_price}円)に到達",
                 _RawLevelOrigin.PRICE_POSITION,
             )
@@ -899,6 +993,7 @@ def _full_strong_conditions(
     ):
         reasons.append(
             (
+                CandidatePath.USER_TARGET_RATE,
                 f"ユーザー設定の全利確目標利回り({inputs.profit_target_rate}%)に到達",
                 _RawLevelOrigin.PRICE_POSITION,
             )
@@ -907,13 +1002,14 @@ def _full_strong_conditions(
     return reasons
 
 
-def _count_full_moderate_conditions(
+def _full_moderate_votes(
     current_total_yield_pct: float | None,
     inputs: ProfitTakingConditionInputs,
     config: ProfitTakingRulesConfig,
-) -> tuple[int, list[str]]:
-    """全株利確(FULL)を、複数該当した場合にのみ正当化する中程度の条件
-    (価格系(含み益率・適正価格超過率)以外)。
+) -> list[tuple[VoteKind, str]]:
+    """全株利確(FULL)を、複数該当した場合にのみ正当化する中程度の条件(票)を、票の種別と
+    理由の組で返す(価格系(含み益率・適正価格超過率)以外)。票の数・理由は従来の
+    _count_full_moderate_conditions と同一(Issue #878 PR-3a で分離)。
 
     コードレビュー対応(2026-08、上値余地の導入): 含み益率・強気適正価格超過率の
     条件は_level_from_price_position()の2次元マトリクスへ統合したため、本関数
@@ -921,24 +1017,26 @@ def _count_full_moderate_conditions(
     """
     t = config.thresholds
     is_growth = StockType.GROWTH in inputs.stock_types
-    reasons: list[str] = []
+    reasons: list[tuple[VoteKind, str]] = []
 
     if (
         not is_growth
         and current_total_yield_pct is not None
         and current_total_yield_pct < t.total_yield_strong_caution_pct
     ):
-        reasons.append(f"総合利回りが{current_total_yield_pct:.2f}%まで大幅低下")
+        reasons.append(
+            (VoteKind.VERY_LOW_YIELD, f"総合利回りが{current_total_yield_pct:.2f}%まで大幅低下")
+        )
 
     if inputs.momentum is not None and inputs.momentum.trend_classification == (
         TrendClassification.STRONG_DOWNTREND
     ):
-        reasons.append("株価トレンドが強く悪化")
+        reasons.append((VoteKind.STRONG_TREND_WORSENING, "株価トレンドが強く悪化"))
 
     if is_growth and inputs.guidance_revision_disclosed and inputs.severe_earnings_decline:
-        reasons.append("業績予想の下方修正と深刻な業績悪化が重なった")
+        reasons.append((VoteKind.GROWTH_COLLAPSE, "業績予想の下方修正と深刻な業績悪化が重なった"))
 
-    return len(reasons), reasons
+    return reasons
 
 
 def _wrap(
@@ -1298,7 +1396,7 @@ def _compute_sell_prices(
     )
 
 
-def evaluate_profit_taking(
+def evaluate_profit_taking_traced(
     current_price: Decimal,
     average_purchase_price: Decimal,
     shares: int,
@@ -1313,8 +1411,12 @@ def evaluate_profit_taking(
     annual_benefit_value_at_min_lot: Decimal | None = None,
     benefit_min_shares_required: int | None = None,
     is_benefit_eligible: bool = False,
-) -> ProfitTakingResult:
-    """利確判定(要求仕様6節・7節・8節・9節・10節)。
+) -> tuple[ProfitTakingResult, ExitTrace]:
+    """利確判定(要求仕様6節・7節・8節・9節・10節)と、判定の経過の記録(ExitTrace)を返す。
+
+    Issue #878 PR-3a: 判定の結果(戻り値の第 1 要素)は evaluate_profit_taking() と同一で、
+    判定ロジックは変えていない。第 2 要素は、どの経路で候補が成立したか・緩和の段数・上昇トレンド・
+    hard_overvalued を構造化して返す記録で、adapter(PR-3b)が判定を再計算せずに読むためのもの。
 
     含み益率・適正価格超過率単独ではPARTIAL/FULLへ到達できない設計とする
     (複数の独立条件が該当した場合のみ、または強い条件が1つ該当した場合のみ
@@ -1398,24 +1500,30 @@ def evaluate_profit_taking(
         fv_partial_gate_ok, _ = _fair_value_partial_gate_met(
             current_price, pnl, condition_inputs, config
         )
-        partial_count, partial_reasons = _count_partial_conditions(
+        partial_vote_list = _partial_votes(
             current_total_yield_pct,
             condition_inputs,
             config,
             fv_weak_reason,
         )
-        full_strong_reasons = _full_strong_conditions(
+        full_strong_paths = _full_strong_paths(
             current_price, pnl, condition_inputs, config, fv_strong_reason
         )
-        full_moderate_count, full_moderate_reasons = _count_full_moderate_conditions(
+        full_moderate_vote_list = _full_moderate_votes(
             current_total_yield_pct, condition_inputs, config
         )
     else:
         fv_strong_reason = None
         fv_partial_gate_ok = False
-        partial_count, partial_reasons = 0, []
-        full_strong_reasons = []
-        full_moderate_count, full_moderate_reasons = 0, []
+        partial_vote_list = []
+        full_strong_paths = []
+        full_moderate_vote_list = []
+    partial_count = len(partial_vote_list)
+    partial_reasons = [reason for _, reason in partial_vote_list]
+    partial_vote_kinds = tuple(kind for kind, _ in partial_vote_list)
+    full_strong_reasons = [(reason, origin) for _, reason, origin in full_strong_paths]
+    full_moderate_count = len(full_moderate_vote_list)
+    full_moderate_reasons = [reason for _, reason in full_moderate_vote_list]
 
     cbj = config.condition_based_judgment
 
@@ -1424,6 +1532,8 @@ def evaluate_profit_taking(
     # のリストを作り、最大レベル→最大優先度originの順で採用する(複数経路が同時に成立
     # した場合の扱いを曖昧にしない、レビュー対応)。
     candidates: list[tuple[_Level, _RawLevelOrigin, list[str]]] = []
+    # 候補が成立した各地点の記録(Issue #878 PR-3a。判定には使わない)
+    trace_candidates: list[TraceCandidate] = []
 
     if full_strong_reasons:
         best_full_strong_origin = max(origin for _, origin in full_strong_reasons)
@@ -1433,10 +1543,22 @@ def evaluate_profit_taking(
         fair_value_used_as_sole_strong_basis = (
             len(full_strong_reasons) == 1 and full_strong_reasons[0][0] == fv_strong_reason
         )
+        for strong_path, _, strong_origin in full_strong_paths:
+            trace_candidates.append(
+                TraceCandidate(strong_path, int(_Level.FULL), strong_origin.name)
+            )
 
     if full_moderate_count >= cbj.min_moderate_conditions_for_full:
         candidates.append(
             (_Level.FULL, _RawLevelOrigin.OTHER_CONDITIONS, full_moderate_reasons)
+        )
+        trace_candidates.append(
+            TraceCandidate(
+                CandidatePath.FULL_MODERATE_CONDITIONS,
+                int(_Level.FULL),
+                _RawLevelOrigin.OTHER_CONDITIONS.name,
+                tuple(kind for kind, _ in full_moderate_vote_list),
+            )
         )
 
     if price_level == _Level.FULL:
@@ -1454,6 +1576,13 @@ def evaluate_profit_taking(
                     f"含み益率{pnl.unrealized_pnl_pct:.1f}%かつ{ceiling_note}"
                     f"(上値余地{upside_pct:.1f}%)、全株利確水準に到達"
                 ],
+            )
+        )
+        trace_candidates.append(
+            TraceCandidate(
+                CandidatePath.PRICE_UPSIDE_MATRIX,
+                int(_Level.FULL),
+                _RawLevelOrigin.PRICE_POSITION.name,
             )
         )
 
@@ -1480,6 +1609,25 @@ def evaluate_profit_taking(
             if gate_reason not in partial_reasons_with_gate:
                 partial_reasons_with_gate.append(gate_reason)
         candidates.append((_Level.PARTIAL, origin, partial_reasons_with_gate))
+        # 件数条件による成立と、適正価格の partial gate による成立は別の経路として記録する
+        # (候補は 1 つに併合されるが、origin は gate が成立していれば FAIR_VALUE_STRONG)
+        if partial_count >= cbj.min_conditions_for_partial:
+            trace_candidates.append(
+                TraceCandidate(
+                    CandidatePath.PARTIAL_CONDITIONS,
+                    int(_Level.PARTIAL),
+                    _RawLevelOrigin.OTHER_CONDITIONS.name,
+                    partial_vote_kinds,
+                )
+            )
+        if fv_partial_gate_ok and bull_excess_pct is not None:
+            trace_candidates.append(
+                TraceCandidate(
+                    CandidatePath.FAIR_VALUE_PARTIAL_GATE,
+                    int(_Level.PARTIAL),
+                    _RawLevelOrigin.FAIR_VALUE_STRONG.name,
+                )
+            )
 
     if price_level == _Level.PARTIAL and condition_inputs.partial_sale_executable:
         assert upside_pct is not None
@@ -1491,6 +1639,13 @@ def evaluate_profit_taking(
                     f"含み益率{pnl.unrealized_pnl_pct:.1f}%かつ上値余地{upside_pct:.1f}%、"
                     "一部利確水準に到達"
                 ],
+            )
+        )
+        trace_candidates.append(
+            TraceCandidate(
+                CandidatePath.PRICE_UPSIDE_MATRIX,
+                int(_Level.PARTIAL),
+                _RawLevelOrigin.PRICE_POSITION.name,
             )
         )
 
@@ -1522,6 +1677,13 @@ def evaluate_profit_taking(
                 ],
             )
         )
+        trace_candidates.append(
+            TraceCandidate(
+                CandidatePath.PROFIT_PROTECTION_STRONG,
+                int(_Level.PARTIAL),
+                _RawLevelOrigin.PROFIT_PROTECTION_STRONG.name,
+            )
+        )
 
     # WATCHの起点(要求仕様§6): 強気適正価格の超過閾値には届かない、または中立適正価格を
     # わずかに上回るのみの場合でも、監視開始としては扱う。PARTIALへの到達に必要な独立
@@ -1547,6 +1709,16 @@ def evaluate_profit_taking(
             else:
                 watch_reasons.append(f"含み益率{pnl.unrealized_pnl_pct:.1f}%が監視水準に到達")
         candidates.append((_Level.WATCH, watch_origin, watch_reasons))
+        trace_candidates.append(
+            TraceCandidate(
+                CandidatePath.PRICE_UPSIDE_MATRIX
+                if watch_origin == _RawLevelOrigin.PRICE_POSITION
+                else CandidatePath.PARTIAL_CONDITIONS,
+                int(_Level.WATCH),
+                watch_origin.name,
+                partial_vote_kinds,
+            )
+        )
 
     if candidates:
         raw_level = max(level for level, _, _ in candidates)
@@ -1563,6 +1735,7 @@ def evaluate_profit_taking(
         triggered_reasons = []
 
     mitigating_downgrade_applied = False
+    mitigation_steps = 0
     if raw_level == _Level.HOLD:
         fundamental_level = _Level.HOLD
         applied_factors: list[str] = []
@@ -1576,6 +1749,9 @@ def evaluate_profit_taking(
             config.mitigating_factors,
             downgrade_disabled=(origin == _RawLevelOrigin.FUNDAMENTAL_CRITICAL_RISK),
         )
+        # Issue #878 PR-3a(trace): 緩和要因が実際に下げた段数(clamp 込み)。WATCH 床・origin 別の
+        # 床より前の値で、Arbiter の降格(緩和 -> 床)の入力になる
+        mitigation_steps = int(raw_level) - int(fundamental_level)
         # 何らかの利確シグナルが実際に発生している場合、緩和要因によってもHOLD(無評価)まで
         # 完全に打ち消すのではなく、最低でもWATCH(監視継続)として可視化する。
         if fundamental_level == _Level.HOLD:
@@ -1610,25 +1786,31 @@ def evaluate_profit_taking(
     timing_action = TimingAction.NEUTRAL
     final_level = fundamental_level
     momentum = condition_inputs.momentum
+    # Issue #878 PR-3a(trace): hard_overvalued を uptrend の枝の外で常に算出する(式は従来と
+    # 同じ。上昇トレンドでなければ判定には使わない。欠測の入力でも短絡評価で例外を出さない)
+    timing_margin = config.condition_based_judgment.timing_downgrade_block_margin_pct
+    hard_overvalued = (
+        fv_range is not None
+        and fv_range.usable_for_trading_judgment
+        and fv_range.overall_confidence != ConfidenceLevel.LOW
+        and fv_range.bull is not None
+        and current_price > fv_range.bull * (1 + Decimal(str(timing_margin)) / 100)
+    )
+    uptrend = False
     if momentum is not None:
         trend = momentum.trend_classification
         if trend in (TrendClassification.STRONG_UPTREND, TrendClassification.UPTREND):
+            uptrend = True
             timing_action = TimingAction.WAIT_UPTREND_CONTINUES
             # コードレビュー対応(2026-08): origin=FUNDAMENTAL_CRITICAL_RISKはmitigating層と
             # 同様、タイミング層による降格も適用しない(重大リスク由来の判定を上昇トレンド
             # だけで打ち消させない)。
-            if origin != _RawLevelOrigin.FUNDAMENTAL_CRITICAL_RISK:
-                margin = config.condition_based_judgment.timing_downgrade_block_margin_pct
-                fv_range = condition_inputs.fair_value_range
-                hard_overvalued = (
-                    fv_range is not None
-                    and fv_range.usable_for_trading_judgment
-                    and fv_range.overall_confidence != ConfidenceLevel.LOW
-                    and fv_range.bull is not None
-                    and current_price > fv_range.bull * (1 + Decimal(str(margin)) / 100)
-                )
-                if fundamental_level > _Level.HOLD and not hard_overvalued:
-                    final_level = _Level(max(0, int(fundamental_level) - 1))
+            if (
+                origin != _RawLevelOrigin.FUNDAMENTAL_CRITICAL_RISK
+                and fundamental_level > _Level.HOLD
+                and not hard_overvalued
+            ):
+                final_level = _Level(max(0, int(fundamental_level) - 1))
         elif trend in (TrendClassification.STRONG_DOWNTREND, TrendClassification.DOWNTREND):
             timing_action = TimingAction.ACCELERATE_DOWNTREND_CONFIRMED
         else:
@@ -1703,7 +1885,7 @@ def evaluate_profit_taking(
             }
         )
 
-    return ProfitTakingResult(
+    result = ProfitTakingResult(
         recommendation_type=final_action,
         fundamental_action=fundamental_action,
         timing_action=timing_action,
@@ -1767,3 +1949,56 @@ def evaluate_profit_taking(
             else None
         ),
     )
+    trace = ExitTrace(
+        candidates=tuple(trace_candidates),
+        raw_level=int(raw_level),
+        origin=origin.name,
+        mitigation_steps=mitigation_steps,
+        uptrend=uptrend,
+        hard_overvalued=bool(hard_overvalued),
+    )
+    return result, trace
+
+
+def evaluate_profit_taking(
+    current_price: Decimal,
+    average_purchase_price: Decimal,
+    shares: int,
+    total_purchase_amount: Decimal,
+    cumulative_dividend_received: Decimal,
+    cumulative_benefit_value_received: Decimal,
+    current_total_yield_pct: float | None,
+    forecast_annual_dividend_per_share: Decimal | None,
+    mitigating_inputs: MitigatingFactorInputs,
+    config: ProfitTakingRulesConfig,
+    condition_inputs: ProfitTakingConditionInputs | None = None,
+    annual_benefit_value_at_min_lot: Decimal | None = None,
+    benefit_min_shares_required: int | None = None,
+    is_benefit_eligible: bool = False,
+) -> ProfitTakingResult:
+    """利確判定(要求仕様6節・7節・8節・9節・10節)。判定の結果だけを返す。
+
+    判定の本体は evaluate_profit_taking_traced()(Issue #878 PR-3a)。本関数はその結果の
+    第 1 要素を返す薄い包みで、署名・結果・例外は従来と同一(呼び出し元・永続・通知の契約は
+    変えない)。
+
+    Raises:
+        InvalidProfitTakingInputError: 平均取得単価・総取得金額が0以下の場合(Issue #75)。
+    """
+    result, _ = evaluate_profit_taking_traced(
+        current_price,
+        average_purchase_price,
+        shares,
+        total_purchase_amount,
+        cumulative_dividend_received,
+        cumulative_benefit_value_received,
+        current_total_yield_pct,
+        forecast_annual_dividend_per_share,
+        mitigating_inputs,
+        config,
+        condition_inputs,
+        annual_benefit_value_at_min_lot,
+        benefit_min_shares_required,
+        is_benefit_eligible,
+    )
+    return result
