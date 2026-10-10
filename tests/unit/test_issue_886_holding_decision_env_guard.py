@@ -181,7 +181,14 @@ def _functions_in_cli() -> list[tuple[str, ast.FunctionDef]]:
 
 
 def test_every_cli_function_that_calls_the_services_starts_with_the_guard() -> None:
-    """新しく service を呼ぶ CLI が、guard なしで足されたら落ちる。"""
+    """compare / backtest の入口(4 つの名前)を呼ぶ CLI の関数は、guard から始まる。
+
+    検出するのは `_SERVICE_ENTRY_NAMES` の 4 つ(run_compare / run_live_comparison /
+    run_history_replay / HoldingDecisionService)だけである。保存先の選択が環境変数に依存する
+    他の書込 service を呼ぶ CLI(例: thesis 系の register / attest)は対象外で、本テストは
+    『新しい書込 CLI が足されたら落ちる』ことまでは保証しない
+    (#886 の承認範囲は compare / backtest)。
+    """
     callers = [
         (file, function)
         for file, function in _functions_in_cli()
