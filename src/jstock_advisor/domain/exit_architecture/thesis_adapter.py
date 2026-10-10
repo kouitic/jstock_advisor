@@ -328,12 +328,24 @@ class ThesisMappingPolicy:
             raise ValueError("W-2 の集合は空にできない(帯を必要条件にしないなら None)")
 
 
+class InconsistentHardGateError(ValueError):
+    """ハードゲートの記録が内部で食い違っている(triggered と reason_codes が整合しない)。
+
+    triggered = True なのに理由コードが無い、または triggered = False なのに理由コードがある。
+    欠落したデータではなく、成り立たない状態(保存の破損・旧 schema・手作業の改変)であり、
+    UNDETERMINED(データ不足)にすると破損を黙って吸収するため、例外で拒否する(DoD 5: 失敗の可視性)。
+    呼び出し側(replay の CLI・shadow の隔離)は 1 件ずつ捕捉して『読めない記録』として数える。
+    メッセージに記録の値(理由コード・銘柄・金額)を含めない。
+    """
+
+
 @dataclass(frozen=True)
 class ThesisAdaptation:
     """adapter の結果。verdict と、Evidence にならなかった入力の記録(黙って捨てない)。
 
-    supporting_only  root を持たない補助として扱った入力の名前
-    unmapped         対応表に無かった名前(新しいルール・理由コード。契約テストで対応表の網羅を固定)
+    supporting_only  root を持たない補助として扱った入力の名前(名前の昇順。入力の並びに依存しない)
+    unmapped         対応表に無かった名前(新しいルール・理由コード。契約テストで対応表の網羅を固定。
+                     名前の昇順)
     """
 
     verdict: ThesisVerdict
@@ -374,7 +386,20 @@ def _shortfall_items(
 def adapt_holding_decision_to_thesis(
     result: HoldingDecisionResult, policy: ThesisMappingPolicy
 ) -> ThesisAdaptation:
-    """保有判断スコアの結果を L1 の ThesisVerdict へ写す(純粋関数)。"""
+    """保有判断スコアの結果を L1 の ThesisVerdict へ写す(純粋関数)。
+
+    出力の並びは入力の並びに依存しない: evidence は (fact_key, source) の順、hard_gate_reasons・
+    supporting_only・unmapped は名前の昇順。同じ内容の入力(順序違い)から同じ結果を返す。
+
+    Raises:
+        InconsistentHardGateError: hard_gate の triggered と reason_codes が整合しない入力
+            (成り立たない状態。UNDETERMINED にせず拒否する)。
+    """
+    gate = result.hard_gate
+    if gate.triggered != bool(gate.reason_codes):
+        raise InconsistentHardGateError(
+            "hard_gate の triggered と reason_codes が整合しない(記録の破損または旧 schema)"
+        )
     raw: list[Evidence] = []
     supporting: list[str] = []
     unmapped: list[str] = []
@@ -407,12 +432,12 @@ def adapt_holding_decision_to_thesis(
         reliability=reliability,
         evidence=evidence,
         hard_gate_triggered=result.hard_gate.triggered,
-        hard_gate_reasons=tuple(result.hard_gate.reason_codes),
+        hard_gate_reasons=tuple(sorted(result.hard_gate.reason_codes)),
     )
     return ThesisAdaptation(
         verdict=verdict,
-        supporting_only=tuple(dict.fromkeys(supporting)),
-        unmapped=tuple(dict.fromkeys(unmapped)),
+        supporting_only=tuple(sorted(set(supporting))),
+        unmapped=tuple(sorted(set(unmapped))),
     )
 
 

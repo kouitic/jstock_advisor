@@ -2,7 +2,7 @@
 (Issue #878 PR-3a)。
 
 1. characterization: 変更前の実装で生成した期待値
-   (tests/fixtures/profit_taking_characterization.json。合成入力 約 9500 件。結果の全 field の
+   (tests/fixtures/profit_taking_characterization.json。合成入力 約 11000 件。結果の全 field の
    ハッシュ + 最終 action・origin・売却強度)と、現行の
    evaluate_profit_taking の結果が全件一致する。**この期待値は再生成しない**(trace の追加は判定を
    変えない変更であり、期待値が変わるなら判定が変わったということ)。判定ルール・設定を意図して
@@ -55,6 +55,7 @@ def _all_cases() -> list[pc.Case]:
         *pc.sampled_cases(),
         *pc.focused_cases(),
         *pc.boundary_cases(),
+        *pc.gate_cases(),
         *pc.missing_input_cases(),
     ]
 
@@ -62,7 +63,7 @@ def _all_cases() -> list[pc.Case]:
 def test_the_characterization_covers_every_case_of_the_grid() -> None:
     golden = _golden()
     assert set(golden) == {case.case_id for case in _all_cases()}
-    assert len(golden) > 9000
+    assert len(golden) > 11000
 
 
 def test_the_grid_reaches_every_action_and_origin() -> None:
@@ -338,3 +339,26 @@ def test_the_hard_overvalued_margin_is_applied_as_a_strict_boundary() -> None:
         assert pc.digest(plain) == pc.digest(result)
         outcomes[label] = trace.hard_overvalued
     assert outcomes == {"at_bull": False, "inside_margin": False, "above_margin": True}
+
+
+def test_the_grid_exercises_each_side_of_the_partial_and_full_reaching_conditions() -> None:
+    """PARTIAL への到達条件 `partial_count >= min or fv_partial_gate_ok` の右の項と、適正価格の強い
+    条件による FULL が、格子の中で『単独で』最終判定を決める case を持つ。持たないと、右の項を外す
+    変更を characterization が捉えられない(#896 の独立 review の SHOULD-1)。"""
+    gate_alone_partial = 0
+    fair_value_strong_full = 0
+    for _, result, trace in _TRACES:
+        paths = {(c.path, c.level) for c in trace.candidates}
+        gate = (CandidatePath.FAIR_VALUE_PARTIAL_GATE, 2) in paths
+        conditions = (CandidatePath.PARTIAL_CONDITIONS, 2) in paths
+        if (
+            gate
+            and not conditions
+            and result.final_action.value == "PARTIAL_PROFIT_TAKE"
+            and result.origin == "FAIR_VALUE_STRONG"
+        ):
+            gate_alone_partial += 1
+        if (CandidatePath.FAIR_VALUE_STRONG, 3) in paths and result.origin == "FAIR_VALUE_STRONG":
+            fair_value_strong_full += 1
+    assert gate_alone_partial >= 20
+    assert fair_value_strong_full >= 20
