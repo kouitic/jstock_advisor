@@ -31,6 +31,7 @@ import pytest
 
 import jstock_advisor.domain.exit_architecture as pkg
 from jstock_advisor.domain.exit_architecture.decision import (
+    ALLOWED_ROOTS_BY_KIND,
     FORBIDDEN_FULL_ROOTS,
     ContractViolationError,
     Decision,
@@ -109,6 +110,7 @@ _VOCABULARY: dict[type, set[str]] = {
         "PORTFOLIO",
         "DATA",
         "USER_DIRECTIVE",
+        "OPPORTUNITY_COST",
     },
     FullEvidenceKind: {
         "THESIS_DETERIORATION",
@@ -427,10 +429,43 @@ def test_layer_verdicts_require_every_layer_explicitly() -> None:
 # --- (4) Decision の不変条件 ----------------------------------------------------------------
 
 
-def _full_evidence(
-    kind: FullEvidenceKind = FullEvidenceKind.THESIS_DETERIORATION,
-) -> FullEvidence:
-    return FullEvidence(kind, (_ev(RootFactor.EARNINGS, "a"), _ev(RootFactor.CASHFLOW, "b")))
+def _thesis(state: ThesisState | None = ThesisState.WEAKENING) -> ThesisVerdict:
+    """裏づけの ThesisVerdict。state が None なら UNDETERMINED。"""
+    determination = (
+        Determination.of(state)
+        if state is not None
+        else _undetermined(UndeterminedReason.COVERAGE_INSUFFICIENT)
+    )
+    return ThesisVerdict(determination, ReliabilityClass.RELIABLE)
+
+
+def _er(severely_low: bool | None = True) -> ExpectedReturnVerdict:
+    """裏づけの ExpectedReturnVerdict。None なら全て UNDETERMINED(未実装の間の状態)。"""
+    if severely_low is None:
+        return ExpectedReturnVerdict(
+            _components(determined=False),
+            _undetermined(),
+            _undetermined(),
+            ReliabilityClass.RELIABLE,
+        )
+    return ExpectedReturnVerdict(
+        _components(determined=True),
+        Determination.of(True),
+        Determination.of(severely_low),
+        ReliabilityClass.RELIABLE,
+    )
+
+
+def _rotation(gap_clear: bool | None = True) -> RotationVerdict:
+    return RotationVerdict(_undetermined() if gap_clear is None else Determination.of(gap_clear))
+
+
+def _full_evidence() -> FullEvidence:
+    return FullEvidence(
+        FullEvidenceKind.THESIS_DETERIORATION,
+        (_ev(RootFactor.EARNINGS, "a"), _ev(RootFactor.CASHFLOW, "b")),
+        thesis=_thesis(),
+    )
 
 
 def _partial() -> Decision:
@@ -514,12 +549,19 @@ def test_full_without_a_full_evidence_is_rejected_for_every_class(exit_class: Ex
 
 @pytest.mark.parametrize("root", sorted(FORBIDDEN_FULL_ROOTS, key=lambda r: r.value))
 def test_roots_that_cannot_justify_full_are_rejected_in_a_full_evidence(root: RootFactor) -> None:
+    # 裏づけの verdict を揃えた上で拒否される(= 拒否の理由は root)
     with pytest.raises(ContractViolationError):
         FullEvidence(
-            FullEvidenceKind.THESIS_DETERIORATION, (_ev(RootFactor.EARNINGS, "a"), _ev(root, "b"))
+            FullEvidenceKind.THESIS_DETERIORATION,
+            (_ev(RootFactor.EARNINGS, "a"), _ev(root, "b")),
+            thesis=_thesis(),
         )
     with pytest.raises(ContractViolationError):
-        FullEvidence(FullEvidenceKind.EXPECTED_RETURN_DETERIORATION, (_ev(root, "b"),))
+        FullEvidence(
+            FullEvidenceKind.EXPECTED_RETURN_DETERIORATION,
+            (_ev(RootFactor.VALUATION_LEVEL, "v"), _ev(root, "b")),
+            expected_return=_er(True),
+        )
 
 
 def test_forbidden_full_roots_are_exactly_price_user_directive_data_event_and_portfolio() -> None:
@@ -536,10 +578,10 @@ def test_forbidden_full_roots_are_exactly_price_user_directive_data_event_and_po
 
 def test_full_evidence_needs_supporting_evidence_that_is_independent() -> None:
     with pytest.raises(ContractViolationError):
-        FullEvidence(FullEvidenceKind.THESIS_DETERIORATION, ())
+        FullEvidence(FullEvidenceKind.THESIS_DETERIORATION, (), thesis=_thesis())
     suspected_only = (_ev(RootFactor.RETURN_POLICY, "d", status=EvidenceStatus.SUSPECTED),)
     with pytest.raises(ContractViolationError):
-        FullEvidence(FullEvidenceKind.THESIS_DETERIORATION, suspected_only)
+        FullEvidence(FullEvidenceKind.THESIS_DETERIORATION, suspected_only, thesis=_thesis())
 
 
 def test_full_evidence_may_carry_a_suspected_item_next_to_an_independent_one() -> None:
@@ -552,10 +594,175 @@ def test_full_evidence_may_carry_a_suspected_item_next_to_an_independent_one() -
         ExitClass.VALUE_EXIT,
         Strength.FULL,
         ExitLayer.L1_THESIS,
-        full_evidence=(FullEvidence(FullEvidenceKind.THESIS_DETERIORATION, mixed),),
+        full_evidence=(
+            FullEvidence(FullEvidenceKind.THESIS_DETERIORATION, mixed, thesis=_thesis()),
+        ),
     )
     # 推定のみの根は独立 root に数えない
     assert full.independent_roots == {RootFactor.EARNINGS}
+
+
+# --- (4b) FE の kind と root の対応・裏づけ(UJ-4。HANAKO の PR 前 review の M-1) ---------------
+
+_VALUATION_ONLY = [
+    (_ev(RootFactor.VALUATION_LEVEL, "v1"),),
+    (_ev(RootFactor.VALUATION_LEVEL, "v1"), _ev(RootFactor.VALUATION_LEVEL, "v2")),
+]
+
+
+@pytest.mark.parametrize("kind", list(FullEvidenceKind))
+@pytest.mark.parametrize("evidence", _VALUATION_ONLY, ids=["one", "several"])
+def test_valuation_exhaustion_alone_cannot_form_a_full_evidence_under_any_kind(
+    kind: FullEvidenceKind, evidence: tuple[Evidence, ...]
+) -> None:
+    # 裏づけの verdict を全て揃えても、VALUATION_LEVEL の根拠だけでは、どの kind でも拒否される
+    with pytest.raises(ContractViolationError):
+        FullEvidence(
+            kind,
+            evidence,
+            thesis=_thesis(ThesisState.BROKEN),
+            expected_return=_er(True),
+            rotation=_rotation(True),
+        )
+
+
+def test_relabelling_valuation_exhaustion_as_expected_return_cannot_make_a_full_decision() -> None:
+    # review の反例: 枯渇の根拠 1 件に FE-2 のラベルを付けて FULL の Decision を作る
+    with pytest.raises(ContractViolationError):
+        FullEvidence(
+            FullEvidenceKind.EXPECTED_RETURN_DETERIORATION,
+            (_ev(RootFactor.VALUATION_LEVEL, "v"),),
+            expected_return=_er(True),
+        )
+    # FullEvidence が作れない以上、それを持つ FULL の Decision も作れない。FULL の入口は他に無い
+    with pytest.raises(ContractViolationError):
+        Decision(ExitAction.FULL, ExitClass.VALUE_EXIT, Strength.FULL, ExitLayer.L2_EXPECTED_RETURN)
+
+
+def test_allowed_roots_by_kind_is_a_fixed_vocabulary_correspondence() -> None:
+    assert {
+        FullEvidenceKind.THESIS_DETERIORATION: {
+            RootFactor.EARNINGS,
+            RootFactor.CASHFLOW,
+            RootFactor.BALANCE_SHEET,
+            RootFactor.RETURN_POLICY,
+            RootFactor.GOVERNANCE_EVENT,
+        },
+        FullEvidenceKind.EXPECTED_RETURN_DETERIORATION: {
+            RootFactor.VALUATION_LEVEL,
+            RootFactor.RETURN_POLICY,
+            RootFactor.EARNINGS,
+        },
+        FullEvidenceKind.ROTATION_OPPORTUNITY: {RootFactor.OPPORTUNITY_COST},
+    } == ALLOWED_ROOTS_BY_KIND
+    # 許す root は、禁止の root と重ならない。VALUATION_LEVEL は FE-2 だけ(単独では不可)
+    for allowed in ALLOWED_ROOTS_BY_KIND.values():
+        assert not allowed & FORBIDDEN_FULL_ROOTS
+    assert [k for k, v in ALLOWED_ROOTS_BY_KIND.items() if RootFactor.VALUATION_LEVEL in v] == [
+        FullEvidenceKind.EXPECTED_RETURN_DETERIORATION
+    ]
+
+
+def _backing_for(kind: FullEvidenceKind) -> dict[str, object]:
+    return {
+        FullEvidenceKind.THESIS_DETERIORATION: {"thesis": _thesis()},
+        FullEvidenceKind.EXPECTED_RETURN_DETERIORATION: {"expected_return": _er(True)},
+        FullEvidenceKind.ROTATION_OPPORTUNITY: {"rotation": _rotation(True)},
+    }[kind]
+
+
+@pytest.mark.parametrize(
+    ("kind", "root"),
+    [
+        (kind, root)
+        for kind in FullEvidenceKind
+        for root in RootFactor
+        if root not in ALLOWED_ROOTS_BY_KIND[kind]
+    ],
+    ids=lambda v: v.value if isinstance(v, StrEnum) else str(v),
+)
+def test_a_root_outside_the_kinds_correspondence_is_rejected_even_with_full_backing(
+    kind: FullEvidenceKind, root: RootFactor
+) -> None:
+    anchor = sorted(ALLOWED_ROOTS_BY_KIND[kind] - {RootFactor.VALUATION_LEVEL}, key=str)[0]
+    with pytest.raises(ContractViolationError):
+        FullEvidence(kind, (_ev(anchor, "a"), _ev(root, "b")), **_backing_for(kind))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("kind", list(FullEvidenceKind))
+def test_each_kind_is_buildable_with_its_own_roots_and_backing(kind: FullEvidenceKind) -> None:
+    roots = sorted(ALLOWED_ROOTS_BY_KIND[kind] - {RootFactor.VALUATION_LEVEL}, key=str)
+    evidence = tuple(_ev(r, f"f{i}") for i, r in enumerate(roots))
+    built = FullEvidence(kind, evidence, **_backing_for(kind))  # type: ignore[arg-type]
+    assert built.kind is kind
+
+
+def test_fe2_can_combine_valuation_level_with_another_component_root() -> None:
+    built = FullEvidence(
+        FullEvidenceKind.EXPECTED_RETURN_DETERIORATION,
+        (_ev(RootFactor.VALUATION_LEVEL, "v"), _ev(RootFactor.RETURN_POLICY, "r")),
+        expected_return=_er(True),
+    )
+    assert built.kind is FullEvidenceKind.EXPECTED_RETURN_DETERIORATION
+
+
+def test_fe2_second_root_must_itself_be_an_independent_evidence() -> None:
+    suspected = _ev(RootFactor.RETURN_POLICY, "r", status=EvidenceStatus.SUSPECTED)
+    with pytest.raises(ContractViolationError):
+        FullEvidence(
+            FullEvidenceKind.EXPECTED_RETURN_DETERIORATION,
+            (_ev(RootFactor.VALUATION_LEVEL, "v"), suspected),
+            expected_return=_er(True),
+        )
+
+
+@pytest.mark.parametrize("severely_low", [False, None], ids=["not-low", "undetermined"])
+def test_fe2_needs_a_determined_true_severely_low(severely_low: bool | None) -> None:
+    evidence = (_ev(RootFactor.VALUATION_LEVEL, "v"), _ev(RootFactor.RETURN_POLICY, "r"))
+    with pytest.raises(ContractViolationError):
+        FullEvidence(
+            FullEvidenceKind.EXPECTED_RETURN_DETERIORATION,
+            evidence,
+            expected_return=_er(severely_low),
+        )
+    with pytest.raises(ContractViolationError):
+        FullEvidence(FullEvidenceKind.EXPECTED_RETURN_DETERIORATION, evidence)
+
+
+@pytest.mark.parametrize("state", [ThesisState.INTACT, None], ids=["intact", "undetermined"])
+def test_fe1_needs_a_weakening_or_broken_thesis(state: ThesisState | None) -> None:
+    evidence = (_ev(RootFactor.EARNINGS, "a"),)
+    with pytest.raises(ContractViolationError):
+        FullEvidence(FullEvidenceKind.THESIS_DETERIORATION, evidence, thesis=_thesis(state))
+    with pytest.raises(ContractViolationError):
+        FullEvidence(FullEvidenceKind.THESIS_DETERIORATION, evidence)
+
+
+@pytest.mark.parametrize("state", [ThesisState.WEAKENING, ThesisState.BROKEN])
+def test_fe1_accepts_weakening_and_broken(state: ThesisState) -> None:
+    evidence = (_ev(RootFactor.EARNINGS, "a"),)
+    assert FullEvidence(FullEvidenceKind.THESIS_DETERIORATION, evidence, thesis=_thesis(state))
+
+
+@pytest.mark.parametrize("gap", [False, None], ids=["not-clear", "undetermined"])
+def test_fe3_cannot_be_built_until_the_rotation_gap_is_determined_true(gap: bool | None) -> None:
+    evidence = (_ev(RootFactor.OPPORTUNITY_COST, "o"),)
+    with pytest.raises(ContractViolationError):
+        FullEvidence(FullEvidenceKind.ROTATION_OPPORTUNITY, evidence, rotation=_rotation(gap))
+    with pytest.raises(ContractViolationError):
+        FullEvidence(FullEvidenceKind.ROTATION_OPPORTUNITY, evidence)
+
+
+def test_an_undetermined_backing_never_makes_a_full_evidence() -> None:
+    # 未実装の軸(RAER・資本入替)が UNDETERMINED の間は、FE-2 / FE-3 を作れない(値を作らない)
+    for kind, backing in (
+        (FullEvidenceKind.EXPECTED_RETURN_DETERIORATION, {"expected_return": _er(None)}),
+        (FullEvidenceKind.ROTATION_OPPORTUNITY, {"rotation": _rotation(None)}),
+    ):
+        roots = sorted(ALLOWED_ROOTS_BY_KIND[kind] - {RootFactor.VALUATION_LEVEL}, key=str)
+        evidence = tuple(_ev(r, f"f{i}") for i, r in enumerate(roots))
+        with pytest.raises(ContractViolationError):
+            FullEvidence(kind, evidence, **backing)  # type: ignore[arg-type]
 
 
 # --- (5) available_cash が型に存在しない(M4) -------------------------------------------------

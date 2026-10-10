@@ -90,6 +90,7 @@ class RootFactor(StrEnum):
     GOVERNANCE_EVENT = "GOVERNANCE_EVENT"
     EVENT_RISK = "EVENT_RISK"  # 決算等の近接。売買の時機であり、売る理由ではない
     PORTFOLIO = "PORTFOLIO"  # 集中。量の問題であり、売る理由ではない
+    OPPORTUNITY_COST = "OPPORTUNITY_COST"  # L4。保有と代替の期待リターンの差(FE-3 の根拠)
     DATA = "DATA"  # L0。売る理由にしない
     USER_DIRECTIVE = "USER_DIRECTIVE"  # ユーザー設定の目標。通知であり、売却根拠ではない(UJ-6)
 
