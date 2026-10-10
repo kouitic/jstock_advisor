@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 
-from jstock_advisor.domain.exit_architecture.vocabulary import RootFactor
+from jstock_advisor.domain.exit_architecture.vocabulary import ExitLayer, RootFactor
 
 
 class EvidenceStatus(StrEnum):
@@ -33,6 +33,9 @@ class Evidence:
     status: EvidenceStatus = EvidenceStatus.TRIGGERED
     primary_source_confirmed: bool = False
     event_id: str | None = None  # 複数の層に影響する経済的事象の識別子(R-D)
+    # 供給した層(既定 None = 指定なし)。総合利回りのように、ある部品が別の層の事実を運ぶ場合に、
+    # fact_key を解析せずに『どの層の根拠か』を区別するための field(Issue #878 PR-2 の P-1)
+    layer: ExitLayer | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.root_factor, RootFactor):
@@ -74,3 +77,45 @@ def dedupe_by_fact_key(evidence: Iterable[Evidence]) -> tuple[Evidence, ...]:
 
 def _key(item: Evidence, rank: dict[EvidenceStatus, int]) -> tuple[int, int]:
     return (rank[item.status], int(item.primary_source_confirmed))
+
+
+def dedupe_key(item: Evidence) -> tuple[str, str]:
+    """同じ事実を指す根拠の統合キー。event_id があればそれ、無ければ fact_key(R-D)。
+
+    event_id と fact_key の名前空間は分ける(一方の文字列が他方と偶然一致しても統合しない)。
+    """
+    if item.event_id is not None:
+        return ("event", item.event_id)
+    return ("fact", item.fact_key)
+
+
+def dedupe_evidence(evidence: Iterable[Evidence]) -> tuple[Evidence, ...]:
+    """同じ事実(dedupe_key が同じ)の根拠を 1 件に統合する。入力の並び順に依存しない。
+
+    dedupe_by_fact_key(fact_key だけで統合・初出順)とは別の関数で、event_id を読む。残すのは
+    確からしさが最も強いもの(TRIGGERED > SUSPECTED > NOT_EVALUATED)、同じなら一次情報で確認済みの
+    もの、同じなら (fact_key, source, layer) の辞書順で先のもの。結果は統合キーの辞書順。
+    """
+    rank = {
+        EvidenceStatus.TRIGGERED: 2,
+        EvidenceStatus.SUSPECTED: 1,
+        EvidenceStatus.NOT_EVALUATED: 0,
+    }
+
+    def order(item: Evidence) -> tuple[int, int, str, str, str]:
+        layer = "" if item.layer is None else item.layer.value
+        return (
+            -rank[item.status],
+            -int(item.primary_source_confirmed),
+            item.fact_key,
+            item.source,
+            layer,
+        )
+
+    chosen: dict[tuple[str, str], Evidence] = {}
+    for item in evidence:
+        key = dedupe_key(item)
+        current = chosen.get(key)
+        if current is None or order(item) < order(current):
+            chosen[key] = item
+    return tuple(chosen[key] for key in sorted(chosen))
