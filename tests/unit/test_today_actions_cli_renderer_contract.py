@@ -963,3 +963,22 @@ def test_skipped_candidates_are_not_counted_as_purchase_proposals() -> None:
     view = build(allocation=allocated(buy("0002"), buy("0003", tv.BuyFinalAction.SKIP)))
     (line,) = conclusion(r.render_today_actions_table(view))
     assert line == "本日の結論: 提案あり（売却0件・資金入替0件・購入1件）"
+
+
+def test_a_corrupted_rotation_item_falls_back_to_the_unconfirmed_display() -> None:
+    # 型は構築時に拒否するが、壊れた値が来ても assert で落とさず、数値を作らずに未確定へ倒す
+    item = confirmed_rotation_item()
+    object.__setattr__(item, "improvement", None)
+    view = build(mode=tv.ViewMode.ACTIVE, allow_active=True, rotation=rotation_outcome(item))
+    (row,) = rows(r.render_today_actions_table(view), H_ROTATION)
+    assert "株数・金額・改善幅：未確定（試験運用）" in row
+    assert not re.search(r"\d+株", row)
+    assert "改善幅 " not in row
+
+
+def test_a_corrupted_confirmed_cash_without_a_time_is_shown_as_unconfirmed() -> None:
+    corrupted = cash()
+    object.__setattr__(corrupted, "last_reconciled_at", None)
+    line = cash_line(build(cash=corrupted))
+    assert "最終棚卸し：未確認" in line
+    assert "最終棚卸し 20" not in line
