@@ -322,7 +322,7 @@ def test_legacy_items_are_kept_when_the_evaluation_is_unavailable() -> None:
 
 
 def test_the_module_has_no_table_from_legacy_labels_to_exit_reasons() -> None:
-    # 既存のラベルの文字列を、このモジュールのコードが 1 つも持たない(= 対応表も分岐も作れない)
+    # 分類を要する既存のラベルの文字列を、このモジュールのコードが持たない(= 対応表も分岐も作れない)
     tree = ast.parse(_MODULE_PATH.read_text(encoding="utf-8"))
     docstrings: set[int] = set()
     for node in ast.walk(tree):
@@ -335,7 +335,9 @@ def test_the_module_has_no_table_from_legacy_labels_to_exit_reasons() -> None:
         for n in ast.walk(tree)
         if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docstrings
     }
-    for label in _LEGACY_LABELS:
+    # 『一部売却』『全部売却』は SellAction の表示名として正当に現れる。変換の元になりうる、
+    # 分類を要する既存のラベルだけを禁止する
+    for label in ("緊急確認", "利益保全注意"):
         assert label not in literals
 
 
@@ -796,3 +798,90 @@ def test_each_exit_group_only_holds_items_of_its_own_reason() -> None:
             build(**{group: (wrong,)})
     with pytest.raises(tv.TodayActionsViewError):
         build(value_exit_items=(sell(),))  # RISK_EXIT を割安の解消の群へ入れない
+
+
+def test_an_item_of_the_wrong_type_is_rejected_in_every_group() -> None:
+    with pytest.raises(tv.TodayActionsViewError):
+        build(allocation=allocated(), legacy_items=(sell(),))  # type: ignore[arg-type]
+    with pytest.raises(tv.TodayActionsViewError):
+        build(risk_exit_items=(legacy(),))  # type: ignore[arg-type]
+    with pytest.raises(tv.TodayActionsViewError):
+        view_with(
+            status=tv.ViewStatus.NO_ACTION,
+            buy_items=(sell(),),  # type: ignore[arg-type]
+        )
+    with pytest.raises(tv.TodayActionsViewError):
+        build(model_versions=(1,))  # type: ignore[arg-type]
+    with pytest.raises(tv.TodayActionsViewError):
+        build(comparison_keys=("k", None))  # type: ignore[arg-type]
+
+
+def test_the_reasons_must_not_repeat_and_the_schema_version_is_fixed() -> None:
+    twice = (tv.ViewReason.NOT_EVALUATED, tv.ViewReason.NOT_EVALUATED)
+    with pytest.raises(tv.TodayActionsViewError):
+        view_with(status=tv.ViewStatus.UNAVAILABLE, reasons=twice)
+    with pytest.raises(tv.TodayActionsViewError):
+        view_with(schema_version="V605-v2")
+    with pytest.raises(tv.TodayActionsViewError):
+        view_with(contract_versions=(("allocation",),))  # type: ignore[arg-type]
+
+
+def test_a_confirmed_counted_ratio_is_a_ratio() -> None:
+    common = {
+        "numbers_confirmed": True,
+        "improvement": D("0.5"),
+        "sell_leg": leg("0001", shares=100, estimated_amount=D("100000")),
+        "buy_leg": leg("0002", shares=50, estimated_amount=D("100000")),
+    }
+    assert rotation_item(counted_ratio=D("1"), **common).counted_ratio == D("1")
+    for bad in (D("1.01"), D("-0.1")):
+        with pytest.raises(tv.TodayActionsViewError):
+            rotation_item(counted_ratio=bad, **common)
+
+
+def test_a_rotation_item_implies_that_the_rotation_was_evaluated() -> None:
+    with pytest.raises(tv.TodayActionsViewError):
+        view_with(
+            status=tv.ViewStatus.ACTIONS,
+            rotation_items=(rotation_item(),),
+            rotation_evaluated=False,
+        )
+
+
+def test_an_allocation_with_purchases_carries_no_unavailable_reason() -> None:
+    with pytest.raises(tv.TodayActionsViewError):
+        tv.AllocationOutcome(
+            status=tv.AllocationOutcomeStatus.ALLOCATED_SOME,
+            buys=(buy(),),
+            unavailable_reasons=(tv.ViewReason.NOT_EVALUATED,),
+        )
+
+
+def test_the_remaining_cash_basis_cannot_disagree_with_the_cash_state() -> None:
+    with pytest.raises(tv.TodayActionsViewError):
+        view_with(
+            projected_remaining_cash=D("1"),
+            remaining_cash_basis=tv.RemainingCashBasis.ESTIMATE_FROM_UNCONFIRMED_CASH,
+        )  # 棚卸し済みなのに『未確認の残高に基づく』
+    with pytest.raises(tv.TodayActionsViewError):
+        view_with(
+            cash=unconfirmed_cash(),
+            projected_remaining_cash=D("1"),
+            remaining_cash_basis=tv.RemainingCashBasis.ESTIMATE,
+        )  # 未確認なのに通常の見込み
+    with pytest.raises(tv.TodayActionsViewError):
+        view_with(remaining_cash_basis=tv.RemainingCashBasis.ESTIMATE)  # 値なしで根拠だけ
+
+
+@pytest.mark.parametrize(
+    ("group", "reason"),
+    [
+        ("risk_exit_items", tv.ExitReasonLabel.RISK_EXIT),
+        ("value_exit_items", tv.ExitReasonLabel.VALUE_EXIT),
+        ("profit_protection_items", tv.ExitReasonLabel.PROFIT_PROTECTION),
+    ],
+)
+def test_each_exit_group_alone_makes_an_actions_day(group: str, reason: tv.ExitReasonLabel) -> None:
+    view = build(allocation=allocation_no_action(), **{group: (sell(exit_reason=reason),)})
+    assert view.status is tv.ViewStatus.ACTIONS
+    assert len(getattr(view, group)) == 1
