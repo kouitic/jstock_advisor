@@ -830,13 +830,21 @@ def test_the_module_reads_no_clock_and_uses_no_float_or_io() -> None:
             assert node.id != "logger"
 
 
-def test_the_module_is_not_imported_from_anywhere_in_src() -> None:
+# この表示モデルを import してよいのは、同じ #605 の renderer / CLI だけ(いずれも未配線の dormant)。
+# 後続の PR(605-C / 605-D)が自分の module をここへ足す。それ以外の module からの import は禁止
+_ALLOWED_IMPORTERS = {
+    "domain/notification/today_actions_cli_renderer.py",  # 605-B
+}
+
+
+def test_the_module_is_imported_only_by_its_own_renderers() -> None:
     src = _REPO / "src" / "jstock_advisor"
     for path in src.rglob("*.py"):
         if path == _MODULE_PATH:
             continue
         text = path.read_text(encoding="utf-8")
-        assert "today_actions_view" not in text, str(path)
+        if "today_actions_view" in text:
+            assert path.relative_to(src).as_posix() in _ALLOWED_IMPORTERS, str(path)
 
 
 def test_each_exit_group_only_holds_items_of_its_own_reason() -> None:
