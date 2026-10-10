@@ -86,7 +86,11 @@ _BENEFIT_EVENT = "RETURN_POLICY:benefit"
 
 #: E1(sell_signal)のルール 17 本 -> root × 事実。TRIGGERED のとき(new_reason_codes に出る)だけ使う。
 SIGNAL_FACTS: dict[str, FactSpec] = {
-    # 一次情報(公式発表)で確認されたときだけ TRIGGERED(sell_signal の実読)
+    # primary = True の根拠(sell_signal.py の rule の成立条件そのもの。
+    # #888 / #889 のキーワード経路とは別):
+    #   dividend_cut / dividend_omission = 公式発表(EDINET / TDnet。official_* フラグ)があるときだけ
+    #     TRIGGERED になる(推定のみは SUSPECTED で new_reason_codes に出ない)
+    #   shareholder_benefit_abolished / major_downgrade = manual_registry(人が確認して登録した事実)
     "dividend_cut": FactSpec(
         RootFactor.RETURN_POLICY, "RETURN_POLICY:dividend:cut", _DIVIDEND_EVENT, True
     ),
@@ -393,7 +397,9 @@ def adapt_holding_decision_to_thesis(
     for source, item_code in _shortfall_items(result, policy):
         add(source, item_code, ITEM_FACTS)
 
-    evidence = dedupe_by_fact_key(raw)
+    # 入力の並び順に依存しない: 同じ fact_key の同点(status・primary が同じ)で残る source が
+    # 並び順で変わらないよう、(fact_key, source)の順に並べてから統合する(S-3)
+    evidence = dedupe_by_fact_key(sorted(raw, key=lambda e: (e.fact_key, e.source)))
     reliability = RELIABILITY_BY_CONFIDENCE[result.confidence]
     state = _thesis_state(result, policy, evidence)
     verdict = ThesisVerdict(

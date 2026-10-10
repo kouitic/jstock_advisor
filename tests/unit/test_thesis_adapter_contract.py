@@ -300,6 +300,14 @@ def test_the_facts_that_are_measured_differently_have_different_fact_keys() -> N
 
 
 def test_primary_source_is_true_only_for_the_confirmed_inputs() -> None:
+    """True の 4 本の根拠(sell_signal.py の rule の成立条件そのもの。
+    #888 / #889 のキーワード経路とは別):
+
+    dividend_cut / dividend_omission = 公式発表(EDINET / TDnet。official_* フラグ)があるときだけ
+    TRIGGERED になる(推定のみは SUSPECTED で new_reason_codes に出ない)。
+    shareholder_benefit_abolished / major_downgrade = manual_registry(人が確認して登録した事実)。
+    ハードゲートの理由コードは、#888 / #889 の方針が出るまで全て False(不明を True にしない)。
+    """
     confirmed = {name for name, spec in _all_specs() if spec.primary_source_confirmed}
     assert confirmed == {
         # E1 のルールが自分で『公式発表 / 登録簿』と判定する 4 本だけ。ハードゲートの理由コードは、
@@ -555,6 +563,34 @@ def test_the_dividend_facts_share_one_economic_event() -> None:
     ).verdict.evidence
     assert {e.event_id for e in evidence} == {"RETURN_POLICY:dividend"}
     assert distinct_roots(evidence) == {RootFactor.RETURN_POLICY}
+
+
+def test_a_tie_between_a_signal_and_a_hard_gate_keeps_a_deterministic_source() -> None:
+    """同じ fact_key・同じ status・同じ primary の同点
+    (major_scandal の rule と BANKRUPTCY_FILING)で、
+    残る source が入力の並び順に依存しない(S-3)。(fact_key, source)の順に並べてから統合する。
+    """
+    result = _result(reasons=("major_scandal",), gate=("BANKRUPTCY_FILING",))
+    evidence = _adapt(result).verdict.evidence
+    assert [e.fact_key for e in evidence] == ["GOVERNANCE_EVENT:scandal"]
+    assert evidence[0].source == "hard_gate:BANKRUPTCY_FILING"
+
+
+def test_the_whole_evidence_tuple_is_independent_of_the_input_order() -> None:
+    reasons = (
+        "continuous_operating_income_decline",
+        "continuous_operating_cashflow_decline",
+        "financial_health_severe_deterioration",
+        "major_scandal",
+    )
+    items = (_item("profitability_roe"), _item("stability_deficit"))
+    forward = _result(reasons=reasons, cq_items=items, gate=("BANKRUPTCY_FILING",))
+    backward = _result(
+        reasons=tuple(reversed(reasons)),
+        cq_items=tuple(reversed(items)),
+        gate=("BANKRUPTCY_FILING",),
+    )
+    assert _adapt(forward).verdict.evidence == _adapt(backward).verdict.evidence
 
 
 def test_total_yield_and_custom_conditions_create_no_evidence() -> None:
