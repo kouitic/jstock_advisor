@@ -122,6 +122,22 @@ TRIGGER_TIE_ORDER: tuple[TriggerKind, ...] = (
     TriggerKind.PARTIAL_CONDITIONS,
 )
 
+#: TriggerKind ごとの、現行のエンジンが到達できる最大の強さ(profit_taking.py の実コードから)。
+#: これを超える主張は fail-closed で拒否する(ContractViolationError)。FE-1 が適格でも、現行に
+#: 無い経路から全株売却を作らないため(USER の条件: 全株売却を増やす変更は入れない)。
+#: 根拠: 候補生成が PARTIAL までしか作らない経路 = 件数条件(partial)・適正価格の partial gate・
+#: 利益保全 strong(_CEILING_AWARE_ORIGINS のコメントも final_level == PARTIAL にしか到達しない
+#: と明記)。FULL まで作る経路 = 件数の中程度・価格 × 上値余地・適正価格の強い条件・重大リスク
+MAX_STRENGTH_BY_TRIGGER: dict[TriggerKind, Strength] = {
+    TriggerKind.PARTIAL_CONDITIONS: Strength.PARTIAL,
+    TriggerKind.FAIR_VALUE_PARTIAL_GATE: Strength.PARTIAL,
+    TriggerKind.PROFIT_PROTECTION_STRONG: Strength.PARTIAL,
+    TriggerKind.FULL_MODERATE_CONDITIONS: Strength.FULL,
+    TriggerKind.PRICE_UPSIDE_MATRIX: Strength.FULL,
+    TriggerKind.FAIR_VALUE_STRONG: Strength.FULL,
+    TriggerKind.FULL_STRONG_CRITICAL: Strength.FULL,
+}
+
 #: TriggerKind ごとに許す class
 ALLOWED_CLASSES_BY_TRIGGER: dict[TriggerKind, frozenset[ExitClass]] = {
     TriggerKind.PARTIAL_CONDITIONS: frozenset({ExitClass.PROFIT_PROTECTION, ExitClass.VALUE_EXIT}),
@@ -186,6 +202,12 @@ class CandidateProposal:
             )
         if self.claimed_strength < Strength.WATCH:
             raise ContractViolationError("候補の強さは WATCH 以上")
+        if self.claimed_strength > MAX_STRENGTH_BY_TRIGGER[self.trigger_kind]:
+            raise ContractViolationError(
+                f"{self.trigger_kind.value} は現行のエンジンでは "
+                f"{MAX_STRENGTH_BY_TRIGGER[self.trigger_kind].name} までしか成立しない"
+                f"(主張: {self.claimed_strength.name})"
+            )
         if self.layer is ExitLayer.L0_DATA_RELIABILITY:
             raise ContractViolationError("L0 は候補を出さない(上限を決めるだけ)")
         _reject_user_directive(self.evidence)
@@ -580,7 +602,7 @@ def apply_softening(
         strength = max(strength, Strength.PARTIAL)
     if facts.uptrend and not facts.hard_overvalued and policy.timing_downgrade_steps:
         strength = _down(strength, policy.timing_downgrade_steps)
-        reasons.append(SuppressionReason.MITIGATION)
+        reasons.append(SuppressionReason.TIMING_LAYER)
     strength = max(strength, Strength.WATCH)
     if floor:
         strength = max(strength, Strength.PARTIAL)
@@ -716,6 +738,7 @@ def _ordered(items: list[SuppressedCandidate]) -> tuple[SuppressedCandidate, ...
 __all__ = [
     "ALLOWED_CLASSES_BY_TRIGGER",
     "FLOOR_ORIGINS",
+    "MAX_STRENGTH_BY_TRIGGER",
     "ORIGIN_OF_TRIGGER",
     "SOFTENING_EXEMPT_ORIGINS",
     "TRIGGER_TIE_ORDER",

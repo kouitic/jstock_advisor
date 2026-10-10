@@ -40,6 +40,7 @@ from jstock_advisor.domain.exit_architecture import arbiter
 from jstock_advisor.domain.exit_architecture.arbiter import (
     ALLOWED_CLASSES_BY_TRIGGER,
     FLOOR_ORIGINS,
+    MAX_STRENGTH_BY_TRIGGER,
     ORIGIN_OF_TRIGGER,
     SOFTENING_EXEMPT_ORIGINS,
     TRIGGER_TIE_ORDER,
@@ -666,8 +667,8 @@ def test_removing_every_non_valuation_independent_root_removes_full() -> None:
 def test_price_derived_evidence_alone_never_gives_full() -> None:
     """M3: 価格由来(PRICE_PATH)のみ。regime の票も FULL の独立根拠にならない。"""
     price = _prop(
-        TriggerKind.PROFIT_PROTECTION_STRONG,
-        ExitClass.PROFIT_PROTECTION,
+        TriggerKind.PRICE_UPSIDE_MATRIX,
+        ExitClass.VALUE_EXIT,
         Strength.FULL,
         ExitLayer.L3_PRICE_REGIME,
         (_ev(RootFactor.PRICE_PATH, "drawdown"),),
@@ -677,17 +678,16 @@ def test_price_derived_evidence_alone_never_gives_full() -> None:
     assert decision.action is ExitAction.PARTIAL
 
 
-def test_profit_protection_reaches_full_only_with_an_eligible_non_price_fe() -> None:
+def test_profit_protection_stays_partial_even_with_an_eligible_non_price_fe() -> None:
+    """現行の利益保全 strong は PARTIAL までしか成立しない。FE-1 が適格でも FULL にならない。"""
     claim = _prop(
         TriggerKind.PROFIT_PROTECTION_STRONG,
         ExitClass.PROFIT_PROTECTION,
-        Strength.FULL,
+        Strength.PARTIAL,
         ExitLayer.L3_PRICE_REGIME,
     )
-    layers = _layers(regime=_regime(RegimeState.BREAKDOWN))
-    assert _decide(_inp([claim], layers=layers)).action is ExitAction.PARTIAL
     fe_layers = dataclasses.replace(_fe1_layers(), regime=_regime(RegimeState.BREAKDOWN))
-    assert _decide(_inp([claim], layers=fe_layers)).action is ExitAction.FULL
+    assert _decide(_inp([claim], layers=fe_layers)).action is ExitAction.PARTIAL
 
 
 def test_fe2_through_arbitrate_needs_a_determined_composite() -> None:
@@ -885,6 +885,13 @@ def test_reliability_is_applied_once_whichever_side_marks_it() -> None:
 
 _KINDS = list(TRIGGER_TIE_ORDER)
 _STRENGTHS = [Strength.WATCH, Strength.PARTIAL, Strength.FULL]
+# 現行のエンジンが成立させうる (種別, 強さ) だけ(上限を超える主張は入力として拒否される)
+_VALID_CLAIMS = [
+    (kind, strength)
+    for kind in _KINDS
+    for strength in _STRENGTHS
+    if strength <= MAX_STRENGTH_BY_TRIGGER[kind]
+]
 
 
 def _class_for(kind: TriggerKind) -> ExitClass:
@@ -909,7 +916,7 @@ def _reference_winner(
 def test_the_winner_is_the_highest_level_then_the_highest_origin_like_today() -> None:
     layers = _fe1_layers()  # FULL が適格
     for count in (1, 2, 3):
-        for combo in itertools.combinations(itertools.product(_KINDS, _STRENGTHS), count):
+        for combo in itertools.combinations(_VALID_CLAIMS, count):
             pairs = list(combo)
             decision = _decide(
                 _inp([_proposal(k, s) for k, s in pairs], layers=layers, policy=_policy())
@@ -1079,7 +1086,9 @@ def test_a_signal_is_never_softened_below_a_watch() -> None:
         decision = _single(kind, Strength.WATCH, soft=_soft(steps=3, uptrend=True))
         assert decision.action is ExitAction.HOLD
         assert decision.strength is Strength.WATCH, kind
-    full = _single(TriggerKind.PARTIAL_CONDITIONS, Strength.FULL, soft=_soft(steps=9, uptrend=True))
+    full = _single(
+        TriggerKind.FULL_MODERATE_CONDITIONS, Strength.FULL, soft=_soft(steps=9, uptrend=True)
+    )
     assert full.strength is Strength.WATCH
 
 
@@ -1152,7 +1161,7 @@ def test_the_arbiter_adds_no_downgrade_of_its_own_for_the_earnings_window() -> N
         ),
     )
     away = _fe1_layers()
-    for kind in (TriggerKind.FAIR_VALUE_STRONG, TriggerKind.PARTIAL_CONDITIONS):
+    for kind in (TriggerKind.FAIR_VALUE_STRONG, TriggerKind.FULL_MODERATE_CONDITIONS):
         a = _single(kind, Strength.FULL, soft=_soft(), layers=near)
         c = _single(kind, Strength.FULL, soft=_soft(), layers=away)
         assert (a.action, a.strength, a.trigger_kind) == (c.action, c.strength, c.trigger_kind)
@@ -1525,3 +1534,75 @@ def test_the_arbiter_does_not_reference_the_current_engines() -> None:
         )
         for m in imported
     )
+
+
+# ---------------------------------------------------------------------------
+# TriggerKind ごとの強さの上限(現行に無い全株売却を作らない)
+# ---------------------------------------------------------------------------
+
+# 現行の profit_taking.py の候補生成から、各経路が到達できる最大のレベルを独立に書き下した表
+# (実装の定数の写しではなく、期待値として別に持つ)
+_CURRENT_ENGINE_MAXIMUM = {
+    TriggerKind.PARTIAL_CONDITIONS: Strength.PARTIAL,
+    TriggerKind.FAIR_VALUE_PARTIAL_GATE: Strength.PARTIAL,
+    TriggerKind.PROFIT_PROTECTION_STRONG: Strength.PARTIAL,
+    TriggerKind.FULL_MODERATE_CONDITIONS: Strength.FULL,
+    TriggerKind.PRICE_UPSIDE_MATRIX: Strength.FULL,
+    TriggerKind.FAIR_VALUE_STRONG: Strength.FULL,
+    TriggerKind.FULL_STRONG_CRITICAL: Strength.FULL,
+}
+_PARTIAL_ONLY = [k for k, m in _CURRENT_ENGINE_MAXIMUM.items() if m is Strength.PARTIAL]
+
+
+def test_every_trigger_kind_has_a_maximum_strength() -> None:
+    assert set(MAX_STRENGTH_BY_TRIGGER) == set(ORIGIN_OF_TRIGGER) == set(TRIGGER_TIE_ORDER)
+
+
+def test_the_maximum_matches_what_the_current_engine_can_reach() -> None:
+    assert MAX_STRENGTH_BY_TRIGGER == _CURRENT_ENGINE_MAXIMUM
+
+
+@pytest.mark.parametrize("kind", list(_CURRENT_ENGINE_MAXIMUM), ids=lambda k: k.value)
+def test_a_claim_above_the_maximum_is_rejected_and_up_to_it_is_accepted(kind: TriggerKind) -> None:
+    maximum = _CURRENT_ENGINE_MAXIMUM[kind]
+    for strength in _STRENGTHS:
+        if strength <= maximum:
+            _proposal(kind, strength)
+        else:
+            with pytest.raises(ContractViolationError):
+                _proposal(kind, strength)
+
+
+@pytest.mark.parametrize("kind", _PARTIAL_ONLY, ids=lambda k: k.value)
+def test_an_eligible_fe_cannot_turn_a_partial_only_path_into_a_full(kind: TriggerKind) -> None:
+    """FE-1 が適格でも、現行が PARTIAL までしか成立させない経路は FULL を主張できず、
+    PARTIAL の主張は PARTIAL のまま(全株売却を増やさない)。"""
+    with pytest.raises(ContractViolationError):
+        _proposal(kind, Strength.FULL)
+    decision = _single(kind, Strength.PARTIAL, soft=_soft(), layers=_fe1_layers())
+    assert decision.action is ExitAction.PARTIAL
+
+
+# ---------------------------------------------------------------------------
+# 緩和要因とタイミング層は trace で区別できる
+# ---------------------------------------------------------------------------
+
+
+def _softening_reasons(decision: Decision) -> list[SuppressionReason]:
+    return [
+        s.reason
+        for s in decision.suppressed
+        if s.reason in (SuppressionReason.MITIGATION, SuppressionReason.TIMING_LAYER)
+    ]
+
+
+def test_mitigation_and_the_timing_layer_are_distinguishable_in_the_trace() -> None:
+    kind = TriggerKind.FULL_MODERATE_CONDITIONS
+    both = _single(kind, Strength.FULL, soft=_soft(steps=1, uptrend=True))
+    assert sorted(r.value for r in _softening_reasons(both)) == ["MITIGATION", "TIMING_LAYER"]
+    only_mitigation = _single(kind, Strength.FULL, soft=_soft(steps=1))
+    assert _softening_reasons(only_mitigation) == [SuppressionReason.MITIGATION]
+    only_timing = _single(kind, Strength.FULL, soft=_soft(uptrend=True))
+    assert _softening_reasons(only_timing) == [SuppressionReason.TIMING_LAYER]
+    neither = _single(kind, Strength.FULL, soft=_soft())
+    assert _softening_reasons(neither) == []
