@@ -703,8 +703,9 @@ def _partial_votes(
     """一部利確(PARTIAL)の根拠となる、価格系(含み益率・適正価格超過率)以外の
     独立条件(票)を、票の種別と理由の組で返す(要求仕様9節)。
 
-    票の数・理由は従来の _count_partial_conditions と同一(Issue #878 PR-3a で、票の種別を
-    構造化して持つために分離した。_count_partial_conditions はこの結果を写すだけ)。
+    票の数・理由は従来(Issue #878 PR-3a より前)の _count_partial_conditions と同一。PR-3a で、
+    票の種別を構造化して持つために本関数へ置き換えた(旧関数は削除。呼び出し元は
+    evaluate_profit_taking_traced だけ)。
 
     コードレビュー対応(2026-08、上値余地の導入): 含み益率・強気適正価格超過率の
     条件は_level_from_price_position()の2次元マトリクスへ統合したため、本関数
@@ -1008,8 +1009,9 @@ def _full_moderate_votes(
     config: ProfitTakingRulesConfig,
 ) -> list[tuple[VoteKind, str]]:
     """全株利確(FULL)を、複数該当した場合にのみ正当化する中程度の条件(票)を、票の種別と
-    理由の組で返す(価格系(含み益率・適正価格超過率)以外)。票の数・理由は従来の
-    _count_full_moderate_conditions と同一(Issue #878 PR-3a で分離)。
+    理由の組で返す(価格系(含み益率・適正価格超過率)以外)。票の数・理由は従来(Issue #878
+    PR-3a より前)の _count_full_moderate_conditions と同一。PR-3a で本関数へ置き換えた(旧関数は
+    削除。呼び出し元は evaluate_profit_taking_traced だけ)。
 
     コードレビュー対応(2026-08、上値余地の導入): 含み益率・強気適正価格超過率の
     条件は_level_from_price_position()の2次元マトリクスへ統合したため、本関数
