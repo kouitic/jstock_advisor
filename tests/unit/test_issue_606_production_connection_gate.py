@@ -137,8 +137,15 @@ def test_the_shipped_allocation_shadow_config_is_off() -> None:
     assert load_allocation_shadow_config(_SHIPPED_CONFIG_DIR).enabled is False
 
 
-def test_runtime_config_mode_is_referenced_only_by_the_holding_decision_modules() -> None:
-    """mode(legacy / shadow / active)を扱う src は保有判断の機構だけ。新しい参照元は新しい経路。"""
+def test_runtime_config_mode_is_referenced_only_by_the_approved_modules() -> None:
+    """mode(legacy / shadow / active)を扱う src は、承認された module だけ。
+
+    新しい参照元は新しい経路である。
+
+    - 保有判断の機構(既存。§10)
+    - `domain/valuation/expected_return_runtime.py`(#602 PR-1。USER 承認: #122 …6100082651)。
+      型と実行計画のみで、書込・永続化・CLI・handler を持たず、どこからも到達されない
+    """
     referencing = sorted(
         path.relative_to(_PACKAGE).as_posix()
         for path in _PACKAGE.rglob("*.py")
@@ -149,6 +156,7 @@ def test_runtime_config_mode_is_referenced_only_by_the_holding_decision_modules(
         "domain/entities/enums.py",
         "domain/entities/holding_decision.py",
         "domain/signals/holding_decision_execution_plan.py",
+        "domain/valuation/expected_return_runtime.py",
         "infrastructure/local_repository/holding_decision_runtime_config_repository.py",
         "services/holding_decision_runtime_config_service.py",
     ]
