@@ -200,3 +200,199 @@ def test_the_only_allocation_modules_reachable_from_production_are_the_off_shado
         "jstock_advisor.domain.signals.allocation_shadow_config",
         "jstock_advisor.services.allocation_shadow_service",
     ]
+
+
+# --- (1) 有効化の経路の集合は PR の前後で差分 0(全走査) ---
+#
+# 『#128 の機能を有効にできる経路』= 設定型・実行計画を作る/読む src、環境変数、template、config。
+# いずれも**列挙ではなく src・infra・config の全走査**で、許可リストと比べる。
+# 新しい参照元が現れたら、それは新しい経路である。本テストが落ちる = 承認の記録を添えて更新する。
+
+_HANDLE_NAMES = (
+    "ExpectedReturnRuntimeConfig",
+    "ExpectedReturnExecutionPlan",
+    "resolve_expected_return_execution_plan",
+    "allow_allocation_use",
+)
+# 上の名前を参照してよい src(定義するモジュール自身だけ。#602 PR-A。未 merge の間は存在しなくてよい)
+_HANDLE_ALLOWED_REFERENCERS = {"domain/valuation/expected_return_runtime.py"}
+_FEATURE_TOKEN = re.compile(
+    r"(allocation|expected_return|raer|capital_rotation|today_actions)", re.IGNORECASE
+)
+
+
+def test_nothing_but_the_defining_module_references_the_expected_return_runtime_handles() -> None:
+    """設定型・実行計画を『作る・読む・書く』src は、定義するモジュールの外に 1 つも無い。"""
+    referencing = {
+        path.relative_to(_PACKAGE).as_posix()
+        for path in _PACKAGE.rglob("*.py")
+        if any(name in path.read_text(encoding="utf-8") for name in _HANDLE_NAMES)
+    }
+    assert referencing <= _HANDLE_ALLOWED_REFERENCERS, sorted(referencing)
+
+
+def _environment_variable_names() -> set[str]:
+    """src の `os.environ.get(...)` / `os.getenv(...)` / `os.environ[...]` が読む名前(定数のみ)。"""
+    names: set[str] = set()
+    for path in _PACKAGE.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                target = ast.unparse(node.func)
+                if target in {"os.environ.get", "os.getenv", "os.environ.pop"} and node.args:
+                    arg = node.args[0]
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                        names.add(arg.value)
+            elif isinstance(node, ast.Subscript) and ast.unparse(node.value) == "os.environ":
+                if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
+                    names.add(node.slice.value)
+    return names
+
+
+def test_the_environment_variable_scan_is_not_vacuous() -> None:
+    names = _environment_variable_names()
+    assert "AWS_LAMBDA_FUNCTION_NAME" in names  # 既知の名前を拾えている(走査が空振りでない)
+
+
+def test_no_environment_variable_can_enable_a_128_feature() -> None:
+    offenders = sorted(n for n in _environment_variable_names() if _FEATURE_TOKEN.search(n))
+    assert offenders == []
+
+
+def test_the_template_has_no_parameter_environment_or_resource_for_a_128_feature() -> None:
+    """infra/template.yaml を全文走査: #128 の機能の Parameter・環境変数・表・Function が無い。"""
+    template = (_REPO / "infra" / "template.yaml").read_text(encoding="utf-8")
+    tokens = re.findall(
+        r"[A-Za-z0-9_]*(?:[Aa]llocation|[Ee]xpected_?[Rr]eturn|[Rr]aer|RAER)\w*", template
+    )
+    assert sorted(set(tokens)) == []
+
+
+def test_the_only_config_file_for_a_128_feature_is_the_off_allocation_shadow() -> None:
+    by_name = sorted(p.name for p in _SHIPPED_CONFIG_DIR.iterdir() if _FEATURE_TOKEN.search(p.name))
+    assert by_name == ["allocation_shadow.yaml"]
+    by_content = sorted(
+        p.name
+        for p in _SHIPPED_CONFIG_DIR.iterdir()
+        if p.suffix in {".yaml", ".json"}
+        and p.name != "allocation_shadow.yaml"
+        and re.search(r"(expected_return|raer\b|allocation)", p.read_text(encoding="utf-8"))
+    )
+    assert by_content == []
+
+
+# --- (2) 運用手順書の新節(§37) ---
+
+_SECTION_HEADING = re.compile(r"^## 37\. ")
+
+
+def _section_37() -> str:
+    lines = _manual().splitlines()
+    start = next(i for i, line in enumerate(lines) if _SECTION_HEADING.match(line))
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
+def _subsection(text: str, heading: str) -> str:
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(heading))
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].startswith("### ")),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
+def test_the_section_exists_and_names_the_gate() -> None:
+    heading = next(line for line in _manual().splitlines() if _SECTION_HEADING.match(line))
+    for word in ("#128", "Production 接続 gate", "#606"):
+        assert word in heading, word
+
+
+def test_the_section_has_the_required_subsections_in_order() -> None:
+    headings = [line for line in _section_37().splitlines() if line.startswith("### 37.")]
+    assert [h.split(" ")[1] for h in headings] == [
+        "37.1",
+        "37.2",
+        "37.3",
+        "37.4",
+        "37.5",
+        "37.6",
+    ]
+
+
+def _stage_text(stage: str) -> str:
+    block = _subsection(_section_37(), "### 37.2")
+    lines = block.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(stage))
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("段 ")), len(lines))
+    return "\n".join(lines[start:end])
+
+
+@pytest.mark.parametrize("stage", ["段 A", "段 B", "段 C", "段 D"])
+def test_every_stage_states_entry_exit_record_and_stop_condition(stage: str) -> None:
+    text = _stage_text(stage)
+    for label in ("入口", "出口", "記録", "停止条件"):
+        assert label in text, (stage, label)
+
+
+def test_the_four_stages_are_in_the_gate_order() -> None:
+    block = _subsection(_section_37(), "### 37.2")
+    positions = [block.index(f"段 {x}") for x in "ABCD"]
+    assert positions == sorted(positions)
+    titles = re.findall(r"^段 [ABCD] ([^\n(:：]+)", block, flags=re.MULTILINE)
+    assert [t.strip() for t in titles][:4] == [
+        "Shadow",
+        "Backtest / Replay",
+        "Human Review",
+        "USER Approval",
+    ]
+
+
+def test_user_approval_is_explicit_per_feature_and_separate_from_the_changeset_gates() -> None:
+    stage_d = _stage_text("段 D")
+    for phrase in ("明示的な承認", "機能ごと", "別々", "ChangeSet", "CREATE", "EXECUTE"):
+        assert phrase in stage_d, phrase
+
+
+def test_the_section_reuses_existing_gates_and_does_not_create_a_new_one() -> None:
+    text = _section_37()
+    assert "新しい gate 機構" in text and "新しい有効化経路" in text
+    for reference in ("§28", "§10", "§5.1", "#122", "#846", "#128"):
+        assert reference in text, reference
+    # 恒久規則の制定・変更は HUMAN_ONLY。導入部と『決めていないこと』の両方で明示する
+    intro = text[: text.index("### 37.1")]
+    assert "POLICY_AUTHORITY = HUMAN_ONLY" in intro
+    assert "HUMAN_ONLY" in _subsection(text, "### 37.6")
+
+
+def test_the_section_does_not_fix_thresholds_or_periods() -> None:
+    """合格基準・最低期待リターン改善幅・観測期間は『shadow 運用の後に決める』。数値を書かない。"""
+    text = _subsection(_section_37(), "### 37.2") + _subsection(_section_37(), "### 37.3")
+    assert not re.search(r"\d+\s*(営業日|日間|週間|か月|ヶ月|%|％|ポイント)", text)
+    undecided = _subsection(_section_37(), "### 37.6")
+    for phrase in ("合格基準", "観測期間", "持ち主", "ACTIVE"):
+        assert phrase in undecided, phrase
+
+
+def test_the_section_states_the_dont_list_and_the_rollback() -> None:
+    dont = _subsection(_section_37(), "### 37.3")
+    for phrase in ("段を飛ばさ", "投資判断に使", "IAM", "有効化の経路", "merge"):
+        assert phrase in dont, phrase
+    rollback = _subsection(_section_37(), "### 37.4")
+    for phrase in ("OFF", "legacy", "再 deploy"):
+        assert phrase in rollback, phrase
+
+
+def test_the_section_points_at_this_contract_test_and_it_exists() -> None:
+    mapping = _subsection(_section_37(), "### 37.5")
+    name = "tests/unit/test_issue_606_production_connection_gate.py"
+    assert name in mapping
+    assert (_REPO / name).exists()
+
+
+def test_this_test_is_registered_as_a_markdown_reading_test() -> None:
+    registry = (_REPO / "tests" / "ci_markdown_subset.txt").read_text(encoding="utf-8")
+    assert "tests/unit/test_issue_606_production_connection_gate.py" in registry.splitlines()
