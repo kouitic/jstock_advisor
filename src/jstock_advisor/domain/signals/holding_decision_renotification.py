@@ -179,8 +179,10 @@ class RenotificationPolicy:
 class RenotificationConfig:
     """config の `renotification` の 5 項目。**既定値を持たせない**(値は呼び出し側が渡す)。
 
-    score_deterioration / sell_price_change_pct が None のときは、その条件を使わない。
-    bool の項目が False のときも同じ(評価しても成立にしない)。
+    score_deterioration / sell_price_change_pct は 0 より大きい有限な数、または None。None のとき
+    は、その条件を使わない(無効)。**0 は受け付けない**(差が 0 でも常に成立してしまい、意図しない
+    毎日の再通知になるため。無効にしたいときは None を渡す)。bool の項目が False のときも同じ
+    (評価しても成立にしない)。
     """
 
     score_deterioration: float | None
@@ -192,8 +194,8 @@ class RenotificationConfig:
     def __post_init__(self) -> None:
         for name in ("score_deterioration", "sell_price_change_pct"):
             value = getattr(self, name)
-            if value is not None and not (math.isfinite(value) and value >= 0):
-                raise ValueError(f"{name} は 0 以上の有限な数または None: {value!r}")
+            if value is not None and not (math.isfinite(value) and value > 0):
+                raise ValueError(f"{name} は 0 より大きい有限な数または None(無効): {value!r}")
 
 
 # --- 状態 -------------------------------------------------------------------------------
@@ -391,9 +393,12 @@ class HdRenotifyDecision:
     """再通知の決定。
 
     evaluations は CONDITION_ORDER の順に 5 条件すべてを持つ。conditions_met は MET の集合。
-    send_by_policy は『この方針が再通知を求めるか』であり、実際に送るかではない(既存のゲートが
-    後段で決める)。前回の状態が使えず全条件が NOT_EVALUABLE のときは False で、既存の判定
-    (種別の変化・日数など)に任せる。
+    send_by_policy = (conditions_met が空でない) または (periodic_due)。periodic_due は、呼び出し側
+    が渡した周期の成立に、方針(D-1)が KEEP のときだけ真になる。
+    send_by_policy は『この方針が再通知を求めるか』であり、実際に送るかではない(クールダウン・
+    データ品質・同日の優先度・claim は既存のゲートが後段で決める)。前回の状態が使えず全条件が
+    NOT_EVALUABLE でも、periodic_due が真(KEEP)なら send_by_policy は真になりうる。
+    条件が何も成立せず周期もないときは False で、既存の判定(種別の変化・日数など)に任せる。
     """
 
     evaluations: tuple[tuple[Condition, ConditionResult], ...]

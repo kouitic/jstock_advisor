@@ -651,6 +651,29 @@ def test_periodic_policy_only_matters_when_no_condition_is_met(
     assert result.send_by_policy is expected_send
 
 
+def test_periodic_can_request_a_send_even_when_no_condition_is_evaluable() -> None:
+    """send_by_policy = (成立が空でない) または (periodic_due)。前回が使えなくても効く。"""
+    previous = StateUnavailable(Reason.NO_PREVIOUS_HD_STATE)
+    kept = decide(
+        state(), previous, policy=with_policy(periodic=PeriodicPolicy.KEEP), periodic_due=True
+    )
+    assert kept.conditions_met == frozenset()
+    assert kept.send_by_policy
+    stopped = decide(
+        state(), previous, policy=with_policy(periodic=PeriodicPolicy.STOP), periodic_due=True
+    )
+    assert not stopped.send_by_policy
+
+
+def test_zero_threshold_is_rejected_and_none_is_the_way_to_disable() -> None:
+    with pytest.raises(ValueError):
+        with_config(score_deterioration=0.0)
+    disabled = with_config(score_deterioration=None, sell_price_change_pct=None)
+    result = decide(state(base_score=-99.0), state(base_score=-20.0), config=disabled)
+    assert result.result_of(R1).reason is Reason.DISABLED
+    assert result.result_of(R5).reason is Reason.DISABLED
+
+
 def test_a_met_condition_sends_regardless_of_the_periodic_policy() -> None:
     result = decide(
         state(base_score=-40.0), state(), policy=with_policy(periodic=PeriodicPolicy.STOP)
@@ -711,6 +734,8 @@ def test_r5_is_monotone_in_the_absolute_price_change_for_both_directions() -> No
         lambda: SellReference("k", 0.0),
         lambda: SellReference("k", math.nan),
         lambda: with_config(score_deterioration=-1.0),
+        lambda: with_config(score_deterioration=0.0),  # 0 は常時成立になるため受け付けない
+        lambda: with_config(sell_price_change_pct=0.0),
         lambda: with_config(sell_price_change_pct=math.inf),
     ],
 )
