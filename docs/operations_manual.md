@@ -2923,6 +2923,15 @@ WeeklyReviewFunctionへの追加を検討中)。
 (1) WatchlistTerminalFailureDLQのメッセージ滞留監視 (2) LINE関連LambdaのErrors監視 (3) 「Errorsが止まった=復旧」とは限らない点。
 **最新の状態は29節・#132の最新の記録を読むこと**(この節へ焼き込まない)。
 
+★ **2026-10-11更新**(Issue #188の点検。infra/template.yamlの実読): 上の「DLQの滞留Alarmは
+依然として存在しない」「Duration alarmはEvaluationFunctionのみ」は2026-09-24時点の記述で、現在は
+異なる。DLQの滞留Alarm 4本(WatchlistTerminalFailure / AsyncInvokeFailure /
+BuyCandidateTerminalFailure / HoldingsWatchlistTerminalFailure。Issue #349)が接続済みで、
+Duration alarmはEvaluationFunctionとWeeklyReviewFunctionの2本、Errors alarmはIncidentNotifier
+Functionを含む13本である。Alarmは合計19本で、すべてTreatMissingData = notBreaching・AlarmActions
+接続済み。per-item例外を握る6関数の内部異常がErrors alarmだけでは検知できない点は、この更新では
+確認していない(#132の最新の記録を読むこと)。
+
 ### 23.3 DLQ redrive(障害時の候補案。★未検証。正式な復旧手順ではない)
 
 ```
@@ -3226,6 +3235,10 @@ jstock judgment-safety-shadow report --source dynamodb         # Production(read
   AlarmActions(IncidentNotificationTopic経由のLINE通知)が接続され、上記「どちらもAlarmActions
   が空」は解消済み。DLQの滞留Alarmは依然として無い(未解消のまま)。per-item例外を握る6関数の
   内部異常はErrors alarmだけでは検知できない点も未解消(#506/#507が担当)。
+  ★ **2026-10-11更新**: DLQの滞留Alarm 4本が接続済み(#349)で、上の「DLQの滞留Alarmは依然として
+  無い」は解消済み。Alarmは合計19本(23〜24節の2026-10-11更新・27.3.2を参照)。全Alarmが
+  TreatMissingData = notBreachingのため、動くはずの日に関数が起動しなかった場合(missed schedule)は
+  Alarmでは検知されない(27.3.1の読み方)。
 ・したがって「通知が来ない = 正常」ではない。24.1 と同じく、**見に行かなければ気づかない**異常がある。
 ・通知が入った後も、対象外がある。秘密の取得失敗(SECRET_UNAVAILABLE)は LINE では知らせない方針(Issue #117)。
   監視の対象は段階的に広がる(Lambda は 12 本あり、最初から全てではない)。
@@ -3291,7 +3304,7 @@ aws cloudwatch get-metric-statistics --namespace AWS/Lambda --metric-name Errors
 #### 27.3.2 Alarm の状態は、観測用 role では読めない
 
 - 観測用 role では、CloudWatch Alarm の状態(`DescribeAlarms`)を読めない(AccessDenied を 2026-09-21 に実測。**権限を広げて回避しない**)。
-- Alarm の定義(どの関数のどの値を見ているか)は `infra/template.yaml` で確認する。現在の Alarm は evaluation Lambda の 2 本だけである(27.1)。Alarm が鳴っていないことは「他の関数も正常」を意味しない。
+- Alarm の定義(どの関数のどの値を見ているか)は `infra/template.yaml` で確認する。現在の Alarm は 19 本である(Lambda の Errors 13・Duration 2・DLQ の滞留 4。2026-10-11 に template を実読。27.1)。すべて TreatMissingData = notBreaching のため、データ点が無い期間(関数が起動しなかった日)は OK のままで、Alarm では検知されない(27.3.1)。Alarm が鳴っていないことは「他の関数も正常」を意味しない。
 - Alarm の状態を確認する必要があるときは、確認できる人(AWS の画面を見られる権限を持つ人)へ依頼する。
 
 #### 27.3.3 ログを読む(認証情報の欠落の件数)
