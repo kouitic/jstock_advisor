@@ -14,11 +14,17 @@ dedup_window_minutes: 30
 # (LINE push成功後SENT記録前にLambdaがcrashした場合の回復用)。
 claim_stale_minutes: 5
 
-# Issue #508: GitHub Issue自動起票の有効/無効。falseの間はGitHub API・
+# Issue #508 / #837: GitHub Issue自動起票の有効/無効。falseの間はGitHub API・
 # Secrets Manager呼び出しを一切行わない(正常なスキップ。既存のLINE通知経路には
-# 一切影響しない)。GitHub App設定・疎通確認・infra/template.yamlへの配線
-# (別PR)が完了するまではfalseにしておくこと。
-issue_creation_enabled: false
+# 一切影響しない)。
+# 出荷値 = true(Issue #837。USER承認: #122 issuecomment-6061712662 の次工程8・
+# 切替前の確認〔preflight〕は #837 issuecomment-6062328387)。GitHub App設定・
+# 疎通確認・infra/template.yamlへの配線は完了している。Lambda Layerで配布する
+# 静的設定のため、Productionへの反映はconfigの変更 + 再deploy(ChangeSetの
+# CREATE / EXECUTEは各USERのHuman Gate)。
+# rollback: falseへ戻して再deploy(運用手順書 32.7)。falseでも既存のLINE通知は
+# 変わらない。
+issue_creation_enabled: true
 
 # GitHub Issue作成・コメント投稿の原子的claim(IncidentStateTable)が失効した
 # とみなすまでの分数。失効後はGitHub側の実在確認を先に行ってから再claimする

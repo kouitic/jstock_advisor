@@ -388,8 +388,20 @@ def test_line_failure_on_a_recurrence_still_lets_github_post_a_comment(
 def test_disabled_flag_makes_zero_github_calls(
     monkeypatch: pytest.MonkeyPatch, recording_line_client: _RecordingLineClient, aws_env: str
 ) -> None:
-    """既定(issue_creation_enabled=false)では、env varが設定されていても
-    GitHub APIを一切呼ばないこと。"""
+    """issue_creation_enabled=falseの config では、env varが設定されていても
+    GitHub APIを一切呼ばないこと。
+
+    出荷 config は Issue #837 で true になったため、無効の config を明示的に渡して
+    検証する(以前は出荷の既定値 false に依存していた)。"""
+    real_config = load_config()
+    disabled_config = real_config.model_copy(
+        update={
+            "incident_notification": real_config.incident_notification.model_copy(
+                update={"issue_creation_enabled": False}
+            )
+        }
+    )
+    monkeypatch.setattr(handler_module, "load_config", lambda: disabled_config)
     monkeypatch.setenv("GITHUB_APP_SECRET_ARN", aws_env)
     monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
     fake = _FakeUrlopen([])
