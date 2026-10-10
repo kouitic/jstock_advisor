@@ -78,6 +78,15 @@ from jstock_advisor.domain.notification.recommendation_adapter import (
     build_notification_text_input,
     build_watch_end_text_input,
 )
+from jstock_advisor.domain.signals.holding_decision_renotification import (
+    HdNotifyState,
+    HdRenotifyDecision,
+    decide_hd_renotification,
+    extract_hd_state,
+)
+from jstock_advisor.domain.signals.holding_decision_renotification import (
+    RenotificationConfig as HdRenotificationConfig,
+)
 from jstock_advisor.infrastructure.line.client import (
     LINE_MAX_TEXT_CHARS,
     LineClient,
@@ -102,6 +111,9 @@ from jstock_advisor.infrastructure.local_repository.recommendation_repository im
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER
 from jstock_advisor.services.data_quality_service import DataQualityIssueSeverity, detect_anomalies
+from jstock_advisor.services.hd_renotification_provisional_policy import (
+    PROVISIONAL_RENOTIFICATION_POLICY,
+)
 from jstock_advisor.services.recommendation_consistency_validator import validate_recommendation
 from jstock_advisor.services.rule_version_service import RuleVersionService
 from jstock_advisor.services.watchlist_addition_summary_builder import (
@@ -2114,6 +2126,22 @@ class NotificationOutcome:
     # 使うか判別するために使う。監査記録(HoldingEvaluationAudit)にもそのまま
     # 引き継ぐ。
     notification_intent: NotificationIntent | None = None
+    # Issue #890 PR-3: 保有判断の再通知条件(R1〜R5)のうち、成立した条件(config の項目名。
+    # 昇順)。保有判断の 3 種類で、前回の状態と比べられた場合だけ入る(それ以外は空)。
+    # 恒久的な記録は PR-4。
+    hd_renotify_conditions: tuple[str, ...] = ()
+
+
+def _days_since_last_sent(now: dt.datetime, latest_log: NotificationLog) -> int:
+    """前回の送信から今日までの経過日数(JST 暦日の差)。保有判断の再通知(Issue #890 PR-3)用。
+
+    `_notification_status_for_send` の日数判定(Issue #23: JST 暦日同士の差)と**同じ式**。
+    あちらは #271 の source guard が式の形を読むため元の位置・書式のまま残しており、
+    両者が一致することは test_hd_renotification_wiring.py で固定している。
+    """
+    return (
+        evaluation_date_jst(now) - evaluation_date_jst(normalize_to_aware_utc(latest_log.sent_at))
+    ).days
 
 
 class LineNotificationService:
@@ -2346,7 +2374,12 @@ class LineNotificationService:
             status = self._attention_status_for_send(recommendation, now)
         else:
             status = self._notification_status_for_send(recommendation, previous, now)
-        return NotificationOutcome(status=status, sent=False, notification_intent=intent)
+        return NotificationOutcome(
+            status=status,
+            sent=False,
+            notification_intent=intent,
+            hd_renotify_conditions=self._hd_renotify_conditions(recommendation, previous, now),
+        )
 
     def check_data_quality_eligibility(
         self,
@@ -4517,6 +4550,75 @@ class LineNotificationService:
             return NotificationStatus.DUPLICATE_SUPPRESSED
         return NotificationStatus.SENT
 
+    def _hd_renotify_decision(
+        self,
+        recommendation: Recommendation,
+        previous: Recommendation | None,
+        latest_log: NotificationLog,
+        now: dt.datetime,
+    ) -> HdRenotifyDecision | None:
+        """保有判断の再通知条件の決定(Issue #890 PR-3)。比べられない場合は None。
+
+        None を返す場合(= 従来の判断へ進む場合)
+          ・保有判断の 3 種類でない / 前回の Recommendation が引けない
+          ・前回または今回の状態(hd_renotify_state)が読めない(旧方式の記録・状態が無い・
+            builder の失敗の印・形が不正)
+          ・設定の値が不正 / 判定中の想定外の例外(fail-safe: 通知の判断を止めない。型名だけ log)
+        前回の状態は、直近に『実際に送った』通知の記録(latest_log が指す Recommendation)から
+        読む。送られなかった記録(緊急停止スイッチ下など)は前回にならない。
+        """
+        if (
+            recommendation.recommendation_type not in HOLDING_DECISION_RECOMMENDATION_TYPES
+            or previous is None
+        ):
+            return None
+        try:
+            current_state = extract_hd_state(recommendation.config_values_used)
+            previous_state = extract_hd_state(previous.config_values_used)
+            if not isinstance(current_state, HdNotifyState) or not isinstance(
+                previous_state, HdNotifyState
+            ):
+                return None
+            rules = self._config.holding_decision.renotification
+            config = HdRenotificationConfig(
+                score_deterioration=rules.renotify_score_deterioration,
+                on_decision_change=rules.renotify_on_decision_change,
+                on_new_hard_gate=rules.renotify_on_new_hard_gate,
+                after_earnings=rules.renotify_after_earnings,
+                sell_price_change_pct=rules.renotify_on_sell_price_change_pct,
+            )
+            resend_after_days = self._config.notification.resend_after_days
+            periodic_due = _days_since_last_sent(now, latest_log) >= resend_after_days
+            return decide_hd_renotification(
+                current_state,
+                previous_state,
+                config,
+                PROVISIONAL_RENOTIFICATION_POLICY,
+                periodic_due=periodic_due,
+            )
+        except Exception as exc:  # noqa: BLE001 - 新しい判断の失敗で通知の判断を止めない
+            logger.warning(
+                "hd renotification decision failed; falling back to the existing judgment: "
+                "error=%s",
+                type(exc).__name__,
+            )
+            return None
+
+    def _hd_renotify_conditions(
+        self, recommendation: Recommendation, previous: Recommendation | None, now: dt.datetime
+    ) -> tuple[str, ...]:
+        """成立した再通知条件(config の項目名。昇順)。比べられない場合・対象外は空。"""
+        if recommendation.recommendation_type not in HOLDING_DECISION_RECOMMENDATION_TYPES:
+            return ()
+        notification_type = _RECOMMENDATION_TO_NOTIFICATION_TYPE[recommendation.recommendation_type]
+        lookup = self._log_lookup_for_recommendation_scope(recommendation, notification_type)
+        if lookup.undecidable or lookup.latest is None:
+            return ()
+        decision = self._hd_renotify_decision(recommendation, previous, lookup.latest, now)
+        if decision is None:
+            return ()
+        return tuple(sorted(condition.value for condition in decision.conditions_met))
+
     def _notification_status_for_send(
         self,
         recommendation: Recommendation,
@@ -4589,6 +4691,18 @@ class LineNotificationService:
             previous.recommendation_type != recommendation.recommendation_type
         ):
             return NotificationStatus.SENT
+
+        # Issue #890 PR-3: 保有判断の 3 種類で、前回の状態と比べられる場合だけ、再通知条件
+        # (R1〜R5)で送る / 送らないを決める。価格による再送は R5(売却目安価格)に置き換わり、
+        # 共通の 3.0%(下)は適用しない。比べられない場合(前回が旧方式の記録・状態が無い・今回の
+        # 状態が作れない)や、保有判断以外の種類は None で、従来の判断へそのまま進む。
+        hd_decision = self._hd_renotify_decision(recommendation, previous, latest_log, now)
+        if hd_decision is not None:
+            return (
+                NotificationStatus.SENT
+                if hd_decision.send_by_policy
+                else NotificationStatus.DUPLICATE_SUPPRESSED
+            )
 
         prev_price = _representative_price(previous) if previous is not None else None
         new_price = _representative_price(recommendation)
