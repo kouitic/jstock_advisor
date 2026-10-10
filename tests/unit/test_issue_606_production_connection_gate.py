@@ -351,10 +351,13 @@ def test_the_four_stages_are_in_the_gate_order() -> None:
     ]
 
 
-def test_user_approval_is_explicit_per_feature_and_separate_from_the_changeset_gates() -> None:
+def test_user_approval_names_its_target_and_is_separate_from_the_changeset_gates() -> None:
     stage_d = _stage_text("段 D")
-    for phrase in ("明示的な承認", "機能ごと", "別々", "ChangeSet", "CREATE", "EXECUTE"):
+    for phrase in ("明示的な承認", "承認の対象", "別々", "ChangeSet", "CREATE", "EXECUTE"):
         assert phrase in stage_d, phrase
+    # 新しい制約として読まれないよう、既存の正本(#122 / §36)に基づくことを示す
+    assert "新しい制約ではなく" in stage_d
+    assert "#122" in stage_d and "§36" in stage_d
 
 
 def test_the_section_reuses_existing_gates_and_does_not_create_a_new_one() -> None:
