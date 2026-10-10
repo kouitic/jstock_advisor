@@ -6,13 +6,18 @@ should_notify=trueの場合のみ呼ばれる。売却価格候補の算出(現�
 
 from __future__ import annotations
 
+import logging
+import math
 import uuid
+from collections.abc import Mapping
 
 from jstock_advisor.config.models import AppConfig
+from jstock_advisor.domain.entities.common import SellPriceLevels
 from jstock_advisor.domain.entities.enums import (
     ConfidenceLevel,
     HoldingDecisionCategory,
     HoldingDecisionConfidenceLevel,
+    PriceFieldBasis,
     RecommendationScope,
     RecommendationType,
 )
@@ -45,6 +50,13 @@ from jstock_advisor.domain.signals.historical_valuation import (
     historical_valuation_config_values,
     historical_valuation_result_to_metrics,
 )
+from jstock_advisor.domain.signals.holding_decision_renotification import (
+    EarningsDataFreshness,
+    GateConfirmation,
+    HdNotifyState,
+    SellReference,
+    serialize_hd_state,
+)
 from jstock_advisor.domain.signals.market_environment import (
     market_environment_config_values,
     market_environment_result_to_metrics,
@@ -63,10 +75,13 @@ from jstock_advisor.domain.signals.timing_score import (
 )
 from jstock_advisor.services.financial_freshness_integration import (
     FINANCIAL_STALE_USER_WARNING,
+    FinancialFreshnessAssessment,
     assess_financial_freshness,
 )
 from jstock_advisor.services.sell_price_recommendation_service import recommend_sell_prices
 from jstock_advisor.services.stock_snapshot_service import StockSnapshot
+
+logger = logging.getLogger(__name__)
 
 _REASON_CODE_LABELS: dict[str, str] = {
     "financial_health_equity_ratio": "自己資本比率の水準",
@@ -108,6 +123,81 @@ def _reason_label(reason: ReasonImpact) -> str:
     return _REASON_CODE_LABELS.get(reason.reason_code, reason.reason_code)
 
 
+# Issue #890 PR-2: 再通知の条件 R2(悪化のみにする場合)が使う『判定の重さ』。
+# 重いほど大きい整数で、既存の 3 種類の通知の重さの順(売却検討 < 強い売却検討 < 緊急確認)を
+# そのまま表す。新しい数の導入ではなく、既存の種別の順序の写し。
+_DECISION_SEVERITY: dict[RecommendationType, int] = {
+    RecommendationType.SELL_CONSIDERATION: 1,
+    RecommendationType.STRONG_SELL_CONSIDERATION: 2,
+    RecommendationType.URGENT_HOLDING_REVIEW: 3,
+}
+
+# 売却目安価格(R5 の参照)として使う price field。適正価格の弱気水準に由来する価格
+# (basis = TARGET_PRICE)だけを使う。監視用・即時執行目安・現在値は使わない。
+_SELL_REFERENCE_FIELD: dict[RecommendationType, str] = {
+    RecommendationType.SELL_CONSIDERATION: "stop_review_price",
+    RecommendationType.STRONG_SELL_CONSIDERATION: "full_profit_consideration_price",
+}
+
+
+def _to_confirmation(value: str) -> GateConfirmation:
+    try:
+        return GateConfirmation(value)
+    except ValueError:
+        return GateConfirmation.UNVERIFIED
+
+
+def _sell_reference(
+    recommendation_type: RecommendationType, sell_prices: SellPriceLevels
+) -> SellReference | None:
+    field_name = _SELL_REFERENCE_FIELD.get(recommendation_type)
+    if field_name is None:
+        return None
+    level = getattr(sell_prices, field_name)
+    if level is None or level.basis is not PriceFieldBasis.TARGET_PRICE:
+        return None
+    price = float(level.price)
+    if not (math.isfinite(price) and price > 0):
+        return None
+    return SellReference(kind=field_name, price=price)
+
+
+def _build_hd_renotify_state(
+    result: HoldingDecisionResult,
+    recommendation_type: RecommendationType,
+    sell_prices: SellPriceLevels,
+    snapshot: StockSnapshot,
+    config: AppConfig,
+    freshness: FinancialFreshnessAssessment,
+    gate_confirmations: Mapping[str, str],
+) -> dict[str, object]:
+    """再通知の比較に使う『この通知の時点の状態』(保存形式 hd_renotify_state。版 1)を作る。
+
+    PR-1(domain/signals/holding_decision_renotification.py)が定義した形式で書く。値だけで、
+    銘柄・金額・株数は持たない。発動した hard gate の理由コードのうち、確認状態が渡されなかった
+    ものは UNVERIFIED(数えない側)にする。
+    """
+    confirmations = frozenset(
+        (code, _to_confirmation(gate_confirmations.get(code, GateConfirmation.UNVERIFIED.value)))
+        for code in result.hard_gate.reason_codes
+    )
+    market_price = float(snapshot.current_price)
+    state = HdNotifyState(
+        scoring_model_version=str(config.holding_decision.scoring_model_version),
+        base_score=result.base_score,
+        final_score=result.final_score,
+        recommendation_type=recommendation_type.value,
+        category=result.category.value,
+        decision_severity=_DECISION_SEVERITY.get(recommendation_type),
+        gate_confirmations=confirmations,
+        earnings_key=freshness.latest_financial_period_end,
+        earnings_freshness=EarningsDataFreshness(freshness.result.verdict.value),
+        sell_reference=_sell_reference(recommendation_type, sell_prices),
+        market_price=market_price if math.isfinite(market_price) and market_price > 0 else None,
+    )
+    return serialize_hd_state(state)
+
+
 def build_holding_decision_recommendation(
     holding: Holding,
     result: HoldingDecisionResult,
@@ -116,8 +206,13 @@ def build_holding_decision_recommendation(
     config: AppConfig,
     exit_price_range: ExitPriceRangeResult,
     recommendation_id: str | None = None,
+    gate_confirmations: tuple[tuple[str, str], ...] = (),
 ) -> Recommendation:
     """should_notify=true(=このHoldingDecisionResultは通知対象)の場合にのみ呼ぶ。
+
+    gate_confirmations(Issue #890 PR-2)は、評価(HoldingDecisionService)が返した hard gate の
+    理由コードごとの確認状態。再通知の比較に使う `hd_renotify_state` を config_values_used に
+    記録するためだけに使い、通知の内容・判定には使わない。
 
     configは判定精度向上機能Phase B(Historical Valuation Score)のconfig_values_
     used記録専用(コードレビュー対応)。保有判断スコア自体の算出には一切使わない
@@ -174,11 +269,33 @@ def build_holding_decision_recommendation(
     # 混ぜず key_risks(留意事項)へ入れる(SELL・利確と同じ格納先)。文言は既存の共通定数。
     # 判定は評価時(HoldingDecisionService)と同じ関数・同じ入力(評価時刻 = evaluated_at)。
     # FRESH・UNKNOWNは空(空のままなら通知本文にも節を出さない)。
-    key_risks = (
-        [FINANCIAL_STALE_USER_WARNING]
-        if assess_financial_freshness(snapshot.financial, result.evaluated_at, config).is_stale
-        else []
+    financial_freshness = assess_financial_freshness(
+        snapshot.financial, result.evaluated_at, config
     )
+    key_risks = [FINANCIAL_STALE_USER_WARNING] if financial_freshness.is_stale else []
+
+    # Issue #890 PR-2: 再通知の比較に使う『この通知の時点の状態』。builder は通知経路(ACTIVE)
+    # でしか呼ばれないため、検証モード(SHADOW)ではこの記録は作られない。
+    # shadow 計測ではなく、PR-3 で通知の判断に読まれる記録なので、isolated_shadow_observation
+    # (#405 の隔離の数え上げの対象)は使わない。失敗しても通知の記録(Recommendation)の構築を
+    # 止めない(止めると保有判断の通知そのものが失われる)ため、ここで捕捉し、形が不正な印を残す。
+    # 比較側(extract_hd_state)は、この印を『比べられない(STATE_MALFORMED)』として扱う。
+    try:
+        hd_renotify_state: dict[str, object] = _build_hd_renotify_state(
+            result,
+            recommendation_type,
+            sell_prices,
+            snapshot,
+            config,
+            financial_freshness,
+            dict(gate_confirmations),
+        )
+    except Exception as exc:  # noqa: BLE001 - 記録の失敗を通知の構築へ伝播させない
+        logger.warning(
+            "hd_renotify_state could not be built and was recorded as failed: error=%s",
+            type(exc).__name__,
+        )
+        hd_renotify_state = {"computation_failed": True, "error_type": type(exc).__name__}
 
     # Issue #384 PR-5: 記録専用(DecisionSnapshot/Recommendation記録用)の
     # *_to_metrics()整形がRecommendation構築のinline引数として本流に
@@ -327,6 +444,7 @@ def build_holding_decision_recommendation(
             "category": result.category.value,
             "hard_gate_triggered": result.hard_gate.triggered,
             "hard_gate_adjustment_applied": result.hard_gate.adjustment_applied,
+            "hd_renotify_state": hd_renotify_state,
             "company_quality_score": result.company_quality.score,
             "investment_thesis_score": result.investment_thesis.score,
             "risk_deduction_score": result.risk_deduction.score,

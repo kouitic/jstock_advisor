@@ -649,13 +649,37 @@ def test_x4_recommendation_differs_only_in_key_risks_between_fresh_and_stale() -
     unknown = _recommendation("UNKNOWN")
     stale = _recommendation("STALE")
 
-    ignored = {"recommendation_id", "recommended_at"}
-    fresh_dump = {k: v for k, v in fresh.model_dump().items() if k not in ignored}
-    unknown_dump = {k: v for k, v in unknown.model_dump().items() if k not in ignored}
-    stale_dump = {k: v for k, v in stale.model_dump().items() if k not in ignored}
+    # Issue #890 PR-2: 再通知の比較に使う記録(config_values_used["hd_renotify_state"])は、
+    # 今回の財務鮮度の判定(earnings_freshness)をそのまま記録する。この記録は通知の内容でも
+    # 判定でもないため、本テストの『差は key_risks のみ』の比較からは外し、下で別に、差が
+    # earnings_freshness だけであることを固定する。
+    state_key = "hd_renotify_state"
+
+    def _dump(recommendation: Recommendation) -> dict[str, object]:
+        ignored = {"recommendation_id", "recommended_at"}
+        dump = {k: v for k, v in recommendation.model_dump().items() if k not in ignored}
+        values = dict(dump["config_values_used"])
+        values.pop(state_key)
+        dump["config_values_used"] = values
+        return dump
+
+    fresh_dump = _dump(fresh)
+    unknown_dump = _dump(unknown)
+    stale_dump = _dump(stale)
     assert unknown_dump == fresh_dump
     differing = {k for k in fresh_dump if stale_dump[k] != fresh_dump[k]}
     assert differing == {"key_risks"}
+
+    def _state(recommendation: Recommendation) -> dict[str, object]:
+        return dict(recommendation.config_values_used[state_key])
+
+    for name, recommendation in (("FRESH", fresh), ("UNKNOWN", unknown), ("STALE", stale)):
+        state = _state(recommendation)
+        assert state["earnings_freshness"] == name
+        # 鮮度以外の項目は 3 つの verdict で同一
+        assert {k: v for k, v in state.items() if k != "earnings_freshness"} == {
+            k: v for k, v in _state(fresh).items() if k != "earnings_freshness"
+        }
 
 
 def _line_body(recommendation: Recommendation) -> str:

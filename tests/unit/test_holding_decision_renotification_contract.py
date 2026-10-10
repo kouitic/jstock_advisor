@@ -965,12 +965,37 @@ def _module_tree() -> ast.Module:
     return ast.parse(_MODULE_PATH.read_text(encoding="utf-8"))
 
 
-def test_module_is_dormant_nothing_in_src_imports_it() -> None:
-    """どこからも import されない(配線は PR-3 の範囲)。"""
-    offenders = [
-        str(path.relative_to(_SRC_ROOT))
+# PR-2(Issue #890)で意図して接続した import 元。保存形式の『書く側』(builder)と、確認状態の
+# 型を共有する分類(gate_confirmation)だけ。判定の側(decide_hd_renotification)は、PR-3 で
+# 通知の判断へ接続するまで、どこからも参照されない。
+_ALLOWED_IMPORTERS = frozenset(
+    {
+        "domain/signals/holding_decision_gate_confirmation.py",
+        "services/holding_decision_notification_builder.py",
+    }
+)
+
+
+def test_module_is_referenced_only_by_the_intended_writers() -> None:
+    """PR-1 の『どこからも import されない』を、PR-2 の意図した接続に合わせて更新した固定。
+
+    許可する参照元は、保存形式を書く builder と、確認状態を共有する分類の 2 つだけ。
+    それ以外の src からの参照が増えたら落ちる(配線の拡大は意図した変更として更新する)。
+    """
+    offenders = {
+        path.relative_to(_SRC_ROOT).as_posix()
         for path in _SRC_ROOT.rglob("*.py")
         if path != _MODULE_PATH and _MODULE_NAME in path.read_text(encoding="utf-8")
+    }
+    assert offenders == _ALLOWED_IMPORTERS
+
+
+def test_decision_function_is_still_not_referenced_outside_the_module() -> None:
+    """判定の側(decide_hd_renotification)は、PR-3 の接続まで、どこからも使われない。"""
+    offenders = [
+        path.relative_to(_SRC_ROOT).as_posix()
+        for path in _SRC_ROOT.rglob("*.py")
+        if path != _MODULE_PATH and "decide_hd_renotification" in path.read_text(encoding="utf-8")
     ]
     assert offenders == []
 
