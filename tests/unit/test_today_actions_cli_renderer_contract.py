@@ -254,8 +254,37 @@ def has_header(text: str, header: str) -> bool:
     return header in lines_of(text)
 
 
-def conclusion(text: str) -> list[str]:
-    return [line for line in lines_of(text) if line.startswith("本日の結論")]
+NEW_LABEL = "  新しい提案（購入・資金入替・新分類の売却）: "
+LEGACY_LABEL = "  既存の売却関連の判定: "
+
+
+def conclusion_block(text: str) -> list[str]:
+    """『本日の結論:』の見出し行と、直後の 2 空白で始まる行(U-17 = B 案の 2 行)。"""
+    out: list[str] = []
+    seen = False
+    for line in lines_of(text):
+        if line == "本日の結論:":
+            seen = True
+            out.append(line)
+            continue
+        if seen:
+            if line.startswith("  "):
+                out.append(line)
+            else:
+                break
+    return out
+
+
+def new_proposal(text: str) -> str:
+    found = [x for x in lines_of(text) if x.startswith(NEW_LABEL)]
+    assert len(found) == 1
+    return found[0][len(NEW_LABEL) :]
+
+
+def legacy_state(text: str) -> str:
+    found = [x for x in lines_of(text) if x.startswith(LEGACY_LABEL)]
+    assert len(found) == 1
+    return found[0][len(LEGACY_LABEL) :]
 
 
 # --- 1 SHADOW 帯・見出し ----------------------------------------------------------------------
@@ -320,17 +349,36 @@ def test_amounts_are_formatted_without_exponents_or_float_rounding() -> None:
     assert "E+" not in line
 
 
-# --- 3 本日の結論(必須テスト 1)---------------------------------------------------------------
+# --- 3 本日の結論(必須テスト 1。U-17 = B 案 / U-17a)------------------------------------------
 
 
-def test_there_is_exactly_one_conclusion_line() -> None:
+def test_the_conclusion_is_always_two_lines_under_one_heading() -> None:
     for view in (
         build(),
         build(allocation=None),
         build(allocation=allocation_no_action()),
+        build(allocation=allocation_no_action(), legacy_items=(legacy(),)),
         full_view(),
     ):
-        assert len(conclusion(r.render_today_actions_table(view))) == 1
+        block = conclusion_block(r.render_today_actions_table(view))
+        assert len(block) == 3
+        assert block[0] == "本日の結論:"
+        assert block[1].startswith(NEW_LABEL) and block[2].startswith(LEGACY_LABEL)
+
+
+def test_the_word_skip_is_never_used_in_the_conclusion() -> None:
+    # U-17: 『見送り』の語は結論に使わない(新しい提案が無い日は『なし』)。購入の行は別
+    for view in (
+        build(),
+        build(allocation=None),
+        build(allocation=allocation_no_action()),
+        build(allocation=allocation_no_action(), legacy_items=(legacy(),)),
+        build(allocation=allocation_unavailable(), legacy_items=(legacy("利益保全注意"),)),
+        full_view(),
+    ):
+        assert all(
+            "見送り" not in line for line in conclusion_block(r.render_today_actions_table(view))
+        )
 
 
 def test_an_actions_day_counts_the_proposals_by_kind() -> None:
@@ -340,31 +388,40 @@ def test_an_actions_day_counts_the_proposals_by_kind() -> None:
         risk_exit_items=(sell("0001"),),
         value_exit_items=(sell("0011", tv.ExitReasonLabel.VALUE_EXIT),),
     )
-    (line,) = conclusion(r.render_today_actions_table(view))
-    assert line == "本日の結論: 提案あり（売却2件・資金入替1件・購入2件）"
+    assert new_proposal(r.render_today_actions_table(view)) == (
+        "あり（売却2件・資金入替1件・購入2件）"
+    )
 
 
 def test_a_purchase_only_day_says_zero_for_the_other_kinds() -> None:
-    (line,) = conclusion(r.render_today_actions_table(build()))
-    assert line == "本日の結論: 提案あり（売却0件・資金入替0件・購入1件）"
+    assert new_proposal(r.render_today_actions_table(build())) == (
+        "あり（売却0件・資金入替0件・購入1件）"
+    )
 
 
-def test_no_action_without_legacy_decisions_says_skip() -> None:
+def test_skipped_candidates_are_not_counted_as_purchase_proposals() -> None:
+    view = build(allocation=allocated(buy("0002"), buy("0003", tv.BuyFinalAction.SKIP)))
+    assert new_proposal(r.render_today_actions_table(view)) == (
+        "あり（売却0件・資金入替0件・購入1件）"
+    )
+
+
+def test_no_action_says_none_for_new_proposals_and_none_for_legacy() -> None:
     view = build(allocation=allocation_no_action())
     assert view.status is tv.ViewStatus.NO_ACTION
-    (line,) = conclusion(r.render_today_actions_table(view))
-    assert line == "本日の結論: 見送り"
+    text = r.render_today_actions_table(view)
+    assert new_proposal(text) == "なし"
+    assert legacy_state(text) == "なし"
 
 
-def test_an_unavailable_day_never_says_skip_and_names_every_reason() -> None:
+def test_an_unavailable_day_names_every_reason_in_the_new_proposal_line() -> None:
     view = build(
         allocation=allocation_unavailable(
             tv.ViewReason.POLICY_INCOMPLETE, tv.ViewReason.CASH_NOT_REGISTERED
         )
     )
-    (line,) = conclusion(r.render_today_actions_table(view))
-    assert line.startswith("本日の結論: 算出不能（理由: ")
-    assert "見送り" not in line
+    line = new_proposal(r.render_today_actions_table(view))
+    assert line.startswith("算出不能（理由: ")
     assert tv.ViewReason.POLICY_INCOMPLETE.label in line
     assert tv.ViewReason.CASH_NOT_REGISTERED.label in line
 
@@ -381,11 +438,9 @@ def test_every_reason_is_shown_with_its_label_and_its_code(reason: tv.ViewReason
 
 def test_an_unevaluated_rotation_day_is_unavailable_with_its_own_reason() -> None:
     view = build(allocation=allocation_no_action(), rotation=None)
-    text = r.render_today_actions_table(view)
-    (line,) = conclusion(text)
-    assert line.startswith("本日の結論: 算出不能")
+    line = new_proposal(r.render_today_actions_table(view))
+    assert line.startswith("算出不能")
     assert tv.ViewReason.ROTATION_NOT_EVALUATED.label in line
-    assert "見送り" not in line
 
 
 def test_an_unavailable_day_has_no_proposal_sections_but_keeps_legacy_information() -> None:
@@ -394,33 +449,68 @@ def test_an_unavailable_day_has_no_proposal_sections_but_keeps_legacy_informatio
     assert not has_header(text, H_BUY)
     assert not has_header(text, H_RISK)
     assert len(rows(text, H_LEGACY)) == 1
+    # 算出不能の日でも、既存の判定の行(結論の 2 行目)は出る
+    assert legacy_state(text) == "あり — 緊急確認1件（理由は未分類）"
 
 
-# --- 3b 暫定: NO_ACTION かつ既存の判定あり(U-17。USER の決定まで定数 1 箇所へ隔離)-------------
-
-
-def test_no_action_with_a_legacy_decision_never_says_skip() -> None:
-    # ★ U-17: 『見送り』と『緊急確認』が同じ画面に並ぶと、緊急確認が不要に読める ★
-    view = build(allocation=allocation_no_action(), legacy_items=(legacy("緊急確認"),))
-    assert view.status is tv.ViewStatus.NO_ACTION
-    (line,) = conclusion(r.render_today_actions_table(view))
-    assert "見送り" not in line
-    assert line == f"本日の結論: {r.PROVISIONAL_NO_ACTION_WITH_LEGACY_CONCLUSION}"
-    assert "見送り" not in r.PROVISIONAL_NO_ACTION_WITH_LEGACY_CONCLUSION
+# --- 3b 既存の売却関連の判定の行(U-17 / U-17a)------------------------------------------------
 
 
 @pytest.mark.parametrize("label", ["緊急確認", "利益保全注意", "一部売却", "全部売却", "売却"])
-def test_every_legacy_label_uses_the_same_provisional_conclusion(label: str) -> None:
+def test_every_legacy_label_is_counted_by_its_own_name(label: str) -> None:
+    # 5 区分すべてで、『見送り』だけの結論にならず、区分名は既存の表記のまま・件数つき
     view = build(allocation=allocation_no_action(), legacy_items=(legacy(label),))
-    (line,) = conclusion(r.render_today_actions_table(view))
-    assert "見送り" not in line
+    text = r.render_today_actions_table(view)
+    assert legacy_state(text) == f"あり — {label}1件（理由は未分類）"
+    assert new_proposal(text) == "なし"
+    assert "見送り" not in "\n".join(conclusion_block(text))
 
 
-def test_only_the_legacy_case_uses_the_provisional_conclusion() -> None:
-    plain = conclusion(r.render_today_actions_table(build(allocation=allocation_no_action())))
-    assert r.PROVISIONAL_NO_ACTION_WITH_LEGACY_CONCLUSION not in plain[0]
-    actions = conclusion(r.render_today_actions_table(full_view()))
-    assert r.PROVISIONAL_NO_ACTION_WITH_LEGACY_CONCLUSION not in actions[0]
+def test_legacy_decisions_are_counted_per_label_in_order_of_appearance() -> None:
+    items = (
+        legacy("緊急確認", "0009"),
+        legacy("利益保全注意", "0013"),
+        legacy("緊急確認", "0014"),
+        legacy("利益保全注意", "0015"),
+        legacy("緊急確認", "0016"),
+    )
+    text = r.render_today_actions_table(
+        build(allocation=allocation_no_action(), legacy_items=items)
+    )
+    assert legacy_state(text) == "あり — 緊急確認3件・利益保全注意2件（理由は未分類）"
+
+
+def test_the_legacy_counts_match_the_legacy_rows() -> None:
+    items = (legacy("緊急確認", "0009"), legacy("一部売却", "0013"), legacy("一部売却", "0014"))
+    text = r.render_today_actions_table(
+        build(allocation=allocation_no_action(), legacy_items=items)
+    )
+    assert len(rows(text, H_LEGACY)) == 3
+    assert legacy_state(text) == "あり — 緊急確認1件・一部売却2件（理由は未分類）"
+
+
+def test_a_legacy_label_is_never_translated_into_the_new_exit_names() -> None:
+    items = (legacy("緊急確認"), legacy("利益保全注意", "0013"))
+    text = r.render_today_actions_table(
+        build(allocation=allocation_no_action(), legacy_items=items)
+    )
+    block = "\n".join(conclusion_block(text))
+    for forbidden in ("リスク回避", "割安", "RISK_EXIT", "VALUE_EXIT", "PROFIT_PROTECTION"):
+        assert forbidden not in block
+
+
+def test_legacy_decisions_do_not_change_the_new_proposal_line() -> None:
+    plain = r.render_today_actions_table(build(allocation=allocation_no_action()))
+    with_legacy = r.render_today_actions_table(
+        build(allocation=allocation_no_action(), legacy_items=(legacy(),))
+    )
+    assert new_proposal(plain) == new_proposal(with_legacy) == "なし"
+
+
+def test_a_day_with_proposals_and_legacy_shows_both_lines() -> None:
+    text = r.render_today_actions_table(full_view())
+    assert new_proposal(text).startswith("あり（")
+    assert legacy_state(text) == "あり — 緊急確認1件（理由は未分類）"
 
 
 # --- 4 群の表示順・群ごとの行(U-11 / U-13)---------------------------------------------------
@@ -957,12 +1047,6 @@ def test_the_module_is_not_imported_from_anywhere_in_src() -> None:
         if path == _MODULE_PATH:
             continue
         assert "today_actions_cli_renderer" not in path.read_text(encoding="utf-8"), str(path)
-
-
-def test_skipped_candidates_are_not_counted_as_purchase_proposals() -> None:
-    view = build(allocation=allocated(buy("0002"), buy("0003", tv.BuyFinalAction.SKIP)))
-    (line,) = conclusion(r.render_today_actions_table(view))
-    assert line == "本日の結論: 提案あり（売却0件・資金入替0件・購入1件）"
 
 
 def test_a_corrupted_rotation_item_falls_back_to_the_unconfirmed_display() -> None:

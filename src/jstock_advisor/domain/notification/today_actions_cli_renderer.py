@@ -11,7 +11,9 @@ CLI(605-D)・LINE renderer(605-C)は含まない。
 試験運用：投資判断には使いません       ← mode = SHADOW のとき常に先頭
 本日の投資アクション  所有者: …  評価日時: … JST  評価モード: SHADOW
 買付余力: …（最終棚卸し …）/ 未登録 / 最終棚卸し：未確認
-本日の結論: …                         ← 提案あり / 見送り / 算出不能（理由: …）
+本日の結論:                           ← 常に 2 行(U-17 = B 案)
+  新しい提案（購入・資金入替・新分類の売却）: あり（…）/ なし / 算出不能（理由: …）
+  既存の売却関連の判定: あり — 区分ごとの件数（理由は未分類）/ なし
 ■ 群の見出し + 『| 』で始まる行       ← リスク回避 → 割安解消 → 利益保全
                                          → 既存の判定 → 入替 → 購入
 ■ 算出不能の理由 + 『・』の行
@@ -30,12 +32,11 @@ CLI(605-D)・LINE renderer(605-C)は含まない。
 field。未確定の数量・数値は null(0 にしない)。日本語の見出し・帯は含めない。
 破壊的変更は schema_version を更新する。
 
-## U-17(USER の決定待ち)
+## U-17 / U-17a(USER 決定済み。#605 …6102823176)
 
-『NO_ACTION かつ既存の売却関連の判定あり』の結論行の文言は、暫定の定数 1 箇所
-(`PROVISIONAL_NO_ACTION_WITH_LEGACY_CONCLUSION`)へ隔離した。この組合せで『見送り』の語を
-出さない(緊急確認などが不要に読めるため)ことだけを固定している。
-USER の決定後に定数を差し替える。
+本日の結論は『新しい提案』と『既存の売却関連の判定』の 2 行に分ける。既存の判定がある日に
+『見送り』だけを表示しない(『見送り』の語は結論に使わず、新しい提案が無い日は『なし』とする)。
+既存の判定は区分ごとの件数を、既存の表記のまま出す(新しい Exit 分類へ自動変換しない)。
 """
 
 from __future__ import annotations
@@ -66,10 +67,9 @@ from jstock_advisor.domain.notification.today_actions_view import (
 
 SHADOW_BANNER = "試験運用：投資判断には使いません"
 JSON_SCHEMA_VERSION = SCHEMA_VERSION
-PROVISIONAL_NO_ACTION_WITH_LEGACY_CONCLUSION = (
-    "新しい提案はありません（既存の判定が下にあります。売却理由は未分類）"
-)
 
+_CONCLUSION_NEW_LABEL = "  新しい提案（購入・資金入替・新分類の売却）: "
+_CONCLUSION_LEGACY_LABEL = "  既存の売却関連の判定: "
 _H_RISK = "■ リスク回避の売却"
 _H_VALUE = "■ 割安解消の売却"
 _H_PROFIT = "■ 利益保全の売却"
@@ -132,16 +132,25 @@ def _proposal_counts(view: TodayActionsView) -> tuple[int, int, int]:
     return sells, len(view.rotation_items), purchases
 
 
-def _conclusion(view: TodayActionsView) -> str:
+def _new_proposal_text(view: TodayActionsView) -> str:
     if view.status is ViewStatus.ACTIONS:
         sells, rotations, purchases = _proposal_counts(view)
-        return f"提案あり（売却{sells}件・資金入替{rotations}件・購入{purchases}件）"
+        return f"あり（売却{sells}件・資金入替{rotations}件・購入{purchases}件）"
     if view.status is ViewStatus.NO_ACTION:
-        if view.legacy_items:
-            return PROVISIONAL_NO_ACTION_WITH_LEGACY_CONCLUSION
-        return "見送り"
+        return "なし"
     labels = "・".join(reason.label for reason in view.reasons)
     return f"算出不能（理由: {labels}）"
+
+
+def _legacy_state_text(view: TodayActionsView) -> str:
+    """既存の判定を区分ごとの件数で示す。区分名は既存の表記のまま(変換しない)。"""
+    if not view.legacy_items:
+        return "なし"
+    counts: dict[str, int] = {}
+    for item in view.legacy_items:
+        counts[item.legacy_label] = counts.get(item.legacy_label, 0) + 1
+    parts = "・".join(f"{label}{count}件" for label, count in counts.items())
+    return f"あり — {parts}（理由は未分類）"
 
 
 def _sell_row(item: SellItemView) -> str:
@@ -245,7 +254,9 @@ def render_today_actions_table(
         f"  評価モード: {view.mode.value}"
     )
     lines.append(_cash_line(view.cash))
-    lines.append(f"本日の結論: {_conclusion(view)}")
+    lines.append("本日の結論:")
+    lines.append(f"{_CONCLUSION_NEW_LABEL}{_new_proposal_text(view)}")
+    lines.append(f"{_CONCLUSION_LEGACY_LABEL}{_legacy_state_text(view)}")
     groups: tuple[tuple[str, list[str]], ...] = (
         (_H_RISK, [_sell_row(i) for i in view.risk_exit_items]),
         (_H_VALUE, [_sell_row(i) for i in view.value_exit_items]),
