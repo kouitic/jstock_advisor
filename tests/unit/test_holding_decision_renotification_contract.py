@@ -20,6 +20,8 @@ from __future__ import annotations
 import ast
 import itertools
 import math
+import subprocess
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -766,10 +768,54 @@ def test_round_trip_without_optional_parts() -> None:
     assert extract_hd_state({HD_RENOTIFY_STATE_KEY: serialize_hd_state(original)}) == original
 
 
-def test_serialization_is_deterministic_regardless_of_gate_order() -> None:
-    a = serialize_hd_state(state(gate_confirmations=gates(B=_C, A=_C)))
-    b = serialize_hd_state(state(gate_confirmations=gates(A=_C, B=_C)))
-    assert list(a["gate_confirmations"]) == list(b["gate_confirmations"])  # type: ignore[call-overload]
+_MANY_CODES = [f"CODE_{n:02d}" for n in range(16)]
+
+
+def test_serialization_order_is_the_canonical_sorted_order() -> None:
+    """frozenset の反復順は要素の hash で決まる。保存形式は、その順ではなく正規の順(昇順)にする。"""
+    reversed_codes = list(reversed(_MANY_CODES))
+    stored = serialize_hd_state(
+        state(gate_confirmations=frozenset((code, _C) for code in reversed_codes))
+    )
+    keys = list(stored["gate_confirmations"])  # type: ignore[call-overload]
+    assert keys == sorted(_MANY_CODES)
+
+
+def test_serialization_is_identical_across_processes_with_different_hash_seeds() -> None:
+    """str の hash はプロセスごとにランダム化される。同じ状態は、どの seed でも同じ text になる。
+
+    保存した記録の text が実行ごとに変わると、差分比較・hash・監査の再現が崩れる(PR-2 の前提)。
+    """
+    program = f"""
+import json
+from jstock_advisor.domain.signals.holding_decision_renotification import (
+    GateConfirmation,
+    HdNotifyState,
+    serialize_hd_state,
+)
+
+codes = {_MANY_CODES!r}
+state = HdNotifyState(
+    scoring_model_version="m1",
+    base_score=-1.0,
+    final_score=-1.0,
+    recommendation_type="T",
+    category="C",
+    gate_confirmations=frozenset((c, GateConfirmation.CONFIRMED) for c in codes),
+)
+print(json.dumps(serialize_hd_state(state)))
+"""
+    outputs = set()
+    for seed in ("1", "2", "3"):
+        completed = subprocess.run(
+            [sys.executable, "-c", program],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={"PYTHONHASHSEED": seed, "PYTHONPATH": str(_SRC_ROOT.parent)},
+        )
+        outputs.add(completed.stdout)
+    assert len(outputs) == 1
 
 
 def test_extract_none_means_no_previous_delivery() -> None:
