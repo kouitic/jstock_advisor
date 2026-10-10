@@ -661,8 +661,13 @@ def _notify_holding_decision_and_build_result(
     rule_version_service: RuleVersionService,
     batch_id: str | None,
     execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
+    gate_confirmations: tuple[tuple[str, str], ...] = (),
 ) -> tuple[_HoldingResult, HoldingDecisionResult]:
     """保有判断スコアの通知を行う。
+
+    gate_confirmations(Issue #890 PR-2)は、評価が返した hard gate の理由コードごとの確認状態。
+    再通知の比較に使う記録(hd_renotify_state)を作る builder へ渡すだけで、この関数の判定・
+    通知・保存の挙動は変えない。
 
     戻り値は(_HoldingResult, 保存用に更新したHoldingDecisionResult)。
     Recommendation生成・保存・recommendation_id設定はkill switchの影響を受けず常に行う
@@ -715,6 +720,7 @@ def _notify_holding_decision_and_build_result(
         config,
         exit_price_range,
         recommendation_id=recommendation_id,
+        gate_confirmations=gate_confirmations,
     )
     linked_result = result.model_copy(update={"recommendation_id": recommendation_id})
     # 通知検証モード機能(2026-08追加): kill switchとは独立に、VALIDATIONでは
@@ -1192,6 +1198,7 @@ def _analyze_one_holding(
                     rule_version_service,
                     batch_id,
                     execution_context,
+                    gate_confirmations=hd_outcome.gate_confirmations,
                 )
             # 通知検証モード機能(2026-08追加): VALIDATIONでは通常運用の判定履歴を
             # 汚さないため保存自体をスキップする。

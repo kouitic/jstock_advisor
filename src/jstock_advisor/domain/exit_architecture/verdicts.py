@@ -45,7 +45,12 @@ class ThesisVerdict:
     """L1(投資前提)。保有判断スコアなど既存の評価を写した結果。
 
     thesis_state は evidence(非価格の root)から決める。最終スコアだけを根拠にしない。
-    ハードゲートの発動は一次情報で確認できた場合のみ(既存の仕様)で、発動したときは BROKEN。
+    ハードゲートが発動したときは BROKEN。ハードゲートの理由コードの多くは入力側で一次情報の確認を
+    要する(DEBT_EXCESS・DIVIDEND_OMISSION_AND_CASHFLOW_CRISIS など)が、GOING_CONCERN_DOUBT
+    (snapshot の判定フラグ)と INVESTMENT_THESIS_COLLAPSE(点数ベース)は要しない。開示キーワード
+    由来の rule は、キーワード一致のみでも確認済みとして扱われうる。したがって『発動 = 一次情報で
+    確認済み』とは一律に言えず、一次情報の確認は Evidence.primary_source_confirmed に理由コード
+    ごとに表す(thesis_adapter の対応表。確認できないものは False)。
     """
 
     thesis_state: Determination[ThesisState]
@@ -88,6 +93,9 @@ class ExpectedReturnVerdict:
     valuation_exhaustion: Determination[bool]
     severely_low: Determination[bool]
     reliability: ReliabilityClass
+    # この verdict を支える根拠(FE-2 の FullEvidence の材料)。既定 () = 根拠なし
+    # (Issue #878 PR-2 の P-2。additive)
+    evidence: tuple[Evidence, ...] = ()
 
     def __post_init__(self) -> None:
         names = [c.component for c in self.components]
@@ -119,6 +127,8 @@ class RotationVerdict:
     """L4(機会費用)。未実装の間は UNDETERMINED。"""
 
     gap_clear: Determination[bool]
+    # この verdict を支える根拠(FE-3 の FullEvidence の材料)。既定 () = 根拠なし(P-2。additive)
+    evidence: tuple[Evidence, ...] = ()
 
 
 @dataclass(frozen=True)

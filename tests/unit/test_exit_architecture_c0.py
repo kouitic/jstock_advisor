@@ -149,6 +149,7 @@ _VOCABULARY: dict[type, set[str]] = {
         "NO_FULL_EVIDENCE",
         "EARNINGS_WINDOW",
         "MITIGATION",
+        "TIMING_LAYER",
         "UNDETERMINED_INPUT",
         "DUPLICATE_EVIDENCE",
         "SUPERSEDED_BY_STRONGER",
@@ -839,10 +840,30 @@ _ALLOWED_IMPORT_ROOTS = {
     "__future__",
     "dataclasses",
     "enum",
+    "math",
     "typing",
     "collections",
     "jstock_advisor",
 }
+
+
+# 外部の型として import してよい module(必要な型の module 名を列挙する。包括許可にしない)。
+# thesis_adapter(#882 PR-1)が、既存の保有判断スコアの結果の型を引数で受け取るために使う。
+# これらの module は entities 同士・pydantic・標準 library だけを import している(services /
+# infrastructure / lambda_handlers / providers / cli / config を import しない。#882 の着手時に実測)
+_ALLOWED_EXTERNAL_TYPE_MODULES = {
+    "thesis_adapter.py": (
+        "jstock_advisor.domain.entities.enums",
+        "jstock_advisor.domain.entities.holding_decision",
+    ),
+}
+
+
+def _is_allowed_external(file_name: str, module: str) -> bool:
+    return any(
+        module == allowed or module.startswith(allowed + ".")
+        for allowed in _ALLOWED_EXTERNAL_TYPE_MODULES.get(file_name, ())
+    )
 
 
 def test_the_package_imports_only_pure_standard_library_and_itself() -> None:
@@ -851,7 +872,26 @@ def test_the_package_imports_only_pure_standard_library_and_itself() -> None:
             root = module.split(".")[0]
             assert root in _ALLOWED_IMPORT_ROOTS, f"{path.name}: {module}"
             if root == "jstock_advisor":
-                assert module.startswith(_PACKAGE_NAME), f"{path.name}: {module}"
+                assert module.startswith(_PACKAGE_NAME) or _is_allowed_external(
+                    path.name, module
+                ), f"{path.name}: {module}"
+
+
+def test_only_the_listed_modules_may_import_outside_the_package() -> None:
+    """外部の型の import を許す module は列挙したものだけで、許可は module 名単位。
+
+    services / infrastructure / lambda_handlers / providers / cli / config は、
+    どの module も import しない。
+    """
+    forbidden_prefixes = tuple(
+        f"jstock_advisor.{name}"
+        for name in ("services", "infrastructure", "lambda_handlers", "providers", "cli", "config")
+    )
+    for path in sorted(_PKG_DIR.glob("*.py")):
+        for module in _imports(path):
+            assert not module.startswith(forbidden_prefixes), f"{path.name}: {module}"
+            if module.startswith("jstock_advisor.") and not module.startswith(_PACKAGE_NAME):
+                assert _is_allowed_external(path.name, module), f"{path.name}: {module}"
 
 
 def test_the_package_has_no_io_or_logging_calls() -> None:
