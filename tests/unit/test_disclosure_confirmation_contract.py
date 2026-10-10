@@ -741,6 +741,199 @@ def test_known_limit_restatement_split_across_two_sentences_is_detected_only() -
     assert _acc(_d(risk, one_sentence)).level is SERIOUS
 
 
+# --- 2.3b MUST-1(HANAKO の PR 前 review): 危険な言葉の中の語で限定を満たさない -----------------
+
+_ISSUE_TOPICS = [
+    "不適切な会計処理に関する過年度決算の訂正の要否について",
+    "不適切な会計処理について、過年度の決算を訂正するか検討します",
+    "不適切な会計処理の有無と過年度の訂正の要否を調査します",
+]
+
+
+@pytest.mark.parametrize("text", _ISSUE_TOPICS)
+def test_must1_a_restatement_topic_is_not_a_restatement_fact(text: str) -> None:
+    """危険な言葉の『不適切』で限定を満たさず、検討・調査・要否・有無の語で非断定になる。"""
+    for disclosure in ([_d(text)], [_d("標題", text)], [_d(text, "本文")]):
+        got = _acc(*disclosure)
+        assert got.level is ACC_DETECTED, text
+        assert got.detected_keywords == ("不適切な会計処理",)
+
+
+@pytest.mark.parametrize("risk", _ACC_RISKS)
+@pytest.mark.parametrize(
+    "template",
+    [
+        "{risk}に関する過年度の決算の訂正について",
+        "{risk}を受けた過年度の決算の訂正を行います",
+        "過年度の決算の訂正と{risk}",
+        "{risk}。過年度の決算を訂正します",
+    ],
+)
+def test_must1_risk_keyword_plus_generic_words_never_makes_a_restatement(
+    risk: str, template: str
+) -> None:
+    """property: 危険な言葉 + 『過年度』『訂正』という一般的な語だけでは A にならない
+    (危険な言葉の出現範囲の語は、限定の語として数えない)。"""
+    assert _acc(_d(template.format(risk=risk))).level is ACC_DETECTED
+
+
+def test_must1_masking_is_what_prevents_the_self_satisfaction() -> None:
+    expression = _EXPR_OBJECTS["決算訂正"]
+    sentence = "不適切な会計処理に関する過年度決算の訂正について"
+    assert expression.satisfied_by(sentence) is True  # 危険な言葉を知らない素の判定では満たす
+    assert expression.satisfied_by(sentence, tuple(dc.RISK_KEYWORD_TO_RULE)) is False
+    # 危険な言葉の外にある『不適切』『誤り』は数える
+    outside = "不適切な会計処理に関する過年度決算を、誤りにより訂正します"
+    assert expression.satisfied_by(outside, tuple(dc.RISK_KEYWORD_TO_RULE)) is True
+
+
+def test_must1_removing_the_risk_words_own_wording_keeps_the_restatement_a() -> None:
+    """危険な言葉の『不適切』を取り除いても、同じ訂正の文(誤りによる)は A のまま。"""
+    for risk in _ACC_RISKS:
+        base = "過年度の決算を、会計処理の誤りにより訂正します"
+        assert _acc(_d(risk, base)).level is SERIOUS
+        assert _acc(_d(f"{risk}。{base}")).level is SERIOUS
+        assert _acc(_d(f"{risk}に伴い、{base}")).level is SERIOUS
+
+
+def test_must1_correction_report_pairs_with_the_accounting_risk_word_by_design() -> None:
+    """限定の語が危険な言葉そのものの場合(訂正報告書 + 『不適切な会計処理』)は、その出現を数える
+    (意図: 訂正報告書と危険な言葉の同伴)。他の危険な言葉・非断定の文は A にならない。"""
+    assert _acc(_d("不適切な会計処理に関する訂正報告書を提出しました")).level is SERIOUS
+    assert _acc(_d("内部統制上の重要な不備に関する訂正報告書を提出しました")).level is ACC_DETECTED
+    assert (
+        _acc(_d("不適切な会計処理に関する訂正報告書の提出の要否を検討します")).level is ACC_DETECTED
+    )
+    assert _acc(_d("不適切な会計処理。誤りのため訂正報告書を提出しました")).level is SERIOUS
+
+
+_INQUIRY_PAIRS = [
+    ("要否", "過年度の決算の誤りによる訂正の要否について"),
+    ("有無", "過年度の決算の誤りによる訂正の有無について"),
+    ("適否", "過年度の決算の誤りによる訂正の適否について"),
+    ("検討します", "過年度の決算の誤りによる訂正を行うか検討します"),
+    ("調査します", "過年度の決算の誤りによる訂正を行うか調査します"),
+]
+
+
+@pytest.mark.parametrize(("word", "sentence"), _INQUIRY_PAIRS)
+def test_must1_each_inquiry_word_alone_turns_an_otherwise_complete_restatement_into_a_topic(
+    word: str, sentence: str
+) -> None:
+    """限定(過年度・訂正・誤り)が危険な言葉の外で揃っていても、論点・調査・検討の語を含む文は
+    事実の確定ではない。各語を 1 つずつ外すと落ちるよう、文には当該の語だけを置く。"""
+    others = [p for p in dc.DEFAULT_NON_ASSERTIVE_PHRASES if p != word and p in sentence]
+    assert word in sentence and not others, (word, others)
+    assert _EXPR_OBJECTS["決算訂正"].satisfied_by(sentence)
+    got = _acc(_d("不適切な会計処理", sentence))
+    assert got.level is ACC_DETECTED and got.blocked_by_non_assertive, word
+    # 対: 同じ限定の確定の文(論点の語なし)は A
+    assert _acc(_d("不適切な会計処理", "過年度の決算の誤りによる訂正を行います")).level is SERIOUS
+
+
+_HEARSAY_PAIRS = [
+    ("不明", "不正の事実が認められたとの見方もあり、真偽は不明です"),
+    ("との報道", "不正の事実が認められたとの報道があります"),
+    ("旨の報道", "不正の事実が認められた旨の報道があります"),
+    ("との情報", "不正の事実が認められたとの情報があります"),
+    ("とのこと", "不正の事実が認められたとのことです"),
+]
+
+
+@pytest.mark.parametrize(("word", "sentence"), _HEARSAY_PAIRS)
+def test_hearsay_and_unknown_truth_are_not_a_confirmed_fact(word: str, sentence: str) -> None:
+    others = [p for p in dc.DEFAULT_NON_ASSERTIVE_PHRASES if p != word and p in sentence]
+    assert word in sentence and not others, (word, others)
+    assert _EXPR_OBJECTS["不正の事実"].satisfied_by(sentence)
+    got = _acc(_d("内部統制上の重要な不備", sentence))
+    assert got.level is ACC_DETECTED and got.blocked_by_non_assertive, word
+    assert _acc(_d("内部統制上の重要な不備", "不正の事実が認められました")).level is FRAUD
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "不正の事実が認められたことに間違いありません",
+        "不正の事実が認められたことは疑いの余地はありません",
+    ],
+)
+def test_known_limit_double_negation_in_a_real_confirmation_stays_detected(sentence: str) -> None:
+    """KNOWN_LIMIT(見逃し方向。HANAKO S-2): 二重否定(『間違いありません』『疑いの余地はありません』)
+    は『ありません』『疑い』で非確認に倒れる。二重否定・複雑な構文は誤りうる(module の docstring)。
+    否定と非断定の両方に当たる文は、どちらか一方を外しても確認にならないため blocked_by_* は立たない
+    (blocked_by_* は『その条件だけを外せば確認になる』の意味)。"""
+    got = _acc(_d("内部統制上の重要な不備", sentence))
+    assert got.level is ACC_DETECTED
+
+
+def test_title_and_summary_are_separate_sentences() -> None:
+    """title の仮定の語が、summary の確定の文へ及ばない(別の文)。"""
+    got = _acc(_d("不正の事実が判明した場合", "不適切な会計処理 不正の事実が認められました"))
+    assert got.level is FRAUD
+    got_reverse = _acc(
+        _d("不正の事実が認められました 不適切な会計処理", "判明した場合は開示します")
+    )
+    assert got_reverse.level is FRAUD
+
+
+def test_known_limit_risk_words_own_wording_cannot_supply_the_error_evidence() -> None:
+    """KNOWN_LIMIT(見逃し方向): 『不適切な会計処理により過年度の決算を訂正します』は、誤りの語が
+    危険な言葉の中の『不適切』しか無いため A にならない(確認要止まり。検出は残る)。A は hard gate の
+    入力ではない(提案は B のみ)。誤りを別の語で書けば A になる(上のテスト)。"""
+    got = _acc(_d("不適切な会計処理により過年度の決算を訂正します"))
+    assert got.level is ACC_DETECTED and not got.blocked_by_non_assertive
+
+
+@pytest.mark.parametrize(
+    ("text", "label"),
+    [
+        ("不正の事実の有無を調査した結果、不正の事実が認められました", "有無"),
+        ("訂正の要否を検討した結果、過年度の決算を会計処理の誤りにより訂正します", "要否"),
+    ],
+)
+def test_known_limit_a_result_report_containing_an_inquiry_word_is_not_counted(
+    text: str, label: str
+) -> None:
+    """KNOWN_LIMIT(見逃し方向): 『有無』『要否』は同じ文の確定を巻き込む。『調査の結果』だけの
+    確定の報告は残る(P-12)。結果の報告に論点の語が同居する形は確認にならない。"""
+    got = _acc(_d("不適切な会計処理", text))
+    assert got.level is ACC_DETECTED and got.blocked_by_non_assertive, label
+
+
+# --- 2.3c MUST-2(HANAKO): 本物の不正の事実が、よくある書き方で B にならない(既知の限界) ---
+
+_MUST2_INPUTS = [
+    pytest.param(
+        "内部統制上の重要な不備があり、不正の事実が認められたため、再発防止策を講じる方針です",
+        {"blocked_by_non_assertive": True, "blocked_by_negation": False},
+        id="fact_plus_policy_clause",
+    ),
+    pytest.param(
+        "内部統制上の重要な不備があり、不正の事実が認められましたが、他の役職員の関与は認められておりません",
+        {"blocked_by_non_assertive": False, "blocked_by_negation": True},
+        id="fact_plus_contrast_negation_clause",
+    ),
+]
+
+
+@pytest.mark.parametrize(("text", "flags"), _MUST2_INPUTS)
+def test_known_limit_must2_a_real_fraud_fact_in_a_multi_clause_sentence_stays_detected(
+    text: str, flags: dict[str, bool]
+) -> None:
+    """KNOWN_LIMIT(見逃し方向。PR 本文の既知の限界の先頭): 文を読点で区切らない設計(文単位)のため、
+    同じ文の別の節にある将来の方針・否定が、過去の確定を打ち消す。暫定の既定は現行(文単位)のまま。
+    節単位に変える・『方針』『見通し』を非断定から外す、の選択肢は PR 本文に比較表を載せ、
+    USER が review で選ぶ。選択が変わったときは、このテストを意図して更新する。"""
+    got = _acc(_d(text))
+    assert got.level is ACC_DETECTED
+    assert got.fraud_pairs == () and got.serious_pairs == ()
+    assert got.blocked_by_non_assertive is flags["blocked_by_non_assertive"]
+    assert got.blocked_by_negation is flags["blocked_by_negation"]
+    # 同じ内容を節ごとに文へ分ければ B になる(文の区切りだけが原因であることの確認)
+    split = text.replace("、", "。")
+    assert _acc(_d(split)).level is FRAUD
+
+
 def test_two_stage_negation_in_a_comma_joined_sentence_is_a_known_limit() -> None:
     """KNOWN_LIMIT: 読点で繋いだ 1 文の中に否定と確定が同居すると、その文の出現は数えない
     (格上げしない側)。"""

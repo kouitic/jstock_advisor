@@ -169,9 +169,22 @@ DEFAULT_NON_ASSERTIVE_PHRASES: tuple[str, ...] = (
     "検討しています",
     "検討しております",
     "検討いたします",
+    "検討します",
+    "調査します",
+    "調査いたします",
     "疑義",
     "疑い",
     "疑念",
+    # 伝聞・真偽不明(事実の確定ではない)
+    "不明",
+    "との報道",
+    "旨の報道",
+    "との情報",
+    "とのこと",
+    # 調査・検討の対象を表す語(『〜の要否』『〜の有無』『〜の適否』は事実の確定ではなく論点)
+    "要否",
+    "有無",
+    "適否",
 )
 
 
@@ -198,9 +211,24 @@ class ConfirmationExpression:
                 if not group or any(not token for token in group):
                     raise ValueError("a group must be non-empty and contain no empty token")
 
-    def satisfied_by(self, sentence: str) -> bool:
+    def satisfied_by(self, sentence: str, risk_keywords: Sequence[str] = ()) -> bool:
+        """文が表現を満たすか。
+
+        **危険な言葉の出現範囲の語は、限定の語として数えない**(自己充足の防止。C1 の一般化):
+        危険な言葉『不適切な会計処理』の中の『不適切』で、決算訂正の限定の『不適切』が満たされない。
+        ただし、限定の語が危険な言葉そのものである場合(訂正報告書 + 『不適切な会計処理』)は、
+        その危険な言葉の出現を語として数える(意図: 訂正報告書と危険な言葉の同伴)。
+        """
+        masked = sentence
+        for keyword in sorted(risk_keywords, key=len, reverse=True):
+            masked = masked.replace(keyword, "\u25a0" * len(keyword))
+        keyword_set = set(risk_keywords)
+
+        def present(token: str) -> bool:
+            return token in (sentence if token in keyword_set else masked)
+
         return any(
-            all(any(token in sentence for token in group) for group in alternative)
+            all(any(present(token) for token in group) for group in alternative)
             for alternative in self.alternatives
         )
 
@@ -494,6 +522,7 @@ def _assess_accounting(
     disclosures: Sequence[Disclosure], rules: DisclosureConfirmationRules
 ) -> AccountingAssessment:
     risk_words = _rule_keywords(rules, ACCOUNTING_PROBLEM)
+    every_risk_word = tuple(rules.risk_keyword_to_rule)
     fraud_keys = {e.key for e in rules.accounting_expressions if e.is_fraud_fact}
     detected: set[str] = set()
     serious: set[tuple[str, str]] = set()
@@ -515,7 +544,7 @@ def _assess_accounting(
                     if not negated:
                         risk_counted.add(word)
             for expression in rules.accounting_expressions:
-                if not expression.satisfied_by(sentence):
+                if not expression.satisfied_by(sentence, every_risk_word):
                     continue
                 if not non_assertive:
                     no_negation_filter.add(expression.key)
