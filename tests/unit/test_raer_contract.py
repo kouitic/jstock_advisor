@@ -919,6 +919,13 @@ def test_the_new_module_is_not_reachable_from_any_handler_or_cli() -> None:
     assert "jstock_advisor.domain.valuation.raer" not in reached
 
 
+# この module を import してよい src の module の明示リスト(いずれも未配線の dormant)。
+# #603 の配分の型(PR-A)は RaerResult を候補の入力に持つ。後続の消費側はここへ足す
+_ALLOWED_IMPORTERS = {
+    "domain/signals/portfolio_allocation_types.py",  # #603 PR-A
+}
+
+
 def test_no_other_source_file_mentions_the_module() -> None:
     importers = []
     for path in sorted(_SRC.rglob("*.py")):
@@ -927,4 +934,4 @@ def test_no_other_source_file_mentions_the_module() -> None:
         text = path.read_text(encoding="utf-8")
         if "valuation.raer" in text or "valuation import raer" in text:
             importers.append(path.relative_to(_SRC).as_posix())
-    assert importers == []
+    assert set(importers) <= _ALLOWED_IMPORTERS, importers
