@@ -439,8 +439,16 @@ def test_the_module_reads_no_clock_and_imports_no_services_or_exit_architecture(
 
 
 def test_only_the_allowed_modules_import_expected_return() -> None:
-    """dormant: 現行のエンジンのどこからも import されない。例外は PR-1b の写像の module だけ。"""
-    allowed = {"domain/exit_architecture/expected_return_adapter.py"}
+    """dormant: 現行のエンジンのどこからも import されない。
+
+    例外は、dormant な module だけ: PR-1b の写像(exit_architecture 内)と、#602 PR-B1 の RAER の型
+    (`domain/valuation/raer.py`。ExpectedReturnResult をそのまま保持する。handler・CLI から
+    到達されないことは、その契約テストが推移閉包で固定する)。
+    """
+    allowed = {
+        "domain/exit_architecture/expected_return_adapter.py",
+        "domain/valuation/raer.py",
+    }
     importers = set()
     for path in sorted((_SRC / "jstock_advisor").rglob("*.py")):
         if path == _MODULE_PATH:
