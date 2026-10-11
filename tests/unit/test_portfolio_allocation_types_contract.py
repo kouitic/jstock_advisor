@@ -912,6 +912,7 @@ def test_the_module_does_not_import_the_optimizer_or_anything_that_computes() ->
 # この module を import してよい src の module の明示リスト(いずれも未配線の dormant)
 _ALLOWED_IMPORTERS = {
     "domain/signals/portfolio_allocation.py",  # #603 PR-C(optimize_allocation)
+    "domain/signals/capital_rotation.py",  # #603 PR-D(AllocationResult を入力に持つ)
 }
 
 

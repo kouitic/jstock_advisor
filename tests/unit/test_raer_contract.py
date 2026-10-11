@@ -924,6 +924,7 @@ def test_the_new_module_is_not_reachable_from_any_handler_or_cli() -> None:
 _ALLOWED_IMPORTERS = {
     "domain/signals/portfolio_allocation_types.py",  # #603 PR-A
     "domain/signals/portfolio_allocation.py",  # #603 PR-C
+    "domain/signals/capital_rotation.py",  # #603 PR-D(入替元の RaerResult)
 }
 
 

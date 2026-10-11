@@ -1312,7 +1312,7 @@ def test_the_module_defines_and_calls_nothing_that_looks_like_sending_or_saving(
             assert not any(w in name.lower() for w in words), name
 
 
-_ALLOWED_IMPORTERS: set[str] = set()  # この module を import してよい src の module(現時点は無し)
+_ALLOWED_IMPORTERS: set[str] = {"domain/signals/capital_rotation.py"}  # #603 PR-D(再判定に使う)
 
 
 def test_the_module_is_imported_from_nowhere_in_src() -> None:
