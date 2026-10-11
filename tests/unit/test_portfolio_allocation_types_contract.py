@@ -504,6 +504,7 @@ def test_a_not_allocated_candidate_is_accepted_for_every_other_reason(
 _BAD_ALLOCATIONS: list[tuple[str, dict[str, object]]] = [
     ("allocated with zero shares", {"shares": 0, "amount": D("0"), "cap_limited_shares": 0}),
     ("allocated with another reason", {"reason_code": pt.ReasonCode.BELOW_HURDLE}),
+    ("allocated with a zero amount", {"amount": D("0")}),
     ("allocated without a rank", {"rank": None}),
     ("allocated amount negative", {"amount": D("-424242.5")}),
     ("allocated above its cap-limited shares", {"cap_limited_shares": 100}),
@@ -978,3 +979,13 @@ def test_an_available_result_may_still_exclude_an_unavailable_raer() -> None:
         )
     )
     assert r.allocations[1].reason_code is pt.ReasonCode.RAER_UNAVAILABLE
+
+
+def test_an_allocated_candidate_cannot_have_a_zero_amount_in_a_whole_result() -> None:
+    # サブちゃんの PR-A SHOULD-1: 株数 > 0 の配分で購入総額 0 円の結果が型を通っていた
+    with pytest.raises(pt.AllocationContractError):
+        result(
+            allocations=(allocated("0002", 100, 1, amount=D("0")),),
+            total_allocated=D("0"),
+            remaining_cash=D("768000"),
+        )
