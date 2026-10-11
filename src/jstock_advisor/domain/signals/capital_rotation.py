@@ -736,9 +736,8 @@ def _evaluate(
         sector=dict(sector_exposure or {}),
         high_risk=high_risk_exposure or Decimal(0),
     )
+    # 配分した候補の購入額(配分しなかった候補は 0)を、業種・high-risk の保有へ積む
     for item in allocation.allocations:
-        if item.decision is not CandidateDecision.ALLOCATED:
-            continue
         done = candidates[item.stock_code]
         if done.sector is not None:
             state.sector[done.sector] = state.sector.get(done.sector, Decimal(0)) + item.amount
