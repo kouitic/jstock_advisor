@@ -845,6 +845,72 @@ def test_a_malformed_input_is_rejected_without_echoing_a_value(
         assert needle not in text
 
 
+@pytest.mark.parametrize("portfolio", [D("0"), None])
+@pytest.mark.parametrize(
+    "which", ["max_single_stock_ratio", "max_sector_ratio", "max_high_risk_ratio"]
+)
+def test_each_ratio_cap_alone_needs_a_usable_portfolio_value(
+    which: str, portfolio: Decimal | None
+) -> None:
+    r = run(
+        portfolio_value=portfolio,
+        constraints=cons(**{which: D("0.5")}),
+        sector_exposure={},
+        high_risk_exposure=D("0"),
+    )
+    assert r.unavailable_reason is U.PORTFOLIO_VALUE_UNAVAILABLE
+
+
+def test_a_cap_exactly_one_unit_cost_with_a_position_is_the_amount_cap_reason() -> None:
+    # 上限が 1 単元の購入額ちょうど(= 売買単位の問題ではない)で、保有があって枠が 0
+    c = cand(kind=pt.CandidateKind.ADDITIONAL_BUY, current_position_value=D("10000"))
+    r = run(candidates=[c], constraints=cons(max_single_stock_amount=UNIT_COST))
+    assert by_code(r)["0002"].reason_code is R.POSITION_AMOUNT_CAP_APPLIED
+
+
+def test_the_tier_quantity_is_floored_not_rounded_up() -> None:
+    tiers = {t: D("0.55") for t in pt.PriceTier}  # 6 単元 x 0.55 = 3.3 -> 3
+    r = run(
+        candidates=[cand(price_tier=pt.PriceTier.ENTRY)],
+        available_cash=D("5000000"),
+        constraints=cons(max_single_stock_amount=D("600000")),
+        policy=pol(tier_quantity_caps=tiers),
+    )
+    assert by_code(r)["0002"].shares == 300
+    tiers = {t: D("0.95") for t in pt.PriceTier}  # 6 x 0.95 = 5.7 -> 5(四捨五入なら 6)
+    r = run(
+        candidates=[cand(price_tier=pt.PriceTier.ENTRY)],
+        available_cash=D("5000000"),
+        constraints=cons(max_single_stock_amount=D("600000")),
+        policy=pol(tier_quantity_caps=tiers),
+    )
+    assert by_code(r)["0002"].shares == 500
+
+
+@pytest.mark.parametrize(
+    ("over", "field"),
+    [
+        ({"candidates": [cand("0002"), cand("0002")]}, "candidates"),
+        ({"candidates": "0002"}, "candidates"),
+        ({"candidates": [424242]}, "candidates"),
+        ({"owner": " "}, "owner"),
+        ({"owner": 424242}, "owner"),
+        ({"available_cash": D("-0.01")}, "available_cash"),
+        ({"portfolio_value": D("-0.01")}, "portfolio_value"),
+        ({"constraints": "x"}, "constraints"),
+        ({"policy": "x"}, "policy"),
+        ({"sector_exposure": {" ": D("1")}}, "sector_exposure"),
+        ({"sector_exposure": {"電気機器": D("-0.01")}}, "sector_exposure"),
+        ({"high_risk_exposure": D("-0.01")}, "high_risk_exposure"),
+    ],
+)
+def test_the_optimizer_names_the_rejected_input_itself(over: dict[str, object], field: str) -> None:
+    # 型(AllocationResult など)の拒否に隠れず、この関数の検証が項目名つきで拒否する
+    with pytest.raises(pt.AllocationContractError) as info:
+        run(**over)
+    assert str(info.value).startswith(f"{field}:")
+
+
 def test_a_candidate_list_may_be_a_tuple_and_is_not_mutated() -> None:
     cands = (cand("0003"), cand("0002"))
     before = list(cands)

@@ -153,7 +153,6 @@ class _Rules:
     """方針が完全(`missing()` が空)のときの、None を除いた決定値."""
 
     hurdle: Decimal
-    comparison_key: str
     amount_cap: Decimal
     single_ratio: Decimal
     sector_ratio: Decimal
@@ -179,7 +178,6 @@ def _rules(constraints: AllocationConstraints, policy: AllocationPolicy) -> _Rul
     """`policy.missing(constraints)` が空だと確かめた後に呼ぶ(全項目が非 None)."""
     return _Rules(
         hurdle=cast(Decimal, policy.min_raer_to_allocate),
-        comparison_key=cast(str, policy.comparison_key),
         amount_cap=cast(Decimal, constraints.max_single_stock_amount),
         single_ratio=cast(Decimal, constraints.max_single_stock_ratio),
         sector_ratio=cast(Decimal, constraints.max_sector_ratio),
