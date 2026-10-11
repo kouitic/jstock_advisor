@@ -69,26 +69,26 @@ JSON_SCHEMA_VERSION = SCHEMA_VERSION
 
 _CONCLUSION_NEW_LABEL = "  新しい提案（購入・資金入替・新分類の売却）: "
 _CONCLUSION_LEGACY_LABEL = "  既存の売却関連の判定: "
-_H_RISK = "■ リスク回避の売却"
-_H_VALUE = "■ 割安解消の売却"
-_H_PROFIT = "■ 利益保全の売却"
-_H_LEGACY = "■ 既存の売却関連の判定（売却理由は未分類）"
-_H_ROTATION = f"■ 資金入替（売却と購入は一体。{ROTATION_CONDITION_TEXT}）"
-_H_BUY = "■ 購入（最終アクション）"
-_H_REASONS = "■ 算出不能の理由"
+HEADER_RISK = "■ リスク回避の売却"
+HEADER_VALUE = "■ 割安解消の売却"
+HEADER_PROFIT = "■ 利益保全の売却"
+HEADER_LEGACY = "■ 既存の売却関連の判定（売却理由は未分類）"
+HEADER_ROTATION = f"■ 資金入替（売却と購入は一体。{ROTATION_CONDITION_TEXT}）"
+HEADER_BUY = "■ 購入（最終アクション）"
+HEADER_REASONS = "■ 算出不能の理由"
 
-_FINAL_ACTION_LABELS: dict[BuyFinalAction, str] = {
+FINAL_ACTION_LABELS: dict[BuyFinalAction, str] = {
     BuyFinalAction.PURCHASE: "購入",
     BuyFinalAction.SKIP: "見送り",
 }
 _SHARES_UNCONFIRMED = "売却株数：未確定"
-_ROTATION_UNCONFIRMED = "株数・金額・改善幅：未確定（試験運用）"
+ROTATION_UNCONFIRMED_TEXT = "株数・金額・改善幅：未確定（試験運用）"
 
 
 # --- 表の整形 ---------------------------------------------------------------------------------
 
 
-def _money(value: Decimal) -> str:
+def format_money(value: Decimal) -> str:
     return format(value, ",f")
 
 
@@ -96,26 +96,26 @@ def _name(code: str, name: str) -> str:
     return f"{name}({code})"
 
 
-def _price_text(basis: PriceBasis | None) -> str:
+def format_price_basis(basis: PriceBasis | None) -> str:
     if basis is None:
         return "-"
-    return f"{_money(basis.price)}円（{to_jst(basis.as_of):%Y-%m-%d %H:%M}）"
+    return f"{format_money(basis.price)}円（{to_jst(basis.as_of):%Y-%m-%d %H:%M}）"
 
 
-def _amount_text(amount: Decimal | None) -> str:
-    return "-" if amount is None else f"約{_money(amount)}円"
+def format_amount(amount: Decimal | None) -> str:
+    return "-" if amount is None else f"約{format_money(amount)}円"
 
 
-def _sell_shares_text(shares: int | None) -> str:
+def format_sell_shares(shares: int | None) -> str:
     return _SHARES_UNCONFIRMED if shares is None else f"{shares}株"
 
 
-def _cash_line(cash: CashView) -> str:
+def cash_line(cash: CashView) -> str:
     # 確認済みの買付余力は棚卸し日時を持ち、未確認は持たない(605-A の型が構築時に保証する)。
     # 日時の有無で分けると、型の絞り込みになり、到達しない分岐を作らない
     last = cash.last_reconciled_at
     reconciled = f"最終棚卸し {to_jst(last):%Y-%m-%d}" if last is not None else "最終棚卸し：未確認"
-    amount = "未登録" if cash.amount is None else f"{_money(cash.amount)}円"
+    amount = "未登録" if cash.amount is None else f"{format_money(cash.amount)}円"
     return f"買付余力: {amount}（{reconciled}）"
 
 
@@ -147,14 +147,30 @@ def _legacy_state_text(view: TodayActionsView) -> str:
     return f"あり — {parts}（理由は未分類）"
 
 
+def heading_line(view: TodayActionsView) -> str:
+    return (
+        f"本日の投資アクション  所有者: {view.owner}  評価日時: {format_jst(view.evaluated_at)}"
+        f"  評価モード: {view.mode.value}"
+    )
+
+
+def conclusion_lines(view: TodayActionsView) -> tuple[str, str, str]:
+    """本日の結論の 3 行(見出し + 新しい提案 + 既存の売却関連の判定)。LINE renderer と共有する。"""
+    return (
+        "本日の結論:",
+        f"{_CONCLUSION_NEW_LABEL}{_new_proposal_text(view)}",
+        f"{_CONCLUSION_LEGACY_LABEL}{_legacy_state_text(view)}",
+    )
+
+
 def _sell_row(item: SellItemView) -> str:
     cells = [
         _name(item.stock_code, item.stock_name),
         f"{item.sell_action.label}（{item.sell_action.value}）",
         f"{item.exit_reason.label}（{item.exit_reason.value}）",
-        _sell_shares_text(item.shares),
-        _amount_text(item.estimated_amount),
-        _price_text(item.price_basis),
+        format_sell_shares(item.shares),
+        format_amount(item.estimated_amount),
+        format_price_basis(item.price_basis),
         "・".join(item.summary_reasons) or "-",
     ]
     return _row(cells)
@@ -164,7 +180,7 @@ def _legacy_row(item: LegacyDecisionItemView) -> str:
     cells = [
         _name(item.stock_code, item.stock_name),
         item.legacy_label,
-        _sell_shares_text(item.shares),
+        format_sell_shares(item.shares),
         item.note or "-",
     ]
     return _row(cells)
@@ -173,7 +189,7 @@ def _legacy_row(item: LegacyDecisionItemView) -> str:
 def _leg_text(leg: RotationLeg, *, with_numbers: bool) -> str:
     text = _name(leg.stock_code, leg.stock_name)
     if with_numbers and leg.shares is not None and leg.estimated_amount is not None:
-        text += f" {leg.shares}株 {_amount_text(leg.estimated_amount)}"
+        text += f" {leg.shares}株 {format_amount(leg.estimated_amount)}"
     return text
 
 
@@ -187,7 +203,7 @@ def _rotation_row(item: RotationItemView) -> str:
         detail = f"改善幅 {improvement:f}・算入割合 {ratio:f}"
     else:
         confirmed = False
-        detail = _ROTATION_UNCONFIRMED
+        detail = ROTATION_UNCONFIRMED_TEXT
     return _row(
         [
             f"売却: {_leg_text(item.sell_leg, with_numbers=confirmed)}",
@@ -204,13 +220,13 @@ def _buy_row(item: BuyItemView) -> str:
     else:
         tail = f"段階: {item.price_tier}" if item.price_tier else "-"
         shares = "-" if item.shares is None else f"{item.shares}株"
-        amount = _amount_text(item.estimated_amount)
-        price = _price_text(item.price_basis)
+        amount = format_amount(item.estimated_amount)
+        price = format_price_basis(item.price_basis)
     return _row(
         [
             _name(item.stock_code, item.stock_name),
             item.standalone_judgement,
-            _FINAL_ACTION_LABELS[item.final_action],
+            FINAL_ACTION_LABELS[item.final_action],
             shares,
             amount,
             price,
@@ -223,7 +239,7 @@ def _row(cells: Sequence[str]) -> str:
     return "| " + " | ".join(cells) + " |"
 
 
-def _remaining_cash_line(view: TodayActionsView) -> str | None:
+def remaining_cash_line(view: TodayActionsView) -> str | None:
     if view.projected_remaining_cash is None:
         return None
     suffix = (
@@ -231,7 +247,7 @@ def _remaining_cash_line(view: TodayActionsView) -> str | None:
         if view.remaining_cash_basis is RemainingCashBasis.ESTIMATE_FROM_UNCONFIRMED_CASH
         else "（目安）"
     )
-    return f"見込み残高: {_money(view.projected_remaining_cash)}円{suffix}"
+    return f"見込み残高: {format_money(view.projected_remaining_cash)}円{suffix}"
 
 
 def render_today_actions_table(
@@ -244,30 +260,25 @@ def render_today_actions_table(
     lines: list[str] = []
     if view.mode is ViewMode.SHADOW:
         lines.append(SHADOW_BANNER)
-    lines.append(
-        f"本日の投資アクション  所有者: {view.owner}  評価日時: {format_jst(view.evaluated_at)}"
-        f"  評価モード: {view.mode.value}"
-    )
-    lines.append(_cash_line(view.cash))
-    lines.append("本日の結論:")
-    lines.append(f"{_CONCLUSION_NEW_LABEL}{_new_proposal_text(view)}")
-    lines.append(f"{_CONCLUSION_LEGACY_LABEL}{_legacy_state_text(view)}")
+    lines.append(heading_line(view))
+    lines.append(cash_line(view.cash))
+    lines.extend(conclusion_lines(view))
     groups: tuple[tuple[str, list[str]], ...] = (
-        (_H_RISK, [_sell_row(i) for i in view.risk_exit_items]),
-        (_H_VALUE, [_sell_row(i) for i in view.value_exit_items]),
-        (_H_PROFIT, [_sell_row(i) for i in view.profit_protection_items]),
-        (_H_LEGACY, [_legacy_row(i) for i in view.legacy_items]),
-        (_H_ROTATION, [_rotation_row(i) for i in view.rotation_items]),
-        (_H_BUY, [_buy_row(i) for i in view.buy_items]),
+        (HEADER_RISK, [_sell_row(i) for i in view.risk_exit_items]),
+        (HEADER_VALUE, [_sell_row(i) for i in view.value_exit_items]),
+        (HEADER_PROFIT, [_sell_row(i) for i in view.profit_protection_items]),
+        (HEADER_LEGACY, [_legacy_row(i) for i in view.legacy_items]),
+        (HEADER_ROTATION, [_rotation_row(i) for i in view.rotation_items]),
+        (HEADER_BUY, [_buy_row(i) for i in view.buy_items]),
     )
     for header, group_rows in groups:
         if group_rows:
             lines.append(header)
             lines.extend(group_rows)
     if view.reasons:
-        lines.append(_H_REASONS)
+        lines.append(HEADER_REASONS)
         lines.extend(f"・{reason.label}（{reason.value}）" for reason in view.reasons)
-    remaining = _remaining_cash_line(view)
+    remaining = remaining_cash_line(view)
     if remaining is not None:
         lines.append(remaining)
     if view.unchanged_holdings_count is not None:
@@ -350,7 +361,7 @@ def _buy_json(item: BuyItemView) -> dict[str, object]:
         "stock_code": item.stock_code,
         "stock_name": item.stock_name,
         "standalone_judgement": item.standalone_judgement,
-        "final_action": _coded(item.final_action.value, _FINAL_ACTION_LABELS[item.final_action]),
+        "final_action": _coded(item.final_action.value, FINAL_ACTION_LABELS[item.final_action]),
         "skip_reason": skip_reason,
         "shares": item.shares,
         "estimated_amount": _dec(item.estimated_amount),
