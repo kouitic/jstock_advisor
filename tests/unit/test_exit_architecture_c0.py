@@ -832,8 +832,11 @@ def test_no_existing_source_file_imports_the_package() -> None:
             continue
         if any(m == _PACKAGE_NAME or m.startswith(_PACKAGE_NAME + ".") for m in _imports(path)):
             importers.append(path.relative_to(_SRC).as_posix())
-    # 現行のエンジンへ配線しない(配線は後続の承認された PR)
-    assert importers == []
+    # 現行のエンジンへ配線しない(配線は後続の承認された PR)。許可は明示の 1 件だけ:
+    # capital_rotation(#603 PR-D。dormant)は、提案の分類の語彙 ExitClass.CAPITAL_ROTATION を読むだけで、
+    # 既存の SELL / 利確 / 下落保護 / Arbiter の判定には触れない(その逆向きの依存がないことは
+    # test_capital_rotation_contract.py が固定する)
+    assert importers == ["domain/signals/capital_rotation.py"]
 
 
 _ALLOWED_IMPORT_ROOTS = {
