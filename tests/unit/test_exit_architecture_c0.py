@@ -851,11 +851,16 @@ _ALLOWED_IMPORT_ROOTS = {
 # thesis_adapter(#882 PR-1)が、既存の保有判断スコアの結果の型を引数で受け取るために使う。
 # これらの module は entities 同士・pydantic・標準 library だけを import している(services /
 # infrastructure / lambda_handlers / providers / cli / config を import しない。#882 の着手時に実測)
+# expected_return_adapter(#601 PR-1b)は、Expected Return の結果の型(`ExpectedReturnResult` 等)を
+# 引数で受け取るために `domain/valuation/expected_return.py` の 1 件だけを使う。この module は
+# 標準 library と entities・price_freshness・yield_calc の純粋な domain だけを import する
+# (exit_architecture を import しない = 逆向きの依存なし。#910 の契約テストが固定)。
 _ALLOWED_EXTERNAL_TYPE_MODULES = {
     "thesis_adapter.py": (
         "jstock_advisor.domain.entities.enums",
         "jstock_advisor.domain.entities.holding_decision",
     ),
+    "expected_return_adapter.py": ("jstock_advisor.domain.valuation.expected_return",),
 }
 
 
