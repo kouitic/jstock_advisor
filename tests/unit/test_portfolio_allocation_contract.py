@@ -8,7 +8,7 @@
 ```
 ・判定の優先順位: 入力検証 → 買付余力が未登録 → 保有の評価が揃わない → 比較可能性 → 方針の完全性 →
   候補ごと(RAER・hurdle)→ 順位 → 貪欲(位置・業種・high-risk・段階・資金)
-・順位: value 降順 → confidence 降順(HIGH > MEDIUM > LOW > None)→ stock_code 昇順。入力の並びに依らない
+・順位: value 降順 → confidence 降順(HIGH > MEDIUM > LOW > None)→ stock_code 昇順。並びに依らない
 ・方針がすべて未決定(既定)なら、全候補が POLICY_INCOMPLETE の『順位だけの shadow』で、配分は 0
 ・実データでは当面すべて RAER_UNAVAILABLE(B1 の射影は常に UNAVAILABLE)
 ・独立な参照実装(1 単元ずつ足す)との一致、購入総額 <= 買付余力、各上限を超えない、単調性、最大性
@@ -26,7 +26,7 @@ import ast
 import datetime as dt
 import itertools
 import random
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -39,6 +39,7 @@ from jstock_advisor.domain.entities.enums import BuyAction, ConfidenceLevel
 from jstock_advisor.domain.price_freshness import PriceFreshnessVerdict
 from jstock_advisor.domain.signals import portfolio_allocation as pa
 from jstock_advisor.domain.signals import portfolio_allocation_types as pt
+from jstock_advisor.domain.signals.buy_affordability import compute_buy_affordability
 from jstock_advisor.domain.valuation.expected_return import (
     FairValueInput,
     IncomeInput,
@@ -97,8 +98,10 @@ def raer(
         if not risk_observed:
             raise AssertionError("an AVAILABLE raer observes the risk axis")
     else:
-        not_applied = frozenset({AxisCode.BUSINESS_RISK.value}) if not risk_observed else frozenset(
-            {AxisCode.EARNINGS_TREND.value}
+        not_applied = (
+            frozenset({AxisCode.BUSINESS_RISK.value})
+            if not risk_observed
+            else frozenset({AxisCode.EARNINGS_TREND.value})
         )
         applied = _ALL_AXES - not_applied
     return RaerResult(
@@ -162,7 +165,9 @@ def pol(**over: object) -> pt.AllocationPolicy:
 
 
 def empty_policy() -> pt.AllocationPolicy:
-    return pt.AllocationPolicy(min_raer_to_allocate=None, comparison_key=None, tier_quantity_caps=None)
+    return pt.AllocationPolicy(
+        min_raer_to_allocate=None, comparison_key=None, tier_quantity_caps=None
+    )
 
 
 def undecided_constraints() -> pt.AllocationConstraints:
@@ -271,7 +276,9 @@ def test_an_unavailable_raer_does_not_break_the_comparability_of_the_others() ->
 
 def test_a_provisional_key_matches_a_policy_decided_for_that_key() -> None:
     provisional = raer(RaerState.PROVISIONAL)
-    r = run(candidates=[cand(raer=provisional)], policy=pol(comparison_key=provisional.comparison_key))
+    r = run(
+        candidates=[cand(raer=provisional)], policy=pol(comparison_key=provisional.comparison_key)
+    )
     assert r.status is pt.AllocationStatus.ALLOCATED_SOME
 
 
@@ -279,14 +286,22 @@ def test_the_precedence_of_the_unavailable_reasons() -> None:
     mixed = [cand("0002"), cand("0003", raer=raer(RaerState.PROVISIONAL))]
     ratio = cons(max_single_stock_ratio=D("0.1"))
     # 比率の上限が効くのに portfolio_value なし > 比較不能 > 方針不完全
-    assert run(portfolio_value=None, constraints=ratio, candidates=mixed, policy=empty_policy()).unavailable_reason is U.PORTFOLIO_VALUE_UNAVAILABLE
+    assert (
+        run(
+            portfolio_value=None, constraints=ratio, candidates=mixed, policy=empty_policy()
+        ).unavailable_reason
+        is U.PORTFOLIO_VALUE_UNAVAILABLE
+    )
     assert run(candidates=mixed, policy=empty_policy()).unavailable_reason is U.RAER_NOT_COMPARABLE
     assert run(policy=empty_policy()).unavailable_reason is U.POLICY_INCOMPLETE
 
 
 def test_every_unavailable_result_names_what_the_policy_is_missing() -> None:
     p = pol(min_raer_to_allocate=None)
-    for r in (run(available_cash=None, policy=p), run(candidates=[cand(), cand("0003", raer=raer(RaerState.PROVISIONAL))], policy=p)):
+    for r in (
+        run(available_cash=None, policy=p),
+        run(candidates=[cand(), cand("0003", raer=raer(RaerState.PROVISIONAL))], policy=p),
+    ):
         assert r.policy_missing == ("min_raer_to_allocate",)
 
 
@@ -339,7 +354,12 @@ def test_the_shadow_ranks_a_candidate_even_below_an_undecided_hurdle() -> None:
 def test_one_undecided_item_alone_stops_every_allocation(
     policy_over: dict[str, object], constraint_over: dict[str, object]
 ) -> None:
-    r = run(policy=pol(**policy_over), constraints=cons(**constraint_over))
+    r = run(
+        policy=pol(**policy_over),
+        constraints=cons(**constraint_over),
+        sector_exposure={},
+        high_risk_exposure=D("0"),
+    )
     assert r.unavailable_reason is U.POLICY_INCOMPLETE
     assert r.total_allocated == 0
     assert all(a.shares == 0 for a in r.allocations)  # 『とにかく買う』の禁止
@@ -435,7 +455,11 @@ def test_the_result_does_not_depend_on_the_input_order_for_every_permutation() -
         cand("0006", raer=raer(value="2")),
     ]
     results = {
-        run(candidates=list(p), available_cash=D("750000"), constraints=cons(max_single_stock_amount=D("400000")))
+        run(
+            candidates=list(p),
+            available_cash=D("750000"),
+            constraints=cons(max_single_stock_amount=D("400000")),
+        )
         for p in itertools.permutations(cands)
     }
     assert len(results) == 1
@@ -480,7 +504,10 @@ def test_a_candidate_that_cannot_buy_one_unit_for_lack_of_cash_reports_the_unmet
 
 def test_the_cash_exactly_one_unit_buys_one_unit_and_one_yen_less_buys_none() -> None:
     assert by_code(run(available_cash=UNIT_COST))["0002"].shares == 100
-    assert by_code(run(available_cash=UNIT_COST - 1))["0002"].reason_code is R.INSUFFICIENT_CASH_REMAINING
+    assert (
+        by_code(run(available_cash=UNIT_COST - 1))["0002"].reason_code
+        is R.INSUFFICIENT_CASH_REMAINING
+    )
 
 
 def test_the_amount_cap_includes_the_current_position() -> None:
@@ -493,7 +520,11 @@ def test_an_amount_cap_with_no_room_left_is_the_amount_cap_reason() -> None:
     c = cand(kind=pt.CandidateKind.ADDITIONAL_BUY, current_position_value=D("580000"))
     r = run(candidates=[c], constraints=cons(max_single_stock_amount=D("600000")))
     a = by_code(r)["0002"]
-    assert a.reason_code is R.POSITION_AMOUNT_CAP_APPLIED and a.shares == 0 and a.cap_limited_shares == 0
+    assert (
+        a.reason_code is R.POSITION_AMOUNT_CAP_APPLIED
+        and a.shares == 0
+        and a.cap_limited_shares == 0
+    )
 
 
 def test_an_amount_cap_below_one_unit_cost_is_below_the_minimum_trading_unit() -> None:
@@ -513,7 +544,11 @@ def test_the_single_stock_ratio_uses_the_post_purchase_denominator() -> None:
 
 def test_a_position_already_over_the_ratio_cap_is_the_ratio_reason() -> None:
     c = cand(kind=pt.CandidateKind.ADDITIONAL_BUY, current_position_value=D("1200000"))
-    r = run(candidates=[c], available_cash=D("5000000"), constraints=cons(max_single_stock_ratio=D("0.1")))
+    r = run(
+        candidates=[c],
+        available_cash=D("5000000"),
+        constraints=cons(max_single_stock_ratio=D("0.1")),
+    )
     a = by_code(r)["0002"]
     assert a.reason_code is R.POSITION_RATIO_CAP_APPLIED and a.shares == 0
 
@@ -530,7 +565,7 @@ def test_the_tighter_of_the_amount_and_ratio_caps_decides() -> None:
 
 
 def test_a_sector_cap_limits_the_quantity_by_the_exposure_already_held() -> None:
-    # 0.2 × 10,000,000 = 2,000,000。業種の保有 1,500,000 → (2,000,000 − 1,500,000) / 0.8 = 625,000 → 6 単元
+    # 0.2 × 10,000,000 = 2,000,000。業種の保有 1,500,000 → (2,000,000 − 1,500,000) / 0.8 = 625,000
     r = run(
         available_cash=D("5000000"),
         constraints=cons(max_sector_ratio=D("0.2")),
@@ -566,7 +601,9 @@ def test_a_sector_cap_does_not_apply_to_another_sector() -> None:
 
 def test_an_unknown_sector_is_a_reason_only_when_a_sector_cap_is_in_force() -> None:
     unknown = cand(sector=None)
-    capped = run(candidates=[unknown], constraints=cons(max_sector_ratio=D("0.2")), sector_exposure={})
+    capped = run(
+        candidates=[unknown], constraints=cons(max_sector_ratio=D("0.2")), sector_exposure={}
+    )
     assert by_code(capped)["0002"].reason_code is R.SECTOR_UNKNOWN
     assert by_code(capped)["0002"].rank == 1 and by_code(capped)["0002"].shares == 0
     free = run(candidates=[unknown])
@@ -574,7 +611,9 @@ def test_an_unknown_sector_is_a_reason_only_when_a_sector_cap_is_in_force() -> N
 
 
 def _high_risk(code: str = "0002", value: str = "5") -> pt.AllocationCandidate:
-    return cand(code, raer=raer(value=value, risk_flags=frozenset({RiskFlag.CYCLICAL_INDUSTRY.value})))
+    return cand(
+        code, raer=raer(value=value, risk_flags=frozenset({RiskFlag.CYCLICAL_INDUSTRY.value}))
+    )
 
 
 def test_a_high_risk_cap_limits_only_high_risk_candidates() -> None:
@@ -617,8 +656,16 @@ def test_an_unobserved_risk_is_unknown_not_no_risk() -> None:
 
 
 def test_the_tier_ratio_scales_the_quantity_allowed_by_the_other_caps() -> None:
-    tiers = {pt.PriceTier.ENTRY: D("0.5"), pt.PriceTier.STANDARD: D("0.75"), pt.PriceTier.STRONG: D("1")}
-    for tier, expected in ((pt.PriceTier.ENTRY, 300), (pt.PriceTier.STANDARD, 400), (pt.PriceTier.STRONG, 600)):
+    tiers = {
+        pt.PriceTier.ENTRY: D("0.5"),
+        pt.PriceTier.STANDARD: D("0.75"),
+        pt.PriceTier.STRONG: D("1"),
+    }
+    for tier, expected in (
+        (pt.PriceTier.ENTRY, 300),
+        (pt.PriceTier.STANDARD, 400),
+        (pt.PriceTier.STRONG, 600),
+    ):
         r = run(
             candidates=[cand(price_tier=tier)],
             available_cash=D("5000000"),
@@ -658,7 +705,14 @@ def test_when_several_caps_leave_zero_the_first_in_the_fixed_order_gives_the_rea
     c = _high_risk()
     tiers = {t: D("0.1") for t in pt.PriceTier}
     r = run(
-        candidates=[cand(raer=c.raer, price_tier=pt.PriceTier.ENTRY, kind=pt.CandidateKind.ADDITIONAL_BUY, current_position_value=D("600000"))],
+        candidates=[
+            cand(
+                raer=c.raer,
+                price_tier=pt.PriceTier.ENTRY,
+                kind=pt.CandidateKind.ADDITIONAL_BUY,
+                current_position_value=D("600000"),
+            )
+        ],
         available_cash=D("5000000"),
         constraints=cons(
             max_single_stock_amount=D("600000"),
@@ -742,7 +796,9 @@ def test_with_the_real_projection_every_candidate_is_excluded_and_the_day_is_no_
 
 def test_with_the_real_projection_and_an_undecided_policy_the_day_is_a_shadow() -> None:
     real = _real_unavailable_raer()
-    r = run(candidates=[cand(raer=real)], policy=empty_policy(), constraints=undecided_constraints())
+    r = run(
+        candidates=[cand(raer=real)], policy=empty_policy(), constraints=undecided_constraints()
+    )
     assert r.unavailable_reason is U.POLICY_INCOMPLETE
     assert by_code(r)["0002"].reason_code is R.RAER_UNAVAILABLE
 
@@ -828,6 +884,24 @@ class Case:
     high_risk_exposure: Decimal
 
 
+def largest(ok: Callable[[int], bool]) -> int:
+    """ok(n) が成り立つ最大の n >= 0(ok は n について単調: 成り立つなら小さい n でも成り立つ)."""
+    if not ok(1):
+        return 0
+    high = 1
+    while ok(high * 2):
+        high *= 2
+    low = high  # ok(low) は真、ok(high * 2) は偽
+    high *= 2
+    while high - low > 1:
+        mid = (low + high) // 2
+        if ok(mid):
+            low = mid
+        else:
+            high = mid
+    return low
+
+
 def reference_shares(case: Case) -> dict[str, int]:
     """定義そのもの: 順位順に、1 単元ずつ足して、すべての不等式を満たす間だけ続ける。"""
     k, p = case.constraints, case.policy
@@ -855,9 +929,13 @@ def reference_shares(case: Case) -> dict[str, int]:
     out: dict[str, int] = {}
     for c in usable:
         price = Fraction(c.current_price)
-        total = (Fraction(case.portfolio) if case.portfolio is not None else Fraction(0)) + allocated_total
+        total = (
+            Fraction(case.portfolio) if case.portfolio is not None else Fraction(0)
+        ) + allocated_total
         position = Fraction(c.current_position_value)
-        sector_unknown = k.max_sector_ratio is not None and k.max_sector_ratio < 1 and c.sector is None
+        sector_unknown = (
+            k.max_sector_ratio is not None and k.max_sector_ratio < 1 and c.sector is None
+        )
         hr_unknown = (
             k.max_high_risk_ratio is not None
             and k.max_high_risk_ratio < 1
@@ -866,9 +944,21 @@ def reference_shares(case: Case) -> dict[str, int]:
         if sector_unknown or hr_unknown:
             out[c.stock_code] = 0
             continue
-        is_hr = bool(k.max_high_risk_ratio is not None and k.max_high_risk_ratio < 1 and (c.raer.risk_flags & k.high_risk_flags))
+        is_hr = bool(
+            k.max_high_risk_ratio is not None
+            and k.max_high_risk_ratio < 1
+            and (c.raer.risk_flags & k.high_risk_flags)
+        )
 
-        def caps_ok(n: int, c: pt.AllocationCandidate = c, price: Fraction = price, total: Fraction = total, position: Fraction = position, is_hr: bool = is_hr) -> bool:
+        def caps_ok(
+            n: int,
+            c: pt.AllocationCandidate = c,
+            price: Fraction = price,
+            total: Fraction = total,
+            position: Fraction = position,
+            is_hr: bool = is_hr,
+            hr_alloc: Fraction = hr_alloc,
+        ) -> bool:
             a = price * n
             assert k.max_single_stock_amount is not None
             if position + a > Fraction(k.max_single_stock_amount):
@@ -881,27 +971,33 @@ def reference_shares(case: Case) -> dict[str, int]:
             if k.max_sector_ratio is not None and k.max_sector_ratio < 1 and c.sector is not None:
                 if total <= 0:
                     return False
-                held = Fraction(case.sector_exposure.get(c.sector, D(0))) + sector_alloc.get(c.sector, Fraction(0))
+                held = Fraction(case.sector_exposure.get(c.sector, D(0))) + sector_alloc.get(
+                    c.sector, Fraction(0)
+                )
                 if held + a > Fraction(k.max_sector_ratio) * (total + a):
                     return False
             if is_hr:
                 if total <= 0:
                     return False
-                if Fraction(case.high_risk_exposure) + hr_alloc + a > Fraction(k.max_high_risk_ratio) * (total + a):  # type: ignore[arg-type]
+                if Fraction(case.high_risk_exposure) + hr_alloc + a > Fraction(
+                    k.max_high_risk_ratio
+                ) * (total + a):  # type: ignore[arg-type]
                     return False
             return True
 
-        base = 0
-        while caps_ok(base + unit):
-            base += unit
+        base = largest(lambda n: caps_ok(n * unit)) * unit
         limit = base
         if c.price_tier is not None:
             assert p.tier_quantity_caps is not None
             ratio = Fraction(p.tier_quantity_caps[pt.PriceTier(c.price_tier)])
             limit = int(Fraction(base) * ratio // unit) * unit
-        shares = 0
-        while shares + unit <= limit and price * (shares + unit) <= remaining:
-            shares += unit
+
+        def affordable(
+            n: int, limit: int = limit, price: Fraction = price, remaining: Fraction = remaining
+        ) -> bool:
+            return n * unit <= limit and price * (n * unit) <= remaining
+
+        shares = largest(affordable) * unit
         out[c.stock_code] = shares
         amount = price * shares
         remaining -= amount
@@ -919,9 +1015,7 @@ def random_case(rng: random.Random) -> Case:
     sectors = ["電気機器", "食料品", "情報通信", None]
     cands: list[pt.AllocationCandidate] = []
     for i in range(n):
-        flags = frozenset(
-            rng.sample([f.value for f in RiskFlag], rng.randint(0, 2))
-        )
+        flags = frozenset(rng.sample([f.value for f in RiskFlag], rng.randint(0, 2)))
         state = rng.choice([RaerState.AVAILABLE] * 5 + [RaerState.UNAVAILABLE])
         value = str(rng.choice([1, 2, 3, 3, 4, 5, 6, 8, 8, 9]))
         confidence = rng.choice([*ConfidenceLevel, None]) if state is RaerState.AVAILABLE else None
@@ -932,7 +1026,9 @@ def random_case(rng: random.Random) -> Case:
                 kind=pt.CandidateKind.ADDITIONAL_BUY if position else pt.CandidateKind.NEW_BUY,
                 current_price=D(rng.choice([7, 100, 333, 1000, 2500])),
                 price_tier=rng.choice([None, *pt.PriceTier]),
-                raer=raer(state, value, confidence, flags if state is RaerState.AVAILABLE else frozenset()),
+                raer=raer(
+                    state, value, confidence, flags if state is RaerState.AVAILABLE else frozenset()
+                ),
                 current_position_value=D(position),
                 sector=rng.choice(sectors),
             )
@@ -948,12 +1044,18 @@ def random_case(rng: random.Random) -> Case:
     )
     policy = pol(
         min_raer_to_allocate=D(rng.choice([2, 3, 5])),
-        tier_quantity_caps={t: rng.choice([D("0.25"), D("0.5"), D("0.8"), D("1")]) for t in pt.PriceTier},
+        tier_quantity_caps={
+            t: rng.choice([D("0.25"), D("0.5"), D("0.8"), D("1")]) for t in pt.PriceTier
+        },
     )
     cash = D(rng.choice([0, 3_000, 70_000, 400_000, 1_500_000, 8_000_000]))
     ratio_in_force = any(
         r is not None and r < 1
-        for r in (constraints.max_single_stock_ratio, constraints.max_sector_ratio, constraints.max_high_risk_ratio)
+        for r in (
+            constraints.max_single_stock_ratio,
+            constraints.max_sector_ratio,
+            constraints.max_high_risk_ratio,
+        )
     )
     portfolio = D(rng.choice([2_000_000, 10_000_000, 40_000_000])) if ratio_in_force else None
     return Case(
@@ -1011,7 +1113,9 @@ def check_properties(case: Case, got: pt.AllocationResult) -> None:
     for a in got.allocations:
         assert a.shares % k.minimum_trading_unit == 0
     # 並び・順位の連続・重複なしは型が保証するが、入力の候補が全て出力に現れることを見る
-    assert sorted(a.stock_code for a in got.allocations) == sorted(c.stock_code for c in case.candidates)
+    assert sorted(a.stock_code for a in got.allocations) == sorted(
+        c.stock_code for c in case.candidates
+    )
     # I-8 RAER が使えない候補は配分されない
     unusable = {c.stock_code for c in case.candidates if c.raer.state is RaerState.UNAVAILABLE}
     for a in got.allocations:
@@ -1038,7 +1142,9 @@ def test_more_cash_never_reduces_the_total_allocated() -> None:
     rng = random.Random(605)
     for _ in range(600):
         case = random_case(rng)
-        bigger = Case(**{**case.__dict__, "cash": case.cash + D(rng.choice([1_000, 100_000, 3_000_000]))})
+        bigger = Case(
+            **{**case.__dict__, "cash": case.cash + D(rng.choice([1_000, 100_000, 3_000_000]))}
+        )
         assert run_case(bigger).total_allocated >= run_case(case).total_allocated
 
 
@@ -1054,7 +1160,10 @@ def test_the_optimizer_leaves_nothing_that_could_still_be_bought() -> None:
                 checked += 1
                 assert a.reason_code is not R.ALLOCATED
                 if a.reason_code is R.INSUFFICIENT_CASH_REMAINING:
-                    unit_cost = by_code_candidate(case, a.stock_code).current_price * case.constraints.minimum_trading_unit
+                    unit_cost = (
+                        by_code_candidate(case, a.stock_code).current_price
+                        * case.constraints.minimum_trading_unit
+                    )
                     # 配分後の残り資金では 1 単元に足りない(そのとき以降に買える額が残っていない)
                     assert (got.remaining_cash or D(0)) < unit_cost or a.cash_shortfall > 0
     assert checked > 100
@@ -1079,10 +1188,10 @@ def test_the_result_is_deterministic_and_does_not_depend_on_the_input_order() ->
 _ALLOWED_IMPORTS = {
     "__future__",
     "collections.abc",
+    "dataclasses",
     "decimal",
     "fractions",
     "jstock_advisor.domain.entities.enums",
-    "jstock_advisor.domain.signals.buy_affordability",
     "jstock_advisor.domain.signals.portfolio_allocation_types",
     "jstock_advisor.domain.valuation.raer",
     "typing",
@@ -1114,7 +1223,18 @@ def test_the_module_reads_no_clock_does_no_io_and_uses_no_float() -> None:
 
 
 def test_the_module_defines_and_calls_nothing_that_looks_like_sending_or_saving() -> None:
-    words = ("send", "push", "post", "publish", "invoke", "deliver", "notify", "save", "write", "persist")
+    words = (
+        "send",
+        "push",
+        "post",
+        "publish",
+        "invoke",
+        "deliver",
+        "notify",
+        "save",
+        "write",
+        "persist",
+    )
     for node in ast.walk(_tree()):
         names: list[str] = []
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
@@ -1134,12 +1254,41 @@ def test_the_module_is_imported_from_nowhere_in_src() -> None:
     for path in src.rglob("*.py"):
         if path == _MODULE_PATH:
             continue
-        if "portfolio_allocation import" in path.read_text(encoding="utf-8") or "signals.portfolio_allocation\n" in path.read_text(encoding="utf-8"):
+        if "portfolio_allocation import" in path.read_text(
+            encoding="utf-8"
+        ) or "signals.portfolio_allocation\n" in path.read_text(encoding="utf-8"):
             assert path.relative_to(src).as_posix() in _ALLOWED_IMPORTERS, str(path)
 
 
-def test_the_optimizer_reuses_the_affordability_function_of_m2() -> None:
-    assert "compute_buy_affordability" in _MODULE_PATH.read_text(encoding="utf-8")
+def test_a_single_candidate_agrees_with_the_affordability_function_of_m2() -> None:
+    # 資金・金額・比率の 3 つだけが効く 1 候補は、M2(buy_affordability)と同じ株数になる
+    rng = random.Random(608)
+    for _ in range(600):
+        cash = D(rng.choice([0, 90_000, 400_000, 1_500_000, 8_000_000]))
+        position = D(rng.choice([0, 50_000, 300_000, 900_000]))
+        amount_cap = D(rng.choice([20_000, 150_000, 600_000, 5_000_000]))
+        ratio = rng.choice([D("0.05"), D("0.1"), D("0.5"), D("1")])
+        portfolio = D(rng.choice([2_000_000, 10_000_000, 40_000_000]))
+        candidate = cand(
+            kind=pt.CandidateKind.ADDITIONAL_BUY if position else pt.CandidateKind.NEW_BUY,
+            current_position_value=position,
+        )
+        got = run(
+            available_cash=cash,
+            portfolio_value=portfolio,
+            candidates=[candidate],
+            constraints=cons(max_single_stock_amount=amount_cap, max_single_stock_ratio=ratio),
+        )
+        m2 = compute_buy_affordability(
+            available_cash=cash,
+            candidate_price=PRICE,
+            minimum_trading_unit=UNIT,
+            current_position_value=position,
+            portfolio_value=portfolio,
+            max_single_stock_amount=amount_cap,
+            max_single_stock_ratio=ratio,
+        )
+        assert by_code(got)["0002"].shares == m2.max_affordable_shares
 
 
 def test_the_candidates_accepts_any_sequence_type() -> None:

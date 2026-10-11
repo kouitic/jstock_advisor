@@ -909,12 +909,19 @@ def test_the_module_does_not_import_the_optimizer_or_anything_that_computes() ->
     assert "compute_buy_affordability" not in source
 
 
-def test_the_module_is_imported_from_nowhere_in_src() -> None:
+# この module を import してよい src の module の明示リスト(いずれも未配線の dormant)
+_ALLOWED_IMPORTERS = {
+    "domain/signals/portfolio_allocation.py",  # #603 PR-C(optimize_allocation)
+}
+
+
+def test_the_module_is_imported_from_nowhere_else_in_src() -> None:
     src = _REPO / "src" / "jstock_advisor"
     for path in src.rglob("*.py"):
         if path == _MODULE_PATH:
             continue
-        assert "portfolio_allocation_types" not in path.read_text(encoding="utf-8"), str(path)
+        if "portfolio_allocation_types" in path.read_text(encoding="utf-8"):
+            assert path.relative_to(src).as_posix() in _ALLOWED_IMPORTERS, str(path)
 
 
 def test_every_combination_of_decision_and_reason_is_either_consistent_or_rejected() -> None:
