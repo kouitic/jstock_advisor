@@ -1,8 +1,8 @@
-"""Issue #926: incident_notifier_handler.py の自動停止の LINE 通知(1 回だけ)と、LINE 経路の不変の契約テスト。
+"""Issue #926: incident_notifier_handler.py の自動停止の LINE 通知(1 回だけ)の契約テスト。
 
-★最重要要件(#508): GitHub 側の抑止・停止・通知の失敗は、LINE の incident 通知の送信・成否判定・claim の
-状態機械に一切影響しない。自動停止の通知は、停止にした実行が 1 回だけ送る(push の失敗は確保を解放して
-次の signal で再試行する)。手動の停止は通知しない。
+★最重要要件(#508): GitHub 側の抑止・停止・通知の失敗は、LINE の incident 通知の送信・
+成否判定・claim の状態機械に一切影響しない。自動停止の通知は、停止にした実行が 1 回だけ
+送る(push の失敗は確保を解放して次の signal で再試行する)。手動の停止は通知しない。
 """
 
 from __future__ import annotations
@@ -176,7 +176,8 @@ def github(monkeypatch: pytest.MonkeyPatch) -> Github:
     return fake
 
 
-# --- 自動停止の通知(1 回だけ)------------------------------------------------------------------------
+# --- 自動停止の通知(1 回だけ)
+# ------------------------------------------------------------------------
 
 
 def test_the_auto_stop_is_notified_once_by_the_run_that_stopped(
@@ -242,7 +243,8 @@ def test_the_stop_notification_text_is_the_fixed_plain_message(
     assert stop_texts == [guard.build_auto_stop_message()]
 
 
-# --- ★最重要要件: LINE の経路は抑止・停止・通知の失敗に影響されない -------------------------------------------
+# --- ★最重要要件: LINE の経路は抑止・停止・通知の失敗に影響されない
+# -------------------------------------------
 
 
 def test_a_failing_notification_claim_never_breaks_the_handler(

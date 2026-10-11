@@ -1,8 +1,11 @@
 """Issue #926: services/incident_github_issue_service.py の起票の抑止(層 1〜3)の契約テスト。
 
-DynamoDB は moto の実テーブル、GitHub API は urllib.request.urlopen のスタブ(実 API へは接続しない)。
-実測(#188 …6114701122): 既存 Issue が CLOSED のとき、同一 dedup window 内に signal を 3 回届けると新規 Issue が
-3 件立った。本テストはそれを『1 件』に抑え、上限・最小間隔・自動停止・手動停止・fail-closed を固定する。
+DynamoDB は moto の実テーブル、GitHub API は urllib.request.urlopen のスタブ(実 API
+へは接続しない)。
+実測(#188 …6114701122): 既存 Issue が CLOSED のとき、同一 dedup window 内に signal を 3
+回届けると新規 Issue が
+3 件立った。本テストはそれを『1 件』に抑え、上限・最小間隔・自動停止・手動停止・fail-closed
+を固定する。
 ★最重要要件: process_incident_issue は例外を伝播させない(LINE の経路を壊さない)。
 """
 
@@ -88,7 +91,8 @@ def decided(**over: int) -> IncidentIssueLimits:
 
 
 class FakeGithub:
-    """URL とメソッドで応答する GitHub のスタブ。作成した Issue は close_all() で閉じる(人が閉じる操作)。"""
+    """URL とメソッドで応答する GitHub のスタブ。
+    作成した Issue は close_all() で閉じる(人が閉じる操作)。"""
 
     def __init__(self, first_number: int = 100) -> None:
         self.next_number = first_number
@@ -269,7 +273,8 @@ def test_an_open_issue_still_gets_comments_not_new_issues(secret_arn, config, gi
     assert github.creations == 1 and github.comments == 1
 
 
-# --- 層 2: 起票の上限 ------------------------------------------------------------------------------
+# --- 層 2: 起票の上限
+# ------------------------------------------------------------------------------
 
 
 def test_the_per_fingerprint_limit_stops_the_third_issue_of_the_day(
@@ -343,7 +348,8 @@ def test_the_limits_are_boundary_exact(secret_arn, config, github) -> None:
     assert github.creations == 3  # limit ちょうどは作り、超えたら作らない
 
 
-# --- 層 3: kill switch ------------------------------------------------------------------------------
+# --- 層 3: kill switch
+# ------------------------------------------------------------------------------
 
 
 def _flood(
@@ -428,7 +434,8 @@ def test_an_unreadable_control_item_is_fail_closed(
     assert github.requests == []
 
 
-# --- 上限が未決定のとき -----------------------------------------------------------------------------
+# --- 上限が未決定のとき
+# -----------------------------------------------------------------------------
 
 
 def test_undecided_limits_create_no_issue_and_record_the_reason(secret_arn, config, github) -> None:
@@ -456,7 +463,8 @@ def test_the_default_limits_are_the_shipped_undecided_file(secret_arn, config, g
     assert state()["github_issue_last_denied_reason"] == "LIMITS_UNDECIDED"
 
 
-# --- 失敗時の返却・claim の解放 -----------------------------------------------------------------------
+# --- 失敗時の返却・claim の解放
+# -----------------------------------------------------------------------
 
 
 def test_a_github_failure_returns_both_budgets(secret_arn, config, github) -> None:
@@ -483,7 +491,8 @@ def test_a_suppressed_claim_is_released(secret_arn, config, github) -> None:
     assert "github_issue_claimed_at" not in st and "github_issue_claim_expires_at" not in st
 
 
-# --- 最重要要件・無効・既存の挙動 ----------------------------------------------------------------------
+# --- 最重要要件・無効・既存の挙動
+# ----------------------------------------------------------------------
 
 
 def test_disabled_config_touches_nothing(
@@ -515,7 +524,8 @@ def test_a_missing_row_is_never_created_by_a_suppression(secret_arn, config, git
     assert tracker.get_incident_state(_FP_B) is None
 
 
-# --- 不変条件(ランダムな到着列。独立した参照の数え方)------------------------------------------------------
+# --- 不変条件(ランダムな到着列。独立した参照の数え方)
+# ------------------------------------------------------
 
 
 def test_random_arrivals_never_exceed_the_limits(secret_arn, config, github) -> None:

@@ -1,6 +1,7 @@
 """Issue #926: incident の GitHub Issue 起票の上限値(専用 YAML と専用 loader)の契約テスト。
 
-出荷値は全項目 null = 未決定(USER が決める値)。未決定・読めない・不正な設定は、すべて『未決定』へ縮退する
+出荷値は全項目 null = 未決定(USER が決める値)。未決定・読めない・不正な設定は、すべて『未決定』
+へ縮退する
 (= 新規 Issue を作らない fail-closed)。loader は例外を送出しない(LINE の経路を落とさない)。
 S-13(config/models.py・loader の AppConfig)へ field を足さない。
 """

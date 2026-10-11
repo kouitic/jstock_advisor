@@ -125,6 +125,7 @@ REGISTRY: dict[str, str] = {
     "IncidentGithubIssueStatus.CREATED": UNGENERATED_BY_NAME,
     "IncidentGithubIssueStatus.CONFIGURATION_ERROR": UNGENERATED_BY_NAME,
     "IncidentGithubIssueStatus.ISSUE_CREATION_FAILED": UNGENERATED_BY_NAME,
+    "IncidentGithubIssueStatus.SUPPRESSED": UNGENERATED_BY_NAME,
     # JudgmentStrength(domain/entities/enums.py)
     "JudgmentStrength.INFO": UNGENERATED_BY_NAME,
     "JudgmentStrength.WATCH": UNGENERATED_BY_NAME,

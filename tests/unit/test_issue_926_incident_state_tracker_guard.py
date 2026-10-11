@@ -1,9 +1,9 @@
-"""Issue #926: infrastructure/aws/incident_state_tracker.py の起票の抑止(予算・停止・通知の確保)のテスト。
+"""Issue #926: incident_state_tracker.py の起票の抑止(予算・停止・通知の確保)のテスト。
 
-実際の DynamoDB(moto)で、条件つき UpdateItem の原子性・窓の切替・返却・停止の 1 回性・通知の確保を固定する。
-LINE の claim / dedup(#502 / #503)・GitHub 起票の claim(#508)とは独立であること、制御用の項目
-(`__control__:github_issue`)が fingerprint の行と混ざらないこと、IncidentStateTable に TTL がないこと
-(制御項目が勝手に削除されない)も固定する。
+実際の DynamoDB(moto)で、条件つき UpdateItem の原子性・窓の切替・返却・停止の 1 回性・
+通知の確保を固定する。LINE の claim / dedup(#502 / #503)・GitHub 起票の claim(#508)とは
+独立であること、制御用の項目(`__control__:github_issue`)が fingerprint の行と混ざらない
+こと、IncidentStateTable に TTL がないこと(制御項目が勝手に削除されない)も固定する。
 """
 
 from __future__ import annotations
@@ -152,7 +152,8 @@ def test_the_global_refund_gives_one_back_and_stays_non_negative() -> None:
     assert tracker.try_consume_global_budget(_W1, 1) is True
 
 
-# --- 全体の上限を超えた試行の数(自動停止の入力)-----------------------------------------------------
+# --- 全体の上限を超えた試行の数(自動停止の入力)
+# -----------------------------------------------------
 
 
 def test_the_global_denied_count_counts_up_and_resets_per_window() -> None:
@@ -168,7 +169,8 @@ def test_the_denied_count_is_independent_of_the_created_count() -> None:
     assert int(control["global_created_count"]) == 1 and int(control["global_denied_count"]) == 1
 
 
-# --- kill switch -----------------------------------------------------------------------------------
+# --- kill switch
+# -----------------------------------------------------------------------------------
 
 
 def test_there_is_no_control_item_by_default() -> None:
@@ -224,7 +226,8 @@ def test_a_released_switch_can_trip_again() -> None:
     assert tracker.try_trip_kill_switch(_NOW, guard.KILL_SWITCH_REASON_AUTO) is True
 
 
-# --- 通知の確保(1 回だけ)---------------------------------------------------------------------------
+# --- 通知の確保(1 回だけ)
+# ---------------------------------------------------------------------------
 
 
 def test_the_notification_is_claimed_once_after_a_trip() -> None:
@@ -263,7 +266,7 @@ def test_a_new_trip_clears_the_old_notification_mark() -> None:
     assert control is not None and "kill_switch_notified_at" not in control
 
 
-# --- 抑止の記録 ----------------------------------------------------------------------------------------
+# --- 抑止の記録 ----------------------------------------
 
 
 def test_recording_a_suppression_counts_it_without_touching_the_claim_state() -> None:
@@ -315,7 +318,8 @@ def test_suppressed_is_a_new_status_value() -> None:
     }
 
 
-# --- 作成の記録(最小間隔・occurrence gate の入力)------------------------------------------------------
+# --- 作成の記録(最小間隔・occurrence gate の入力)
+# ------------------------------------------------------
 
 
 def test_creation_records_when_and_for_which_occurrence() -> None:
@@ -346,7 +350,8 @@ def test_creation_with_a_previous_number_still_records_it() -> None:
     )
 
 
-# --- 制御項目と他のコードの共存(HANAKO の追加確認)---------------------------------------------------
+# --- 制御項目と他のコードの共存(HANAKO の追加確認)
+# ---------------------------------------------------
 
 
 def test_the_control_item_does_not_disturb_the_line_claim_of_any_fingerprint() -> None:
@@ -389,4 +394,5 @@ def test_the_table_has_no_ttl_so_the_control_item_is_never_expired() -> None:
 
 def test_the_tracker_sets_no_ttl_attribute() -> None:
     text = Path(tracker.__file__).read_text(encoding="utf-8")
-    assert re.search(r"\bttl\b", text) is None
+    # docstring の説明(本 module は ttl を書かない)は残る。属性として書く式は無い
+    assert re.search(r"(:ttl\b|\bttl\s*=|\"ttl\")", text) is None

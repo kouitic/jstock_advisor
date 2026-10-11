@@ -225,7 +225,8 @@ def test_the_outcome_defaults_to_no_notification() -> None:
     assert guard.IssueGuardOutcome(auto_stop_notification_due=True).auto_stop_notification_due
 
 
-# --- 自動停止の LINE 文面 --------------------------------------------------------------------------
+# --- 自動停止の LINE 文面
+# --------------------------------------------------------------------------
 
 
 def test_the_auto_stop_message_is_plain_and_carries_no_identifier() -> None:
@@ -242,7 +243,8 @@ def test_the_auto_stop_message_is_deterministic() -> None:
     assert guard.build_auto_stop_message() == guard.build_auto_stop_message()
 
 
-# --- 純粋性(AST)-------------------------------------------------------------------------------------
+# --- 純粋性(AST)
+# -------------------------------------------------------------------------------------
 
 
 def test_the_module_is_pure() -> None:
