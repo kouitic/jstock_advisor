@@ -384,6 +384,9 @@ class AllocationResult:
             raise _fail("result", "an available result has no unavailable reason or missing item")
         if self.remaining_cash is None:
             raise _fail("result.remaining_cash", "an available result knows its remainder")
+        if any(a.reason_code is ReasonCode.POLICY_INCOMPLETE for a in self.allocations):
+            # 方針が不完全な日は UNAVAILABLE(順位だけの shadow)。完全な日の候補は別の理由を持つ
+            raise _fail("result.allocations", "an available result has no incomplete-policy reason")
         if (self.status is AllocationStatus.ALLOCATED_SOME) != bool(allocated):
             raise _fail("result.status", "must agree with the allocated candidates")
 

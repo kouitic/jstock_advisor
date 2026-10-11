@@ -948,3 +948,33 @@ def test_a_repeated_stock_is_rejected_even_when_the_total_is_consistent() -> Non
     twice = (allocated("0002", 200, 1), allocated("0002", 100, 2))
     with pytest.raises(pt.AllocationContractError):
         result(allocations=twice, total_allocated=D("702000"))
+
+
+@pytest.mark.parametrize(
+    "status", [pt.AllocationStatus.ALLOCATED_SOME, pt.AllocationStatus.NO_ACTION]
+)
+def test_an_available_result_cannot_hold_an_incomplete_policy_reason(
+    status: pt.AllocationStatus,
+) -> None:
+    # 方針が不完全な日は UNAVAILABLE(順位だけの shadow)。完全な日(ALLOCATED_SOME / NO_ACTION)の
+    # 候補に POLICY_INCOMPLETE の理由は残らない
+    shadow = not_allocated("0003", pt.ReasonCode.POLICY_INCOMPLETE, rank=2)
+    if status is pt.AllocationStatus.ALLOCATED_SOME:
+        items = (allocated("0002", 200, 1), shadow)
+        total, remaining = D("468000"), D("300000")
+    else:
+        items = (not_allocated("0002", pt.ReasonCode.POLICY_INCOMPLETE, rank=1), shadow)
+        total, remaining = D("0"), D("768000")
+    with pytest.raises(pt.AllocationContractError):
+        result(status=status, allocations=items, total_allocated=total, remaining_cash=remaining)
+
+
+def test_an_available_result_may_still_exclude_an_unavailable_raer() -> None:
+    # RAER_UNAVAILABLE は方針の完全性と無関係に残る(除外して理由を残す)
+    r = result(
+        allocations=(
+            allocated("0002", 200, 1),
+            not_allocated("0003", pt.ReasonCode.RAER_UNAVAILABLE),
+        )
+    )
+    assert r.allocations[1].reason_code is pt.ReasonCode.RAER_UNAVAILABLE
