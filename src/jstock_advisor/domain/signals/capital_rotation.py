@@ -176,7 +176,8 @@ def _enum[E: StrEnum](name: str, value: object, enum_type: type[E]) -> E:
 
 
 def _usable(raer: RaerResult) -> bool:
-    return raer.state is not RaerState.UNAVAILABLE and raer.value is not None
+    # AVAILABLE / PROVISIONAL は必ず有限の value を持つ(RaerResult の不変条件)
+    return raer.state is not RaerState.UNAVAILABLE
 
 
 # --- 入力: 入替元・方針 -----------------------------------------------------------------------
@@ -256,7 +257,7 @@ class SellLeg:
     def __post_init__(self) -> None:
         _text("sell_leg.stock_code", self.stock_code)
         _int("sell_leg.sell_shares", self.sell_shares, minimum=1)
-        estimated = _positive("sell_leg.estimated_proceeds", self.estimated_proceeds)
+        estimated = _decimal("sell_leg.estimated_proceeds", self.estimated_proceeds)
         counted = _positive("sell_leg.counted_proceeds", self.counted_proceeds)
         if counted >= estimated:
             # 売却見込額の全額を確定資金として扱わない
@@ -465,13 +466,13 @@ def _unique_codes(name: str, codes: Sequence[str]) -> None:
 
 
 def _in_force(ratio: Decimal | None) -> bool:
-    """比率の上限が効いている(決定済みで 1 未満)。None は未決定で、効いているとは数えない."""
-    return ratio is not None and ratio < 1
+    """比率の上限が効いている(1 未満)。配分の方針が完全〔比率は決定済み〕と確かめた後に呼ぶ."""
+    return cast(Decimal, ratio) < 1
 
 
 def _is_high_risk(raer: RaerResult, constraints: AllocationConstraints) -> bool:
-    """high-risk と数える銘柄か。観測がない(risk_flags_available = False)なら False(緩和しない)."""
-    return raer.risk_flags_available and bool(raer.risk_flags & constraints.high_risk_flags)
+    """high-risk と数える銘柄か。観測がない銘柄は risk_flags が空(RaerResult の不変条件)で False."""
+    return bool(raer.risk_flags & constraints.high_risk_flags)
 
 
 def _unavailable(
@@ -521,8 +522,7 @@ def evaluate_capital_rotation(
 
     入力の矛盾は RotationContractError(値を含めない)。それ以外は結果の status で表す。
     """
-    if not isinstance(owner, str) or not owner.strip():
-        raise _fail("owner", "must be a non-empty str")
+    _text("owner", owner)
     if not isinstance(allocation, AllocationResult):
         raise _fail("allocation", "has the wrong type")
     cands = _sequence_of("candidates", candidates, AllocationCandidate)
@@ -679,10 +679,7 @@ def _evaluate(
     key = cast(str, allocation_policy.comparison_key)
     cash = cast(Decimal, allocation.remaining_cash)
     targets = [
-        a
-        for a in allocation.allocations
-        if a.decision is CandidateDecision.NOT_ALLOCATED
-        and a.reason_code is ReasonCode.INSUFFICIENT_CASH_REMAINING
+        a for a in allocation.allocations if a.reason_code is ReasonCode.INSUFFICIENT_CASH_REMAINING
     ]
     candidate_codes = set(candidates)
     screens = {

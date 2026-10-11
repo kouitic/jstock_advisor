@@ -652,6 +652,130 @@ def test_the_tier_ratio_applies_to_the_purchase_after_the_sale() -> None:
     assert p.buy_leg.price_tier_used is pt.PriceTier.ENTRY
 
 
+def test_the_high_risk_exposure_of_the_source_is_released_by_the_sale() -> None:
+    # high-risk の上限 0.2・総額 4,000,000・high-risk の保有 600,000(うち入替元が 500,000)。
+    # 売却前: b <= (800,000 - 600,000) / 0.8 = 250,000(2 単元 = 需要 200 株)。
+    # k = 3 の売却で保有 300,000・総額 3,700,000 -> 上限 550,000、算入 240,000 -> 2 単元
+    risky = raer(value="3", risk_flags=HIGH_RISK)
+    r = run(
+        available_cash=D("0"),
+        portfolio_value=D("4000000"),
+        constraints=cons(max_high_risk_ratio=D("0.2")),
+        candidates=[cand(raer=raer(value="9", risk_flags=HIGH_RISK))],
+        high_risk_exposure=D("600000"),
+        sector_exposure={},
+        sources=[src(shares_held=500, current_price=D("1000"), raer=risky)],
+    )
+    (p,) = r.proposals
+    assert (p.sell_leg.sell_shares, p.buy_leg.shares) == (300, 200)
+
+
+def test_a_source_that_is_not_high_risk_does_not_release_the_high_risk_exposure() -> None:
+    # 入替元の risk_flags が high_risk_flags に含まれない語なら、売却でも保有は減らない。
+    # k = 2: 総額 3,800,000 -> 上限 2 単元・算入 160,000 -> 1 単元。k = 3 以降は上限が 1 単元
+    other = frozenset({RiskFlag.MAJOR_CUSTOMER_DEPENDENCY.value})
+    r = run(
+        available_cash=D("0"),
+        portfolio_value=D("4000000"),
+        constraints=cons(max_high_risk_ratio=D("0.2")),
+        candidates=[cand(raer=raer(value="9", risk_flags=HIGH_RISK))],
+        high_risk_exposure=D("600000"),
+        sector_exposure={},
+        sources=[
+            src(shares_held=500, current_price=D("1000"), raer=raer(value="3", risk_flags=other))
+        ],
+    )
+    (p,) = r.proposals
+    assert (p.sell_leg.sell_shares, p.buy_leg.shares) == (200, 100)
+
+
+def test_the_purchase_never_exceeds_the_demand_even_when_the_sale_loosens_the_caps() -> None:
+    # 業種の上限 0.2・総額 4,500,000・電気機器の保有 700,000(うち入替元が 600,000)。需要は 2 単元。
+    # 入替元は 2,000 円 x 300 株: k = 2 で算入 320,000 -> 3 単元だが、需要の 2 単元までにする。
+    # 需要を超えて k = 3 まで進むと、4 単元を買ってしまう
+    r = run(
+        available_cash=D("0"),
+        portfolio_value=D("4500000"),
+        constraints=cons(max_sector_ratio=D("0.2")),
+        sector_exposure={"電気機器": D("700000")},
+        sources=[
+            src(shares_held=300, current_price=D("2000"), sector="電気機器", raer=raer(value="3"))
+        ],
+    )
+    (p,) = r.proposals
+    assert (p.sell_leg.sell_shares, p.buy_leg.shares) == (200, 200)
+
+
+@pytest.mark.parametrize(
+    "which", ["max_single_stock_ratio", "max_sector_ratio", "max_high_risk_ratio"]
+)
+@pytest.mark.parametrize("portfolio", [None, D("0")])
+def test_each_ratio_cap_alone_needs_a_usable_portfolio_value_for_the_rotation(
+    which: str, portfolio: Decimal | None
+) -> None:
+    caps = cons(**{which: D("0.5")})
+    allocation = make_allocation(
+        portfolio_value=D("2000000"),
+        constraints=caps,
+        sector_exposure={},
+        high_risk_exposure=D("0"),
+    )
+    assert target_reasons(
+        run(
+            allocation=allocation,
+            constraints=caps,
+            portfolio_value=D("2000000"),
+            sector_exposure={},
+            high_risk_exposure=D("0"),
+        )
+    ) == {"0002": T.PROPOSED}
+    r = run(
+        allocation=allocation,
+        constraints=caps,
+        portfolio_value=portfolio,
+        sector_exposure={},
+        high_risk_exposure=D("0"),
+    )
+    assert r.unavailable_reason is cr.RotationUnavailableReason.PORTFOLIO_VALUE_UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    ("which", "missing"),
+    [("max_sector_ratio", "sector_exposure"), ("max_high_risk_ratio", "high_risk_exposure")],
+)
+def test_the_sector_and_high_risk_caps_need_their_own_exposure_for_the_rotation(
+    which: str, missing: str
+) -> None:
+    caps = cons(**{which: D("0.5")})
+    allocation = make_allocation(
+        portfolio_value=D("2000000"),
+        constraints=caps,
+        sector_exposure={},
+        high_risk_exposure=D("0"),
+    )
+    given: dict[str, object] = {"sector_exposure": {}, "high_risk_exposure": D("0")}
+    given[missing] = None
+    r = run(allocation=allocation, constraints=caps, portfolio_value=D("2000000"), **given)
+    assert r.unavailable_reason is cr.RotationUnavailableReason.PORTFOLIO_VALUE_UNAVAILABLE
+
+
+def test_the_amounts_are_exact_beyond_the_default_decimal_precision() -> None:
+    price = D("500.00000000000000000000000000001")  # 35 桁。既定の 28 桁で丸めると合わなくなる
+    r = run(sources=[src(current_price=price)])
+    (p,) = r.proposals
+    assert Fraction(p.sell_leg.estimated_proceeds) == Fraction(price) * p.sell_leg.sell_shares
+    assert Fraction(p.sell_leg.counted_proceeds) == Fraction(
+        p.sell_leg.estimated_proceeds
+    ) * Fraction(D("0.8"))
+
+
+def test_a_string_is_not_a_sequence_of_candidates_or_sources() -> None:
+    with pytest.raises(cr.RotationContractError, match="must be a sequence"):
+        run(**{"allocation": make_allocation(), "candidates": "0002"})
+    with pytest.raises(cr.RotationContractError, match="must be a sequence"):
+        run(**{"allocation": make_allocation(), "sources": "5001"})
+
+
 # --- 9 型の検証(入力)----------------------------------------------------------------------------
 
 
@@ -843,73 +967,140 @@ def _with(result: cr.RotationResult, **over: object) -> cr.RotationResult:
     return dataclasses.replace(result, **over)  # type: ignore[arg-type]
 
 
-def _inconsistent_results() -> list[tuple[str, Callable[[cr.RotationResult], cr.RotationResult]]]:
+def _inconsistent_results() -> list[
+    tuple[str, Callable[[cr.RotationResult], cr.RotationResult], str]
+]:
+    """(名前, 壊し方, 拒否のメッセージに含まれる部分)。別の規則に隠れた拒否を区別する。"""
     shadow = run(policy=empty_rpol())
     unavailable = run(available_cash=None)
+    has_proposal = "result.status: must agree"
     return [
-        ("version", lambda r: _with(r, contract_version="C604-v1")),
-        ("cost model", lambda r: _with(r, cost_model="ESTIMATED")),
-        ("owner", lambda r: _with(r, owner="")),
-        ("status wrong type", lambda r: _with(r, status="ROTATION_PROPOSED")),
-        ("proposed without proposals", lambda r: _with(r, proposals=())),
+        ("version", lambda r: _with(r, contract_version="C604-v1"), "result.contract_version"),
+        ("cost model", lambda r: _with(r, cost_model="ESTIMATED"), "result.cost_model"),
+        ("owner", lambda r: _with(r, owner=""), "result.owner"),
+        ("status wrong type", lambda r: _with(r, status="ROTATION_PROPOSED"), "result.status"),
+        ("proposed without proposals", lambda r: _with(r, proposals=()), has_proposal),
         (
             "no rotation with proposals",
             lambda r: _with(r, status=cr.RotationStatus.NO_ROTATION),
+            has_proposal,
         ),
         (
-            "unavailable with a reason on an available result",
+            "reason on an available result",
             lambda r: _with(
                 r, unavailable_reason=cr.RotationUnavailableReason.ALLOCATION_UNAVAILABLE
             ),
+            "result.unavailable_reason: an available",
         ),
-        ("available without starting cash", lambda r: _with(r, starting_cash=None)),
-        ("available without ending cash", lambda r: _with(r, ending_cash=None)),
-        ("cash chain broken", lambda r: _with(r, ending_cash=D("0"))),
-        ("negative starting cash", lambda r: _with(r, starting_cash=D("-1"))),
         (
-            "target reason says proposed without a proposal",
+            "available without starting cash",
+            lambda r: _with(r, starting_cash=None),
+            "result: an available result knows its cash",
+        ),
+        (
+            "available without ending cash",
+            lambda r: _with(r, ending_cash=None),
+            "result: an available result knows its cash",
+        ),
+        (
+            "cash chain broken",
+            lambda r: _with(r, ending_cash=D("0")),
+            "result.ending_cash: must follow",
+        ),
+        (
+            "negative starting cash",
+            lambda r: _with(r, starting_cash=D("-1")),
+            "result.starting_cash",
+        ),
+        (
+            "negative cash on a shadow",
+            lambda r: _with(shadow, starting_cash=D("-1"), ending_cash=D("-1")),
+            "result.starting_cash",
+        ),
+        (
+            "target marked proposed without a proposal",
             lambda r: _with(r, targets=(*r.targets, cr.TargetEvaluation("0009", T.PROPOSED, None))),
+            "result.targets: marks exactly",
         ),
         (
             "proposal without a proposed target",
             lambda r: _with(r, targets=(cr.TargetEvaluation("0002", T.NO_ELIGIBLE_SOURCE, None),)),
+            "result.targets: marks exactly",
         ),
-        ("duplicate target", lambda r: _with(r, targets=(*r.targets, *r.targets))),
-        ("targets not a tuple", lambda r: _with(r, targets=list(r.targets))),
-        ("proposals not a tuple", lambda r: _with(r, proposals=list(r.proposals))),
-        ("negative pairs", lambda r: _with(r, evaluated_pairs=-1)),
+        (
+            "duplicate target",
+            lambda r: _with(r, targets=(*r.targets, *r.targets)),
+            "result.targets: must not repeat",
+        ),
+        (
+            "targets not a tuple",
+            lambda r: _with(r, targets=list(r.targets)),
+            "result.targets: must be a tuple",
+        ),
+        (
+            "proposals not a tuple",
+            lambda r: _with(r, proposals=list(r.proposals)),
+            "result.proposals: must be a tuple",
+        ),
+        (
+            "negative pairs",
+            lambda r: _with(r, evaluated_pairs=-1),
+            "result.evaluated_pairs: is below its minimum",
+        ),
         (
             "pairs fewer than proposals",
             lambda r: _with(r, evaluated_pairs=0, best_improvement=None),
+            "result.evaluated_pairs: is below the number",
         ),
-        ("best improvement without pairs", lambda r: _with(r, evaluated_pairs=0)),
-        ("pairs without best improvement", lambda r: _with(r, best_improvement=None)),
-        ("proposal above the best improvement", lambda r: _with(r, best_improvement=D("1"))),
+        (
+            "best improvement without pairs",
+            lambda r: _with(r, evaluated_pairs=0),
+            "result.best_improvement: is held exactly",
+        ),
+        (
+            "pairs without best improvement",
+            lambda r: _with(r, best_improvement=None),
+            "result.best_improvement: is held exactly",
+        ),
+        (
+            "proposal above the best improvement",
+            lambda r: _with(r, best_improvement=D("1")),
+            "result.best_improvement: is below a proposal",
+        ),
         (
             "policy missing on an available result",
             lambda r: _with(r, policy_missing=("min_confidence",)),
+            "result.policy_missing: is held exactly",
         ),
-        ("policy name outside the vocabulary", lambda r: _with(r, policy_missing=("x",))),
+        (
+            "policy name outside the vocabulary",
+            lambda r: _with(shadow, policy_missing=("x",)),
+            "result.policy_missing: has a name outside",
+        ),
         (
             "shadow with a proposal",
             lambda r: _with(shadow, proposals=r.proposals),
+            has_proposal,
         ),
         (
             "shadow without the missing items",
             lambda r: _with(shadow, policy_missing=()),
+            "result.policy_missing: is held exactly",
         ),
         (
             "shadow with a decided target reason",
             lambda r: _with(
                 shadow, targets=(cr.TargetEvaluation("0002", T.NO_ELIGIBLE_SOURCE, None),)
             ),
+            "result.targets: an incomplete policy holds only",
         ),
         (
             "shadow changes the cash",
             lambda r: _with(shadow, ending_cash=D("1")),
+            "result.ending_cash: must follow",
         ),
         (
-            "policy-incomplete target reason on a complete policy",
+            "incomplete-policy reason on a complete policy",
             lambda r: _with(
                 r,
                 status=cr.RotationStatus.NO_ROTATION,
@@ -917,36 +1108,84 @@ def _inconsistent_results() -> list[tuple[str, Callable[[cr.RotationResult], cr.
                 ending_cash=r.starting_cash,
                 targets=(cr.TargetEvaluation("0002", T.POLICY_INCOMPLETE, None),),
             ),
+            "result.targets: a complete policy has no",
         ),
-        ("unavailable without a reason", lambda r: _with(unavailable, unavailable_reason=None)),
+        (
+            "projected cash differs",
+            lambda r: _with(
+                r,
+                proposals=(
+                    dataclasses.replace(r.proposals[0], projected_remaining_cash=D("11000")),
+                ),
+            ),
+            "result.proposals: has a remaining cash",
+        ),
+        (
+            "id differs from the legs",
+            lambda r: _with(
+                r,
+                proposals=(
+                    dataclasses.replace(r.proposals[0], proposal_id="rotation:owner-a:5001:9999"),
+                ),
+            ),
+            "result.proposals: has an id that differs",
+        ),
+        (
+            "unavailable without a reason",
+            lambda r: _with(unavailable, unavailable_reason=None),
+            "result.unavailable_reason: an unavailable result needs",
+        ),
         (
             "unavailable with a proposal",
             lambda r: _with(unavailable, proposals=r.proposals),
+            "result: an unavailable result holds no proposal",
         ),
         (
             "unavailable with targets",
             lambda r: _with(unavailable, targets=r.targets),
+            "result: an unavailable result holds no proposal",
         ),
-        ("unavailable with cash", lambda r: _with(unavailable, starting_cash=D("1"))),
-        ("unavailable with pairs", lambda r: _with(unavailable, evaluated_pairs=1)),
+        (
+            "unavailable with starting cash",
+            lambda r: _with(unavailable, starting_cash=D("1")),
+            "result: an unavailable result knows no cash",
+        ),
+        (
+            "unavailable with ending cash",
+            lambda r: _with(unavailable, ending_cash=D("1")),
+            "result: an unavailable result knows no cash",
+        ),
+        (
+            "unavailable with pairs",
+            lambda r: _with(unavailable, evaluated_pairs=1, best_improvement=D("1")),
+            "result: an unavailable result evaluated nothing",
+        ),
+        (
+            "unavailable with a best improvement",
+            lambda r: _with(unavailable, best_improvement=D("1")),
+            "result: an unavailable result evaluated nothing",
+        ),
     ]
 
 
 @pytest.mark.parametrize(
-    "build", [b[1] for b in _inconsistent_results()], ids=[b[0] for b in _inconsistent_results()]
+    ("build", "fragment"),
+    [(b[1], b[2]) for b in _inconsistent_results()],
+    ids=[b[0] for b in _inconsistent_results()],
 )
 def test_an_inconsistent_result_is_rejected(
-    build: Callable[[cr.RotationResult], cr.RotationResult],
+    build: Callable[[cr.RotationResult], cr.RotationResult], fragment: str
 ) -> None:
-    with pytest.raises(cr.RotationContractError):
+    with pytest.raises(cr.RotationContractError) as info:
         build(_good())
+    assert fragment in str(info.value)
 
 
 def test_a_proposal_whose_cash_chain_overspends_is_rejected() -> None:
     r = run()
     (p,) = r.proposals
     bigger = dataclasses.replace(p, buy_leg=dataclasses.replace(p.buy_leg, amount=D("500000")))
-    with pytest.raises(cr.RotationContractError):
+    with pytest.raises(cr.RotationContractError, match="remaining cash"):
         dataclasses.replace(r, proposals=(bigger,))
 
 
@@ -958,14 +1197,14 @@ def test_two_proposals_cannot_sell_or_buy_the_same_stock() -> None:
         proposal_id="rotation:owner-a:5001:0003",
         sell_leg=dataclasses.replace(second.sell_leg, stock_code="5001"),
     )
-    with pytest.raises(cr.RotationContractError):
+    with pytest.raises(cr.RotationContractError, match="once on each side"):
         dataclasses.replace(r, proposals=(first, same_sell))
     same_buy = dataclasses.replace(
         second,
         proposal_id="rotation:owner-a:5002:0002",
         buy_leg=dataclasses.replace(second.buy_leg, stock_code="0002"),
     )
-    with pytest.raises(cr.RotationContractError):
+    with pytest.raises(cr.RotationContractError, match="once on each side"):
         dataclasses.replace(r, proposals=(first, same_buy))
 
 
@@ -977,7 +1216,7 @@ def test_a_stock_cannot_be_sold_and_bought_in_the_same_result() -> None:
         proposal_id="rotation:owner-a:0002:0003",
         sell_leg=dataclasses.replace(second.sell_leg, stock_code="0002"),
     )
-    with pytest.raises(cr.RotationContractError):
+    with pytest.raises(cr.RotationContractError, match="sell and buy the same stock"):
         dataclasses.replace(r, proposals=(first, crossing))
 
 
@@ -1410,6 +1649,69 @@ def random_scenario(rng: random.Random) -> Scenario:
     )
 
 
+def random_binding_scenario(rng: random.Random) -> Scenario:
+    """比率の上限が必ず効き、候補と入替元が業種・high-risk を共有する(売却後の再判定が効く入力)."""
+    sectors = ["電気機器", "食料品"]
+    flag_sets = [frozenset(), HIGH_RISK]
+    candidates = []
+    for i in range(rng.randint(2, 4)):
+        position = rng.choice([0, 0, 100_000])
+        candidates.append(
+            cand(
+                f"{1000 + i}",
+                kind=pt.CandidateKind.ADDITIONAL_BUY if position else pt.CandidateKind.NEW_BUY,
+                current_price=D(rng.choice([700, 1000, 2500])),
+                raer=raer(value=str(rng.choice([8, 9, 10])), risk_flags=rng.choice(flag_sets)),
+                current_position_value=D(position),
+                sector=rng.choice(sectors),
+            )
+        )
+    sources = [
+        src(
+            f"{5000 + j}",
+            shares_held=rng.choice([200, 500, 1000]),
+            current_price=D(rng.choice([500, 1000, 2000])),
+            raer=raer(value=str(rng.choice([2, 3, 4, 5])), risk_flags=rng.choice(flag_sets)),
+            sector=rng.choice(sectors),
+        )
+        for j in range(rng.randint(2, 4))
+    ]
+
+    def value(item: object) -> Decimal:
+        if isinstance(item, cr.RotationSource):
+            return item.current_price * item.shares_held
+        assert isinstance(item, pt.AllocationCandidate)
+        return item.current_position_value
+
+    holdings = [*sources, *candidates]
+    constraints = cons(
+        max_single_stock_amount=D(rng.choice([300_000, 600_000, 3_000_000])),
+        max_single_stock_ratio=rng.choice([D("0.1"), D("0.3"), D("1")]),
+        max_sector_ratio=rng.choice([D("0.2"), D("0.3"), D("0.5")]),
+        max_high_risk_ratio=rng.choice([D("0.2"), D("0.3"), D("0.5")]),
+    )
+    return Scenario(
+        allocation_cash=D(rng.choice([0, 40_000, 90_000])),
+        portfolio=sum((value(h) for h in holdings), D(0))
+        + D(rng.choice([300_000, 1_000_000, 3_000_000])),
+        candidates=tuple(candidates),
+        sources=tuple(sources),
+        constraints=constraints,
+        allocation_policy=apol(),
+        policy=rpol(
+            min_raer_improvement=D(rng.choice(["2", "3"])),
+            proceeds_inclusion_ratio=D(rng.choice(["0.5", "0.8"])),
+        ),
+        sector_exposure={
+            name: sum((value(h) for h in holdings if h.sector == name), D(0))
+            + D(rng.choice([0, 100_000]))
+            for name in sectors
+        },
+        high_risk_exposure=sum((value(h) for h in holdings if h.raer.risk_flags & HIGH_RISK), D(0))
+        + D(rng.choice([0, 100_000])),
+    )
+
+
 def _legs(result: cr.RotationResult) -> list[tuple[str, int, str, int]]:
     return [
         (p.sell_leg.stock_code, p.sell_leg.sell_shares, p.buy_leg.stock_code, p.buy_leg.shares)
@@ -1429,6 +1731,19 @@ def test_the_evaluation_agrees_with_the_one_unit_at_a_time_reference() -> None:
         assert _legs(got) == reference(s), (s, got)
         proposed += bool(got.proposals)
     assert proposed > 150  # 提案が出た入力が十分な数ある(空振りしていない)
+
+
+def test_the_evaluation_agrees_with_the_reference_when_the_caps_bind() -> None:
+    rng = random.Random(609)
+    proposed = multiple = 0
+    for _ in range(500):
+        s = random_binding_scenario(rng)
+        got = evaluate(s)
+        assert _legs(got) == reference(s), (s, got)
+        check_properties(s, got)
+        proposed += bool(got.proposals)
+        multiple += len(got.proposals) >= 2
+    assert proposed > 100 and multiple > 20  # 上限が効く提案・複数の提案が十分にある
 
 
 def test_the_random_scenarios_never_make_the_types_reject_the_result() -> None:
