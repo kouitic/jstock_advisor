@@ -163,7 +163,7 @@ def allocated(
         "stock_code": code,
         "decision": pt.CandidateDecision.ALLOCATED,
         "shares": shares,
-        "amount": D("2340") * shares,
+        "amount": D("2340") * shares if isinstance(shares, int) else D("1"),
         "price_tier_used": pt.PriceTier.STANDARD,
         "reason_code": pt.ReasonCode.ALLOCATED,
         "rank": rank,
@@ -508,7 +508,7 @@ _BAD_ALLOCATIONS: list[tuple[str, dict[str, object]]] = [
     ("allocated amount negative", {"amount": D("-424242.5")}),
     ("allocated above its cap-limited shares", {"cap_limited_shares": 100}),
     ("shares bool", {"shares": True}),
-    ("shares float", {"shares": 200.0}),
+    ("shares float", {"shares": 200.0, "amount": D("468000")}),
     ("shares negative", {"shares": -200}),
     ("amount float", {"amount": 468000.5}),
     ("rank zero", {"rank": 0}),
@@ -819,7 +819,7 @@ def _bad_constructions() -> list[object]:
         lambda: complete_policy(min_raer_to_allocate=424242),
         lambda: complete_policy(comparison_key=424242),
         lambda: complete_policy(tier_quantity_caps={t: D("1.5551") for t in pt.PriceTier}),
-        lambda: allocated(shares=424242.5),
+        lambda: allocated(shares=424242.5, amount=D("1")),
         lambda: allocated(amount=D("-" + _DISTINCT)),
         lambda: result(owner=424242),
         lambda: result(total_allocated=D("424242")),
@@ -913,7 +913,7 @@ def test_the_module_is_imported_from_nowhere_in_src() -> None:
 
 
 def test_every_combination_of_decision_and_reason_is_either_consistent_or_rejected() -> None:
-    # 全探索: decision × reason × shares で、受け入れた組合せは I-3(ALLOCATED <=> shares > 0)を満たす
+    # 全探索: decision × reason × shares で、受け入れた組合せは I-3 を満たす
     accepted = 0
     for decision, reason, shares in itertools.product(
         pt.CandidateDecision, pt.ReasonCode, (0, 100)
@@ -936,3 +936,15 @@ def test_every_combination_of_decision_and_reason_is_either_consistent_or_reject
         allocated_flag = item.decision is pt.CandidateDecision.ALLOCATED
         assert allocated_flag == (item.shares > 0) == (item.reason_code is pt.ReasonCode.ALLOCATED)
     assert accepted > 0
+
+
+def test_a_negative_position_is_rejected_for_an_additional_buy_too() -> None:
+    # 新規買いは『保有 0』の規則でも弾かれるため、負の評価額そのものの拒否は追加買いで固定する
+    with pytest.raises(pt.AllocationContractError):
+        candidate(kind=pt.CandidateKind.ADDITIONAL_BUY, current_position_value=D("-1"))
+
+
+def test_a_repeated_stock_is_rejected_even_when_the_total_is_consistent() -> None:
+    twice = (allocated("0002", 200, 1), allocated("0002", 100, 2))
+    with pytest.raises(pt.AllocationContractError):
+        result(allocations=twice, total_allocated=D("702000"))
