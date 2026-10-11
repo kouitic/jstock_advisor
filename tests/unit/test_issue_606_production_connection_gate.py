@@ -1,0 +1,833 @@
+"""#128 の各機能の『Production 接続 gate』を、コード上で保証する契約テスト(Issue #606)。
+
+## 位置づけ
+  Expected Return(#601)・RAER(#602)・Portfolio Allocation(#603)・Capital Rotation(#604)・
+  利用者向けの出力(#605)は、次を経ずに Production の BUY / SELL / 保有判断・通知へ接続しない
+  (USER 決定: #122 issuecomment-6100082651 / 6054586019):
+
+      shadow -> replay / backtest -> human review -> USER の明示的な承認
+
+  運用の gate は docs/operations_manual.md の新節(§37)が定める(既存の Human Gate の再利用。
+  新しい gate 機構・有効化経路を作らない)。本テストは、その gate を**迂回する経路がコード上に
+  無いこと**を、PR のたびに全走査で確認する。許可リストの変更は『接続を許す』変更であり、
+  USER の承認の記録(Issue 番号)を要する(`_UNCONNECTED_PREFIXES` の各行に根拠の Issue を書く)。
+
+## 固定するもの
+  (0) 先行(characterization): 既存の段階的 Human Gate の記述・AllocationShadowMode・出荷 config・
+      RuntimeConfigMode の参照元・dormant module の到達性は、本 PR で変更しない
+"""
+
+from __future__ import annotations
+
+import ast
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
+import yaml
+
+from jstock_advisor.domain.signals.allocation_shadow_config import (
+    AllocationShadowMode,
+    load_allocation_shadow_config,
+)
+
+_REPO = Path(__file__).resolve().parents[2]
+_PACKAGE = _REPO / "src" / "jstock_advisor"
+_OPERATIONS_MANUAL = _REPO / "docs" / "operations_manual.md"
+_SHIPPED_CONFIG_DIR = _REPO / "config"
+
+
+def _manual() -> str:
+    return _OPERATIONS_MANUAL.read_text(encoding="utf-8")
+
+
+# --- import 連鎖の推移閉包(全走査。列挙しない) ---
+
+
+def _module_files() -> dict[str, Path]:
+    modules: dict[str, Path] = {}
+    for path in _PACKAGE.rglob("*.py"):
+        relative = path.relative_to(_PACKAGE.parent).with_suffix("")
+        parts = list(relative.parts)
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        modules[".".join(parts)] = path
+    return modules
+
+
+def _direct_imports(module: str, path: Path, known: dict[str, Path]) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    base = module.split(".") if path.name == "__init__.py" else module.split(".")[:-1]
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            targets = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                anchor = base[: len(base) - (node.level - 1)]
+                prefix = ".".join(anchor + ([node.module] if node.module else []))
+            else:
+                prefix = node.module or ""
+            targets = [prefix] + [f"{prefix}.{a.name}" for a in node.names]
+        else:
+            continue
+        for target in targets:
+            parts = target.split(".")
+            for i in range(1, len(parts) + 1):
+                candidate = ".".join(parts[:i])
+                if candidate in known:
+                    found.add(candidate)
+    return found
+
+
+def _reachable(roots: set[str], known: dict[str, Path]) -> set[str]:
+    seen: set[str] = set()
+    stack = list(roots)
+    while stack:
+        module = stack.pop()
+        if module in seen:
+            continue
+        seen.add(module)
+        stack.extend(_direct_imports(module, known[module], known) - seen)
+    return seen
+
+
+def _production_reachable() -> tuple[set[str], dict[str, Path]]:
+    """Lambda handler と CLI の全 module を根として、import で到達する module の集合。"""
+    known = _module_files()
+    roots = {
+        m
+        for m in known
+        if m.startswith(("jstock_advisor.lambda_handlers.", "jstock_advisor.cli."))
+        or m in {"jstock_advisor.lambda_handlers", "jstock_advisor.cli"}
+    }
+    assert len(roots) > 20  # handler と CLI を根にできている(空振りでない)
+    return _reachable(roots, known), known
+
+
+# --- (0) 先行: 既存の仕組みは本 PR で変更しない ---
+
+
+@pytest.mark.parametrize(
+    "heading",
+    [
+        "### 5.1 GitHub Issue自動起票の設定",
+        "### 10.2 Shadow運用手順",
+        "### 10.3 Active切替手順",
+        "### 10.4 kill switch運用",
+        "### 28.2 切替の順序(各段が別の Human Gate。順序を入れ替えない)",
+    ],
+)
+def test_the_existing_staged_human_gates_that_the_new_section_reuses_exist(heading: str) -> None:
+    """新節は、これらの既存の Human Gate を再利用する。見出しが消えたら参照先が失われる。"""
+    assert any(line.startswith(heading) for line in _manual().splitlines()), heading
+
+
+def test_allocation_shadow_mode_has_no_active_member() -> None:
+    """購入側 Shadow(Q')の mode は OFF / SHADOW のみ。ACTIVE へ進める値そのものが無い。"""
+    assert [(m.name, m.value) for m in AllocationShadowMode] == [
+        ("OFF", "OFF"),
+        ("SHADOW", "SHADOW"),
+    ]
+
+
+def test_the_shipped_allocation_shadow_config_is_off() -> None:
+    """出荷 config は OFF。SHADOW にするのは USER の別承認 + IAM の反映の後(本テストを更新する)。"""
+    text = (_SHIPPED_CONFIG_DIR / "allocation_shadow.yaml").read_text(encoding="utf-8")
+    assert re.search(r'^mode:\s*"OFF"\s*$', text, flags=re.MULTILINE)
+    assert load_allocation_shadow_config(_SHIPPED_CONFIG_DIR).enabled is False
+
+
+def test_runtime_config_mode_is_referenced_only_by_the_approved_modules() -> None:
+    """mode(legacy / shadow / active)を扱う src は、承認された module だけ。
+
+    新しい参照元は新しい経路である。
+
+    - 保有判断の機構(既存。§10)
+    - `domain/valuation/expected_return_runtime.py`(#602 PR-1。USER 承認: #122 …6100082651)。
+      型と実行計画のみで、書込・永続化・CLI・handler を持たず、どこからも到達されない
+    """
+    referencing = sorted(
+        path.relative_to(_PACKAGE).as_posix()
+        for path in _PACKAGE.rglob("*.py")
+        if "RuntimeConfigMode" in path.read_text(encoding="utf-8")
+    )
+    assert referencing == [
+        "cli/holding_decision.py",
+        "domain/entities/enums.py",
+        "domain/entities/holding_decision.py",
+        "domain/signals/holding_decision_execution_plan.py",
+        "domain/valuation/expected_return_runtime.py",
+        "infrastructure/local_repository/holding_decision_runtime_config_repository.py",
+        "services/holding_decision_runtime_config_service.py",
+    ]
+
+
+# Production の判断へ未接続の module。接続は『shadow -> backtest -> human review -> USER 承認』
+# の後だけ。接続を許す変更は、この表からの『除外』であり、USER の承認の記録(Issue 番号)を要する。
+_UNCONNECTED_PREFIXES = {
+    "jstock_advisor.domain.exit_architecture": "#846 / #884(Exit 統合。USER REVIEW 前)",
+    "jstock_advisor.domain.valuation.expected_return": "#601 / #602(Expected Return と器)",
+    "jstock_advisor.domain.signals.buy_affordability": "#603 M2(購入可能株数の純粋関数)",
+    "jstock_advisor.domain.notification.today_actions_view": "#605-A(本日の投資アクションの表示)",
+}
+# 名前に含まれる語で、将来の module も捕らえる(RAER・配分の最適化・入替など)。
+_UNCONNECTED_NAME_TOKENS = (
+    "raer",
+    "expected_return",
+    "portfolio_allocation",
+    "allocation_optimizer",
+    "capital_rotation",
+    "today_actions",
+    "buy_affordability",
+    "exit_architecture",
+)
+
+
+def test_unconnected_modules_exist_so_the_check_is_not_vacuous() -> None:
+    known = _module_files()
+    for prefix in _UNCONNECTED_PREFIXES:
+        assert any(m == prefix or m.startswith(prefix + ".") for m in known), prefix
+
+
+def test_no_handler_or_cli_reaches_an_unconnected_module() -> None:
+    reached, known = _production_reachable()
+    assert "jstock_advisor.domain.entities.enums" in reached  # 推移閉包が実際に深く辿れている
+    offenders = sorted(
+        m
+        for m in reached
+        if any(m == p or m.startswith(p + ".") for p in _UNCONNECTED_PREFIXES)
+        or any(token in m for token in _UNCONNECTED_NAME_TOKENS)
+    )
+    assert offenders == []
+
+
+def test_the_only_allocation_modules_reachable_from_production_are_the_off_shadow_frame() -> None:
+    """配分に関係する module で Production から到達できるのは、出荷 OFF の Shadow の枠(Q')だけ。"""
+    reached, _ = _production_reachable()
+    assert sorted(m for m in reached if "allocation" in m) == [
+        "jstock_advisor.domain.signals.allocation_shadow_config",
+        "jstock_advisor.services.allocation_shadow_service",
+    ]
+
+
+# --- (1) 有効化の経路の集合は PR の前後で差分 0(全走査) ---
+#
+# 『#128 の機能を有効にできる経路』= 設定型・実行計画を作る/読む src、環境変数、template、config。
+# いずれも**列挙ではなく src・infra・config の全走査**で、許可リストと比べる。
+# 新しい参照元が現れたら、それは新しい経路である。本テストが落ちる = 承認の記録を添えて更新する。
+
+_HANDLE_NAMES = (
+    "ExpectedReturnRuntimeConfig",
+    "ExpectedReturnExecutionPlan",
+    "resolve_expected_return_execution_plan",
+    "allow_allocation_use",
+)
+# 上の名前を参照してよい src(定義するモジュール自身だけ。#602 PR-A。未 merge の間は存在しなくてよい)
+_HANDLE_ALLOWED_REFERENCERS = {"domain/valuation/expected_return_runtime.py"}
+_FEATURE_TOKEN = re.compile(
+    r"(allocation|expected_return|raer|capital_rotation|today_actions)", re.IGNORECASE
+)
+
+
+def test_nothing_but_the_defining_module_references_the_expected_return_runtime_handles() -> None:
+    """設定型・実行計画を『作る・読む・書く』src は、定義するモジュールの外に 1 つも無い。"""
+    referencing = {
+        path.relative_to(_PACKAGE).as_posix()
+        for path in _PACKAGE.rglob("*.py")
+        if any(name in path.read_text(encoding="utf-8") for name in _HANDLE_NAMES)
+    }
+    assert referencing <= _HANDLE_ALLOWED_REFERENCERS, sorted(referencing)
+
+
+@dataclass(frozen=True)
+class _EnvironmentScan:
+    names: frozenset[
+        str
+    ]  # src が読む環境変数名(literal・module 定数・dict・helper 経由を解決した結果)
+    resolved_indirectly: frozenset[str]  # うち、literal でなく解決して得た名前
+    unresolved: tuple[
+        str, ...
+    ]  # 名前を解決できなかった読取(file:line expr)。新しい書き方 = 人が確認する
+    unclassified_uses: tuple[
+        str, ...
+    ]  # get / pop / setdefault / [...] / in 以外の os.environ の使い方
+
+
+def _parse_package(package_root: Path) -> dict[str, tuple[Path, ast.Module]]:
+    parsed: dict[str, tuple[Path, ast.Module]] = {}
+    for path in sorted(package_root.rglob("*.py")):
+        relative = path.relative_to(package_root.parent).with_suffix("")
+        parts = list(relative.parts)
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        parsed[".".join(parts)] = (path, ast.parse(path.read_text(encoding="utf-8")))
+    return parsed
+
+
+def _string_values(node: ast.expr) -> list[str] | None:
+    """文字列 literal、または全値が文字列 literal の dict から、文字列を取り出す。"""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, ast.Dict) and node.values:
+        values = [v.value for v in node.values if isinstance(v, ast.Constant)]
+        if len(values) == len(node.values) and all(isinstance(v, str) for v in values):
+            return [str(v) for v in values]
+    return None
+
+
+def _module_constants(tree: ast.Module) -> dict[str, list[str]]:
+    constants: dict[str, list[str]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            target, value = node.target, node.value
+        else:
+            continue
+        values = _string_values(value)
+        if isinstance(target, ast.Name) and values is not None:
+            constants[target.id] = values
+    return constants
+
+
+def _import_aliases(tree: ast.Module) -> dict[str, tuple[str, str | None]]:
+    """名前 -> (import 元 module, 元の名前)。`import m as x` の x は (m, None)。"""
+    aliases: dict[str, tuple[str, str | None]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = (node.module, alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                aliases[alias.asname or alias.name.split(".")[0]] = (alias.name, None)
+    return aliases
+
+
+def _scan_environment(package_root: Path) -> _EnvironmentScan:
+    parsed = _parse_package(package_root)
+    constants = {name: _module_constants(tree) for name, (_, tree) in parsed.items()}
+    aliases = {name: _import_aliases(tree) for name, (_, tree) in parsed.items()}
+
+    def resolve(expr: ast.expr, module: str) -> list[str] | None:
+        direct = _string_values(expr)
+        if direct is not None:
+            return direct
+        if isinstance(expr, ast.Name):
+            if expr.id in constants[module]:
+                return constants[module][expr.id]
+            origin = aliases[module].get(expr.id)
+            if origin and origin[1] and origin[0] in constants:
+                return constants[origin[0]].get(origin[1])
+            return None
+        if isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name):
+            origin = aliases[module].get(expr.value.id)
+            if origin is None:
+                return None
+            # `import m as x` は m、`from pkg import m` は pkg.m が、定数を持つ module
+            for candidate in (origin[0], f"{origin[0]}.{origin[1]}" if origin[1] else None):
+                if candidate in constants and expr.attr in constants[candidate]:
+                    return constants[candidate][expr.attr]
+            return None
+        if isinstance(expr, ast.Subscript):  # {family: "NAME"}[family] -> 辞書の全値
+            return resolve(expr.value, module)
+        return None
+
+    names: set[str] = set()
+    indirect: set[str] = set()
+    unresolved: list[str] = []
+    unclassified: list[str] = []
+
+    def record(values: list[str], *, literal: bool) -> None:
+        names.update(values)
+        if not literal:
+            indirect.update(values)
+
+    for module, (path, tree) in parsed.items():
+        where = path.relative_to(package_root).as_posix()
+        parents = {
+            child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)
+        }
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Attribute)
+                and node.attr in {"environ", "getenv"}
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "os"
+            ):
+                continue
+            parent = parents.get(node)
+            expr: ast.expr | None = None
+            if node.attr == "getenv" and isinstance(parent, ast.Call) and parent.func is node:
+                expr = parent.args[0] if parent.args else None
+            elif (
+                isinstance(parent, ast.Attribute)
+                and parent.attr in {"get", "pop", "setdefault"}
+                and isinstance(parents.get(parent), ast.Call)
+            ):
+                call = parents[parent]
+                assert isinstance(call, ast.Call)
+                expr = call.args[0] if call.args else None
+            elif isinstance(parent, ast.Subscript) and parent.value is node:
+                expr = parent.slice
+            elif isinstance(parent, ast.Compare) and node in parent.comparators:
+                expr = parent.left
+            else:
+                unclassified.append(f"{where}:{node.lineno}")
+                continue
+            if expr is None:
+                unresolved.append(f"{where}:{node.lineno} (引数なし)")
+                continue
+            direct = _string_values(expr)
+            if direct is not None and isinstance(expr, ast.Constant):
+                record(direct, literal=True)
+                continue
+            resolved = resolve(expr, module)
+            if resolved is not None:
+                record(resolved, literal=False)
+                continue
+            # 関数の引数(`_env_true(name)` のような helper): 呼び出し側の実引数を解決する
+            function = parents.get(node)
+            while function is not None and not isinstance(function, ast.FunctionDef):
+                function = parents.get(function)
+            if (
+                isinstance(expr, ast.Name)
+                and isinstance(function, ast.FunctionDef)
+                and expr.id in [a.arg for a in function.args.args]
+            ):
+                index = [a.arg for a in function.args.args].index(expr.id)
+                found_any = False
+                for caller_module, (_, caller_tree) in parsed.items():
+                    for call_node in ast.walk(caller_tree):
+                        if not isinstance(call_node, ast.Call):
+                            continue
+                        callee = call_node.func
+                        callee_name = (
+                            callee.id
+                            if isinstance(callee, ast.Name)
+                            else callee.attr
+                            if isinstance(callee, ast.Attribute)
+                            else None
+                        )
+                        if callee_name != function.name:
+                            continue
+                        actual = (
+                            call_node.args[index]
+                            if index < len(call_node.args)
+                            else next(
+                                (k.value for k in call_node.keywords if k.arg == expr.id), None
+                            )
+                        )
+                        values = resolve(actual, caller_module) if actual is not None else None
+                        if values is None:
+                            unresolved.append(f"{where}:{node.lineno} ({function.name} の引数)")
+                        else:
+                            found_any = True
+                            record(values, literal=False)
+                if not found_any:
+                    unresolved.append(f"{where}:{node.lineno} ({function.name} の呼び出し側なし)")
+                continue
+            unresolved.append(f"{where}:{node.lineno} {ast.unparse(expr)}")
+
+    return _EnvironmentScan(
+        frozenset(names), frozenset(indirect), tuple(unresolved), tuple(unclassified)
+    )
+
+
+# src が読む環境変数名の既知の一覧(2026-10-11 時点)。**新しい名前が現れたら本テストが落ちる**。
+# 落ちたら、その環境変数が #128 の機能(Expected Return・RAER・配分・入替・#605 の出力)を有効に
+# できる入口でないかを人が確認し、問題なければ一覧と(必要なら)運用手順書 §37 を更新する。
+# token(allocation 等)を名前に含むかには頼らない。
+_KNOWN_ENVIRONMENT_VARIABLES: frozenset[str] = frozenset(
+    {
+        "ALLOW_FULL_MARKET_SCREENING",
+        "AWS_LAMBDA_FUNCTION_NAME",
+        "BUY_CANDIDATES_FUNCTION_NAME",
+        "BUY_CANDIDATE_QUEUE_URL",
+        "BUY_CANDIDATE_SQS_DISPATCH_ENABLED",
+        "CANDIDATE_UNIVERSE_CACHE_BUCKET",
+        "DYNAMODB_TABLE_PREFIX",
+        "EDINET_API_KEY",
+        "GITHUB_APP_SECRET_ARN",
+        "GITHUB_REPOSITORY",
+        "HOLDINGS_WATCHLIST_FUNCTION_NAME",
+        "HOLDINGS_WATCHLIST_QUEUE_URL",
+        "HOLDINGS_WATCHLIST_SQS_DISPATCH_ENABLED",
+        "INCIDENT_NOTIFICATION_TOPIC_ARN",
+        "JSTOCK_CONFIG_DIR",
+        "LINE_CHANNEL_ACCESS_TOKEN",
+        "LINE_CHANNEL_SECRET",
+        "LINE_USER_ID",
+        "WATCHLIST_DISPATCHER_FUNCTION_NAME",
+        "WATCHLIST_SCREENING_QUEUE_NAME",
+        "WATCHLIST_SCREENING_QUEUE_URL",
+        "WATCHLIST_WORKER_FUNCTION_NAME",
+        "WEEKLY_AGGREGATE_READ_ENABLED",
+        "WEEKLY_AGGREGATE_WRITE_ENABLED",
+        "WEEKLY_EVALUATION_AGGREGATE_TABLE",
+    }
+)
+# template の Parameter と、Lambda の環境変数(Environment.Variables)の既知の名前
+_KNOWN_TEMPLATE_PARAMETERS: frozenset[str] = frozenset(
+    {
+        "AdminPrincipalArn",
+        "AllowFullMarketScreening",
+        "BuyCandidateReservedConcurrentExecutions",
+        "BuyCandidateSqsBatchSize",
+        "BuyCandidateSqsDispatchEnabled",
+        "DeployPrincipalArn",
+        "EdinetApiKeySecretArn",
+        "EdinetCredentialRotationVersion",
+        "GithubAppSecretArn",
+        "GithubRepository",
+        "HoldingsWatchlistReservedConcurrentExecutions",
+        "HoldingsWatchlistSqsBatchSize",
+        "HoldingsWatchlistSqsDispatchEnabled",
+        "LineChannelAccessTokenSecretArn",
+        "LineChannelSecretSecretArn",
+        "LineCredentialRotationVersion",
+        "LineUserIdSecretArn",
+        "SecretResourcePolicyEnabled",
+        "TablePrefix",
+        "WatchlistReservedConcurrentExecutions",
+        "WatchlistSqsBatchSize",
+        "WeeklyAggregateReadEnabled",
+        "WeeklyAggregateWriteEnabled",
+    }
+)
+_KNOWN_TEMPLATE_ENVIRONMENT: frozenset[str] = frozenset(
+    {
+        "ALLOW_FULL_MARKET_SCREENING",
+        "BUY_CANDIDATES_FUNCTION_NAME",
+        "BUY_CANDIDATE_QUEUE_URL",
+        "BUY_CANDIDATE_SQS_DISPATCH_ENABLED",
+        "CANDIDATE_UNIVERSE_CACHE_BUCKET",
+        "DYNAMODB_TABLE_PREFIX",
+        "EDINET_API_KEY",
+        "EDINET_CREDENTIAL_ROTATION_VERSION",
+        "GITHUB_APP_SECRET_ARN",
+        "GITHUB_REPOSITORY",
+        "HOLDINGS_WATCHLIST_FUNCTION_NAME",
+        "HOLDINGS_WATCHLIST_QUEUE_URL",
+        "HOLDINGS_WATCHLIST_SQS_DISPATCH_ENABLED",
+        "INCIDENT_NOTIFICATION_TOPIC_ARN",
+        "JSTOCK_CONFIG_DIR",
+        "LINE_CHANNEL_ACCESS_TOKEN",
+        "LINE_CHANNEL_SECRET",
+        "LINE_CREDENTIAL_ROTATION_VERSION",
+        "LINE_USER_ID",
+        "WATCHLIST_DISPATCHER_FUNCTION_NAME",
+        "WATCHLIST_SCREENING_QUEUE_NAME",
+        "WATCHLIST_SCREENING_QUEUE_URL",
+        "WATCHLIST_WORKER_FUNCTION_NAME",
+        "WEEKLY_AGGREGATE_READ_ENABLED",
+        "WEEKLY_AGGREGATE_WRITE_ENABLED",
+        "WEEKLY_EVALUATION_AGGREGATE_TABLE",
+    }
+)
+
+
+def test_the_environment_scan_resolves_constants_dicts_and_helper_arguments(
+    tmp_path: Path,
+) -> None:
+    """走査の自己検証: literal だけでなく、定数・dict・helper・別 module の定数を解決する。"""
+    root = tmp_path / "pkg"
+    root.mkdir()
+    (root / "__init__.py").write_text("", encoding="utf-8")
+    (root / "consts.py").write_text('SHARED_ENV = "SHARED_NAME"\n', encoding="utf-8")
+    (root / "reader.py").write_text(
+        "import os\n"
+        "from pkg.consts import SHARED_ENV\n"
+        "from pkg import consts\n"
+        'LOCAL_ENV = "LOCAL_NAME"\n'
+        'BY_KIND = {"a": "DICT_NAME_A", "b": "DICT_NAME_B"}\n'
+        "def _flag(name: str) -> bool:\n"
+        "    return os.environ.get(name, '') == 'true'\n"
+        "def run(kind: str) -> None:\n"
+        "    os.environ.get('LITERAL_NAME')\n"
+        "    os.environ.get(LOCAL_ENV)\n"
+        "    os.environ.get(SHARED_ENV)\n"
+        "    os.environ.get(consts.SHARED_ENV)\n"
+        "    os.environ.get(BY_KIND[kind])\n"
+        "    os.getenv('GETENV_NAME')\n"
+        "    os.environ['SUBSCRIPT_NAME']\n"
+        "    _flag('HELPER_LITERAL')\n"
+        "    _flag(LOCAL_ENV)\n",
+        encoding="utf-8",
+    )
+
+    scan = _scan_environment(root)
+
+    assert scan.names == {
+        "LITERAL_NAME",
+        "LOCAL_NAME",
+        "SHARED_NAME",
+        "DICT_NAME_A",
+        "DICT_NAME_B",
+        "GETENV_NAME",
+        "SUBSCRIPT_NAME",
+        "HELPER_LITERAL",
+    }
+    assert "LITERAL_NAME" not in scan.resolved_indirectly
+    assert {
+        "LOCAL_NAME",
+        "SHARED_NAME",
+        "DICT_NAME_A",
+        "HELPER_LITERAL",
+    } <= scan.resolved_indirectly
+    assert scan.unresolved == ()
+    assert scan.unclassified_uses == ()
+
+
+def test_the_environment_scan_reports_what_it_cannot_resolve(tmp_path: Path) -> None:
+    root = tmp_path / "pkg"
+    root.mkdir()
+    (root / "__init__.py").write_text("", encoding="utf-8")
+    (root / "reader.py").write_text(
+        "import os\n"
+        "def run(prefix: str) -> None:\n"
+        "    os.environ.get(prefix + '_X')\n"
+        "    dict(os.environ)\n",
+        encoding="utf-8",
+    )
+
+    scan = _scan_environment(root)
+
+    assert len(scan.unresolved) == 1 and "reader.py:3" in scan.unresolved[0]
+    assert len(scan.unclassified_uses) == 1 and "reader.py:4" in scan.unclassified_uses[0]
+
+
+_REAL_SCAN = _scan_environment(_PACKAGE)
+
+
+def test_the_real_scan_is_not_vacuous() -> None:
+    """現に存在する書き方(literal・module 定数・dict・helper の引数)をそれぞれ解決できている。"""
+    assert "AWS_LAMBDA_FUNCTION_NAME" in _REAL_SCAN.names  # literal
+    assert "WEEKLY_EVALUATION_AGGREGATE_TABLE" in _REAL_SCAN.resolved_indirectly  # module 定数
+    assert "BUY_CANDIDATES_FUNCTION_NAME" in _REAL_SCAN.resolved_indirectly  # dict の値
+    assert "BUY_CANDIDATE_SQS_DISPATCH_ENABLED" in _REAL_SCAN.resolved_indirectly  # helper の引数
+    assert len(_REAL_SCAN.resolved_indirectly) >= 8
+
+
+def test_every_environment_read_in_src_has_a_resolvable_name_and_a_classified_form() -> None:
+    """名前を解決できない読取・分類できない使い方が 1 件も無い(新しい書き方は人が確認する)。"""
+    assert _REAL_SCAN.unresolved == ()
+    assert _REAL_SCAN.unclassified_uses == ()
+
+
+def test_no_new_environment_variable_is_read_by_src() -> None:
+    """src が読む環境変数の名前の集合は、既知の一覧から増えていない(token 名に頼らない)。"""
+    new = sorted(_REAL_SCAN.names - _KNOWN_ENVIRONMENT_VARIABLES)
+    assert new == [], (
+        f"新しい環境変数: {new}。#128 の機能を有効にできる入口でないかを人が確認し、"
+        "問題なければ _KNOWN_ENVIRONMENT_VARIABLES を更新する"
+    )
+
+
+def test_no_environment_variable_can_enable_a_128_feature() -> None:
+    """(上の一覧への追加に加えて)名前に #128 の機能の語を含む環境変数が無い。"""
+    offenders = sorted(n for n in _REAL_SCAN.names if _FEATURE_TOKEN.search(n))
+    assert offenders == []
+
+
+class _IgnoreTagsLoader(yaml.SafeLoader):
+    """CloudFormation の短縮記法(!Ref / !Sub / !GetAtt ...)を、読み飛ばして読み込む loader。"""
+
+
+def _construct_any(loader: yaml.SafeLoader, tag_suffix: str, node: yaml.Node) -> object:
+    if isinstance(node, yaml.ScalarNode):
+        return loader.construct_scalar(node)
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node, deep=True)
+    return loader.construct_mapping(node, deep=True)  # type: ignore[arg-type]
+
+
+_IgnoreTagsLoader.add_multi_constructor("!", _construct_any)
+
+
+def _template_names() -> tuple[set[str], set[str]]:
+    """(Parameters の名前, Environment.Variables のキー)を template 全体から全走査で集める。"""
+    document = yaml.load(  # noqa: S506 - 信頼できる repo 内のファイル。タグは無視する loader
+        (_REPO / "infra" / "template.yaml").read_text(encoding="utf-8"), Loader=_IgnoreTagsLoader
+    )
+    parameters = set(document.get("Parameters", {}))
+    variables: set[str] = set()
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            environment = node.get("Environment")
+            if isinstance(environment, dict) and isinstance(environment.get("Variables"), dict):
+                variables.update(environment["Variables"])
+            for child in node.values():
+                walk(child)
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+
+    walk(document)
+    return parameters, variables
+
+
+def test_the_template_scan_is_not_vacuous() -> None:
+    parameters, variables = _template_names()
+    assert len(parameters) > 10 and len(variables) > 10
+
+
+def test_no_new_template_parameter_or_lambda_environment_variable() -> None:
+    """template の Parameter と Lambda の環境変数の名前が、既知の一覧から増えていない。"""
+    parameters, variables = _template_names()
+    assert sorted(parameters - _KNOWN_TEMPLATE_PARAMETERS) == [], (
+        "新しい Parameter。#128 の機能の入口でないかを人が確認し、"
+        "_KNOWN_TEMPLATE_PARAMETERS を更新する"
+    )
+    assert sorted(variables - _KNOWN_TEMPLATE_ENVIRONMENT) == [], (
+        "新しい Lambda の環境変数。#128 の機能の入口でないかを人が確認し、"
+        "_KNOWN_TEMPLATE_ENVIRONMENT を更新する"
+    )
+
+
+def test_the_template_has_no_parameter_environment_or_resource_for_a_128_feature() -> None:
+    """infra/template.yaml を全文走査: #128 の機能の Parameter・環境変数・表・Function が無い。"""
+    template = (_REPO / "infra" / "template.yaml").read_text(encoding="utf-8")
+    tokens = re.findall(
+        r"[A-Za-z0-9_]*(?:[Aa]llocation|[Ee]xpected_?[Rr]eturn|[Rr]aer|RAER)\w*", template
+    )
+    assert sorted(set(tokens)) == []
+
+
+def test_the_only_config_file_for_a_128_feature_is_the_off_allocation_shadow() -> None:
+    by_name = sorted(p.name for p in _SHIPPED_CONFIG_DIR.iterdir() if _FEATURE_TOKEN.search(p.name))
+    assert by_name == ["allocation_shadow.yaml"]
+    by_content = sorted(
+        p.name
+        for p in _SHIPPED_CONFIG_DIR.iterdir()
+        if p.suffix in {".yaml", ".json"}
+        and p.name != "allocation_shadow.yaml"
+        and re.search(r"(expected_return|raer\b|allocation)", p.read_text(encoding="utf-8"))
+    )
+    assert by_content == []
+
+
+# --- (2) 運用手順書の新節(§37) ---
+
+_SECTION_HEADING = re.compile(r"^## 37\. ")
+
+
+def _section_37() -> str:
+    lines = _manual().splitlines()
+    start = next(i for i, line in enumerate(lines) if _SECTION_HEADING.match(line))
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
+def _subsection(text: str, heading: str) -> str:
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(heading))
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].startswith("### ")),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
+def test_the_section_exists_and_names_the_gate() -> None:
+    heading = next(line for line in _manual().splitlines() if _SECTION_HEADING.match(line))
+    for word in ("#128", "Production 接続 gate", "#606"):
+        assert word in heading, word
+
+
+def test_the_section_has_the_required_subsections_in_order() -> None:
+    headings = [line for line in _section_37().splitlines() if line.startswith("### 37.")]
+    assert [h.split(" ")[1] for h in headings] == [
+        "37.1",
+        "37.2",
+        "37.3",
+        "37.4",
+        "37.5",
+        "37.6",
+    ]
+
+
+def _stage_text(stage: str) -> str:
+    block = _subsection(_section_37(), "### 37.2")
+    lines = block.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(stage))
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("段 ")), len(lines))
+    return "\n".join(lines[start:end])
+
+
+@pytest.mark.parametrize("stage", ["段 A", "段 B", "段 C", "段 D"])
+def test_every_stage_states_entry_exit_record_and_stop_condition(stage: str) -> None:
+    text = _stage_text(stage)
+    for label in ("入口", "出口", "記録", "停止条件"):
+        assert label in text, (stage, label)
+
+
+def test_the_four_stages_are_in_the_gate_order() -> None:
+    block = _subsection(_section_37(), "### 37.2")
+    positions = [block.index(f"段 {x}") for x in "ABCD"]
+    assert positions == sorted(positions)
+    titles = re.findall(r"^段 [ABCD] ([^\n(:：]+)", block, flags=re.MULTILINE)
+    assert [t.strip() for t in titles][:4] == [
+        "Shadow",
+        "Backtest / Replay",
+        "Human Review",
+        "USER Approval",
+    ]
+
+
+def test_user_approval_names_its_target_and_is_separate_from_the_changeset_gates() -> None:
+    stage_d = _stage_text("段 D")
+    for phrase in ("明示的な承認", "承認の対象", "別々", "ChangeSet", "CREATE", "EXECUTE"):
+        assert phrase in stage_d, phrase
+    # 新しい制約として読まれないよう、既存の正本(#122 / §36)に基づくことを示す
+    assert "新しい制約ではなく" in stage_d
+    assert "#122" in stage_d and "§36" in stage_d
+
+
+def test_the_section_reuses_existing_gates_and_does_not_create_a_new_one() -> None:
+    text = _section_37()
+    assert "新しい gate 機構" in text and "新しい有効化経路" in text
+    for reference in ("§28", "§10", "§5.1", "#122", "#846", "#128"):
+        assert reference in text, reference
+    # 恒久規則の制定・変更は HUMAN_ONLY。導入部と『決めていないこと』の両方で明示する
+    intro = text[: text.index("### 37.1")]
+    assert "POLICY_AUTHORITY = HUMAN_ONLY" in intro
+    assert "HUMAN_ONLY" in _subsection(text, "### 37.6")
+
+
+def test_the_section_does_not_fix_thresholds_or_periods() -> None:
+    """合格基準・最低期待リターン改善幅・観測期間は『shadow 運用の後に決める』。数値を書かない。"""
+    text = _subsection(_section_37(), "### 37.2") + _subsection(_section_37(), "### 37.3")
+    # 期間・割合・時間・件数・回数のいずれの単位の数値も書かない(検査をテスト名どおりに広げた)
+    assert not re.search(
+        r"\d+\s*(営業日|日間|週間|か月|ヶ月|%|％|ポイント|秒|分|時間|件|回|年)", text
+    )
+    undecided = _subsection(_section_37(), "### 37.6")
+    for phrase in ("合格基準", "観測期間", "持ち主", "ACTIVE"):
+        assert phrase in undecided, phrase
+
+
+def test_the_section_states_the_dont_list_and_the_rollback() -> None:
+    dont = _subsection(_section_37(), "### 37.3")
+    for phrase in ("段を飛ばさ", "投資判断に使", "IAM", "有効化の経路", "merge"):
+        assert phrase in dont, phrase
+    rollback = _subsection(_section_37(), "### 37.4")
+    for phrase in ("OFF", "legacy", "再 deploy"):
+        assert phrase in rollback, phrase
+
+
+def test_the_section_points_at_this_contract_test_and_it_exists() -> None:
+    mapping = _subsection(_section_37(), "### 37.5")
+    name = "tests/unit/test_issue_606_production_connection_gate.py"
+    assert name in mapping
+    assert (_REPO / name).exists()
+
+
+def test_this_test_is_registered_as_a_markdown_reading_test() -> None:
+    registry = (_REPO / "tests" / "ci_markdown_subset.txt").read_text(encoding="utf-8")
+    assert "tests/unit/test_issue_606_production_connection_gate.py" in registry.splitlines()
