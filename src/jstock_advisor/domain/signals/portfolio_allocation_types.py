@@ -326,6 +326,9 @@ class CandidateAllocation:
     def _validate_allocated(self) -> None:
         if self.shares <= 0 or self.reason_code is not ReasonCode.ALLOCATED:
             raise _fail("allocation", "an allocated candidate has shares and its own reason")
+        if self.amount <= 0:
+            # 株数を配分したのに金額が 0 の結果(購入総額 0 円)を作れない
+            raise _fail("allocation.amount", "an allocated candidate has a positive amount")
         if self.rank is None:
             raise _fail("allocation.rank", "an allocated candidate is ranked")
         if self.shares > self.cap_limited_shares:

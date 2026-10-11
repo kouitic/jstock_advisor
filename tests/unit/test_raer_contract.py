@@ -923,6 +923,7 @@ def test_the_new_module_is_not_reachable_from_any_handler_or_cli() -> None:
 # #603 の配分の型(PR-A)は RaerResult を候補の入力に持つ。後続の消費側はここへ足す
 _ALLOWED_IMPORTERS = {
     "domain/signals/portfolio_allocation_types.py",  # #603 PR-A
+    "domain/signals/portfolio_allocation.py",  # #603 PR-C
 }
 
 
