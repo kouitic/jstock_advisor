@@ -505,6 +505,10 @@ _BAD_ALLOCATIONS: list[tuple[str, dict[str, object]]] = [
     ("allocated with zero shares", {"shares": 0, "amount": D("0"), "cap_limited_shares": 0}),
     ("allocated with another reason", {"reason_code": pt.ReasonCode.BELOW_HURDLE}),
     ("allocated with a zero amount", {"amount": D("0")}),
+    (
+        "allocated with zero shares but an amount",
+        {"shares": 0, "amount": D("1"), "cap_limited_shares": 0},
+    ),
     ("allocated without a rank", {"rank": None}),
     ("allocated amount negative", {"amount": D("-424242.5")}),
     ("allocated above its cap-limited shares", {"cap_limited_shares": 100}),
