@@ -504,6 +504,11 @@ def test_a_not_allocated_candidate_is_accepted_for_every_other_reason(
 _BAD_ALLOCATIONS: list[tuple[str, dict[str, object]]] = [
     ("allocated with zero shares", {"shares": 0, "amount": D("0"), "cap_limited_shares": 0}),
     ("allocated with another reason", {"reason_code": pt.ReasonCode.BELOW_HURDLE}),
+    ("allocated with a zero amount", {"amount": D("0")}),
+    (
+        "allocated with zero shares but an amount",
+        {"shares": 0, "amount": D("1"), "cap_limited_shares": 0},
+    ),
     ("allocated without a rank", {"rank": None}),
     ("allocated amount negative", {"amount": D("-424242.5")}),
     ("allocated above its cap-limited shares", {"cap_limited_shares": 100}),
@@ -904,12 +909,19 @@ def test_the_module_does_not_import_the_optimizer_or_anything_that_computes() ->
     assert "compute_buy_affordability" not in source
 
 
-def test_the_module_is_imported_from_nowhere_in_src() -> None:
+# この module を import してよい src の module の明示リスト(いずれも未配線の dormant)
+_ALLOWED_IMPORTERS = {
+    "domain/signals/portfolio_allocation.py",  # #603 PR-C(optimize_allocation)
+}
+
+
+def test_the_module_is_imported_from_nowhere_else_in_src() -> None:
     src = _REPO / "src" / "jstock_advisor"
     for path in src.rglob("*.py"):
         if path == _MODULE_PATH:
             continue
-        assert "portfolio_allocation_types" not in path.read_text(encoding="utf-8"), str(path)
+        if "portfolio_allocation_types" in path.read_text(encoding="utf-8"):
+            assert path.relative_to(src).as_posix() in _ALLOWED_IMPORTERS, str(path)
 
 
 def test_every_combination_of_decision_and_reason_is_either_consistent_or_rejected() -> None:
@@ -978,3 +990,13 @@ def test_an_available_result_may_still_exclude_an_unavailable_raer() -> None:
         )
     )
     assert r.allocations[1].reason_code is pt.ReasonCode.RAER_UNAVAILABLE
+
+
+def test_an_allocated_candidate_cannot_have_a_zero_amount_in_a_whole_result() -> None:
+    # サブちゃんの PR-A SHOULD-1: 株数 > 0 の配分で購入総額 0 円の結果が型を通っていた
+    with pytest.raises(pt.AllocationContractError):
+        result(
+            allocations=(allocated("0002", 100, 1, amount=D("0")),),
+            total_allocated=D("0"),
+            remaining_cash=D("768000"),
+        )
