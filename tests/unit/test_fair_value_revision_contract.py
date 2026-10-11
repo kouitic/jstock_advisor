@@ -15,7 +15,7 @@
   (2) 境界: ±θ ちょうど(≥ θ は方向あり)・Decimal の厳密さ
   (3) K・窓 W・鮮度基準の境界
   (4) M_up / M_down は別のパラメータ・確認は『最新の M 点がすべて θ 以上、同じ側』
-  (5) 同日重複(後勝ち)・入力順・評価日より後の点
+  (5) 同日重複は拒否(fail-closed)・入力順・評価日より後の点
   (6) 手法の集合の変更をまたいで比べない
   (7) 未決のパラメータ: 常に UNDETERMINED・既定値を置かない
   (8) UNDETERMINED の理由(欠測を 0 や STABLE で埋めない)
@@ -400,28 +400,39 @@ def test_earlier_swings_do_not_block_a_confirmation_that_the_latest_points_satis
 # ---------------------------------------------------------------------------
 
 
-def test_same_day_duplicates_keep_the_later_input() -> None:
+def test_two_points_on_the_same_day_are_rejected_not_resolved_by_input_order() -> None:
+    """同じ評価日の複数点は拒否する(fail-closed)。入力順で勝者を決めると非決定になる。"""
     history = [_point(0, 100), _point(1, 100), _point(2, 100), _point(3, 70), _point(3, 100)]
-    result = _evaluate(history, 3)
-    assert result.direction is D.STABLE
-    assert result.n_points == 4  # 3 日目は 1 点にまとめる
-    swapped = [*history[:3], history[4], history[3]]
-    result = _evaluate(swapped, 3)
-    assert result.revision_pct == pytest.approx(-30.0)  # 後の入力(70)が勝つ
+    with pytest.raises(ValueError):
+        _evaluate(history, 3)
+    with pytest.raises(ValueError):
+        _evaluate([*history[:3], history[4], history[3]], 3)  # 順序を変えても同じ
 
 
-def test_duplicates_are_collapsed_before_counting_points() -> None:
-    history = [_point(0, 100), _point(0, 100), _point(1, 100), _point(1, 100)]
-    result = _evaluate(history, 1)
-    assert result.reason is R.INSUFFICIENT_HISTORY
-    assert result.n_points == 2
+def test_duplicates_are_rejected_even_when_the_points_are_identical_or_unusable() -> None:
+    with pytest.raises(ValueError):
+        _evaluate([_point(0, 100), _point(0, 100), _point(1, 100), _point(2, 100)], 2)
+    with pytest.raises(ValueError):
+        _evaluate([_point(0, 100), _point(1, 100), _point(2, 100), _point(2, 5, usable=False)], 2)
+    with pytest.raises(ValueError):
+        _evaluate([_point(0, None), _point(0, None)], 0)
 
 
-def test_a_later_unusable_duplicate_replaces_an_earlier_usable_one() -> None:
-    history = [_point(0, 100), _point(1, 100), _point(2, 100), _point(2, 100, usable=False)]
-    result = _evaluate(history, 2)
-    assert result.reason is R.INSUFFICIENT_HISTORY  # 2 日目の点は不適格になり、点は 2 つ
-    assert result.n_points == 2
+def test_duplicates_after_the_evaluation_date_are_not_checked() -> None:
+    history = [*_series([100, 100, 100, 100]), _point(10, 10), _point(10, 20)]
+    assert _evaluate(history, 3).direction is D.STABLE  # 未来の点は知り得ないので見ない
+
+
+def test_undecided_parameters_stay_undetermined_even_with_duplicates() -> None:
+    history = [_point(0, 100), _point(0, 90)]
+    result = evaluate_fair_value_revision(history, evaluation_date=_at(0), parameters=None)
+    assert result.reason is R.REVISION_PARAMETERS_NOT_DECIDED
+
+
+def test_the_duplicate_rule_is_documented_for_the_caller() -> None:
+    doc = fair_value_revision_module.__doc__ or ""
+    assert "評価日ごとに 1 件" in doc
+    assert "評価日ごとに 1 件" in (evaluate_fair_value_revision.__doc__ or "")
 
 
 def test_the_input_order_does_not_matter_for_distinct_days() -> None:

@@ -21,6 +21,13 @@ USER 承認: #122 issuecomment-6110016281(#601 PR-2 = 案 A)。
   使わない(v × 100 と ref × (100 ± θ))ため、±θ ちょうどが浮動小数点の誤差で外れない。
   『確認』= 最新の M 点がすべて、最新の点と同じ側に θ 以上離れている。
 
+## 入力の前提(履歴を取得する側の責務)
+
+  履歴は**評価日ごとに 1 件**にして渡す。同じ評価日が複数あると ValueError(fail-closed)。
+  本関数は『どれが勝つか』を決めない: 入力順や取得の順序に依存して結果が変わる(非決定になる)のを
+  避けるため。畳み方(作成時刻の最新を採る等)は取得側が決める。評価日より後の点は、その時点で
+  知り得ないため除く(重複の検査の対象にもしない)。
+
 ## 未決のパラメータ
 
   W(窓)・K(最低点数)・θ・M_up・M_down・鮮度基準は未決。引数 `parameters` が None の間は常に
@@ -253,9 +260,11 @@ def evaluate_fair_value_revision(
 ) -> FairValueRevisionResult:
     """Fair Value Revision を判定する(純粋関数。時計・I/O なし)。
 
-    history は評価日の順でなくてよい。同じ評価日が複数あるときは**入力順で後のものを採る**
-    (P1。呼び出し側が作成順に渡すと『評価日ごとに最新の 1 件』になる)。評価日より後の点は
-    その時点で知り得ないため除く。
+    history は評価日の順でなくてよい。★ 同じ評価日の点は**複数渡せない**(ValueError。fail-closed) ★
+    履歴を取得する側が、評価日ごとに 1 件へ畳む責務を持つ(P1)。入力順(取得経路によっては
+    順序の保証が無い)で勝者を決めると、同じ入力から異なる結果が出うる(非決定)ため、本関数は
+    どれが勝つかを決めない。評価日より後の点は、その時点で知り得ないため除く(重複の検査の対象にも
+    しない)。
     """
     _require_plain_date(evaluation_date, "evaluation_date")
     if parameters is None:
@@ -265,11 +274,12 @@ def evaluate_fair_value_revision(
     if not known:
         return _undetermined(evaluation_date, RevisionReason.NO_HISTORY)
 
-    by_date: dict[date, RevisionPoint] = {}
-    for point in known:
-        by_date[point.evaluation_date] = point
+    if len({point.evaluation_date for point in known}) != len(known):
+        raise ValueError(
+            "同じ評価日の点が複数ある(取得する側が評価日ごとに 1 件へ畳んでから渡すこと)"
+        )
     eligible = sorted(
-        (point for point in by_date.values() if point.is_eligible),
+        (point for point in known if point.is_eligible),
         key=lambda point: point.evaluation_date,
     )
     if not eligible:
