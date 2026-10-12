@@ -5690,3 +5690,225 @@ shadow の記録は追記のみで削除しない。表・IAM は、既存の戻
 ・各機能を ACTIVE にする可否・時期(USER の判断)
 ・運用の恒久規則の制定・変更(HUMAN_ONLY)
 ```
+
+## 38. incident の GitHub Issue 自動起票の抑止機構(Issue #926)の停止・再開・上限値の変更(2026-10-12追加)
+
+incident の GitHub Issue 自動起票(#508)に、3 層の抑止(事前確認・原子的な件数上限・kill switch)を足した(#926)。
+**LINE の通知には一切影響しない**(停止中も、抑止中も、LINE は従来どおり届く)。本節は、その停止(kill switch)と再開、
+上限値の変更の手順である。実装は PR #928。**本節の手順は、その PR が main に入り、Production に反映された後にだけ有効**である。
+
+**本節は、新しい gate 機構も、新しい自動の再開経路も作らない。** 手動の書込の操作は、既存の Human Gate
+(§34.2 の『ChangeSet を経由しない直接の AWS 操作 = 実行ごとに USER の承認』)と同じ性質として扱う。
+運用の恒久規則の制定・変更は `POLICY_AUTHORITY = HUMAN_ONLY`(CLAUDE.md §2。正本は
+docs/user_manager_collaboration_protocol.md §8)であり、本節はそれを変更しない。
+
+### 38.1 先に知っておくこと
+
+```
+1 kill switch が止めるもの   GitHub への書込の全て = 新規 Issue の作成と、OPEN の Issue へのコメント追記。LINE は止まらない
+2 停止中の発生分             コメントは後から追記されない(停止が解けても、止まっていた間の発生分は戻らない)。LINE には届いている
+3 自動停止                   全体の上限を超えた試行がしきい値に達すると自動で停止し、LINE へ 1 回だけ知らせる(文面は固定。件数・識別子を含まない)。
+                             fingerprint 単位の抑止は自動停止の入力にならない
+4 手動停止                   LINE への通知は出ない(実行した人が分かっているため)
+5 再開                       手動のみ。自動では再開しない
+6 制御項目の読取に失敗した    GitHub へ書かない(fail-closed)。LINE は通常どおり
+7 出荷値                     上限値は全項目 null(未決定)。決定されるまで、新規 Issue は作られない(OPEN の Issue へのコメントは続く)。
+                             この状態は『停止』ではない
+```
+
+★ **手動の停止・再開は DynamoDB への書込(AWS の書込)である。実行のたびに USER の承認が要る**(承認は 1 回の実行ごと。
+前回の承認は次回に及ばない)。AI は、USER の承認なしに実行しない。ChangeSet を経由しない直接の操作である。
+
+### 38.2 状態の保存場所
+
+```
+テーブル        <TablePrefix>-incident_state(IncidentStateTable。既存。TablePrefix はスタックのパラメータ)
+制御項目の key  fingerprint = "__control__:github_issue"(fingerprint の行ではない 1 項目。64 桁の 16 進と衝突しない)
+```
+
+制御項目の主な属性(無ければ『停止していない・数えていない』):
+
+```
+github_issue_kill_switch                       BOOL。true のときだけ停止(文字列 "true" や数値 1 では止まらない)
+kill_switch_reason                             "MANUAL"(手動)または "AUTO_GLOBAL_FLOOD"(自動)
+kill_switch_set_at                             停止にした時刻
+kill_switch_notified_at                        自動停止の LINE 通知を確保した時刻。無ければ未通知(次の signal で通知を再試行する)
+global_window_id / global_created_count        全体の窓(JST の日付)と、その窓で作成した件数
+global_denied_window_id / global_denied_count  全体の窓と、その窓で上限を超えた試行の数(自動停止の入力)
+```
+
+fingerprint の行にも、抑止の記録が残る: `github_issue_last_denied_reason`(LIMITS_UNDECIDED / SAME_OCCURRENCE / MIN_INTERVAL /
+FINGERPRINT_LIMIT / GLOBAL_LIMIT)・`github_issue_last_denied_at`・`github_issue_suppressed_count`・`github_issue_last_created_at`・
+`github_issue_last_created_occurrence`・`github_issue_window_id` / `github_issue_window_created_count`。
+
+**Scan / Query はしない**(このテーブルに TTL は無く、tracker は全件走査をしない設計)。確認は key を指定した GetItem だけで行う。
+
+### 38.3 状態の確認(read-only)
+
+観測用 role(`AWS_PROFILE=jstock-observer`。18節・24節と同じ)で、key を指定して 1 件だけ読む(`GetItem`)。**スキャンはしない**。
+**この観測用 role が `<TablePrefix>-incident_state` を読めるかは未確認**(AWS に接続して確かめていない)。許可されない場合は、
+権限を回避せず、その旨を報告して判断を仰ぐ(23.1 と同じ)。
+
+```bash
+# 制御項目(停止しているか・理由・窓ごとの件数)。TABLE を <TablePrefix>-incident_state へ置き換える。
+# (Git Bash では MSYS_NO_PATHCONV=1 を付ける)
+export AWS_PROFILE=jstock-observer AWS_DEFAULT_REGION=ap-northeast-1
+TABLE=<TablePrefix>-incident_state
+aws dynamodb get-item --table-name $TABLE \
+  --key '{"fingerprint": {"S": "__control__:github_issue"}}' --consistent-read --output json
+
+# 特定の fingerprint の抑止の記録。FP を対象の fingerprint(64 桁の 16 進。架空の例: aaaa…aaaa)へ置き換える。
+# 読む属性は下のとおりに限定する(ProjectionExpression。許可リスト方式。status は予約語のため別名を使う)。
+FP=<fingerprint>
+aws dynamodb get-item --table-name $TABLE \
+  --key "{\"fingerprint\": {\"S\": \"$FP\"}}" --consistent-read \
+  --projection-expression "github_issue_create_status,github_issue_last_denied_reason,github_issue_last_denied_at,github_issue_suppressed_count,github_issue_last_created_at,github_issue_last_created_occurrence,github_issue_window_id,github_issue_window_created_count" \
+  --output json
+```
+
+> **PowerShell で実行する場合**: 上の JSON の引用は bash 用である。PowerShell では二重引用符の扱いが異なり、そのままでは動かない
+> ことがある。**PowerShell での実行は未確認**(実行していない)。key を JSON ファイルに書き、`--key file://key.json` で渡す形にすると
+> 引用の違いを避けられると考えるが、これも未確認である。環境変数の設定は `$env:AWS_PROFILE = "jstock-observer"` の形になる。
+
+読み方:
+
+```
+Item が返らない                       制御項目が無い = 停止していない・窓の件数も 0
+github_issue_kill_switch = true       停止中。kill_switch_reason で自動 / 手動を区別する
+kill_switch_notified_at が無い(AUTO)  自動停止の LINE 通知がまだ確保されていない(次の signal で通知される)
+global_denied_count が大きい          全体の上限を超えた試行が多い = 起票の量産(または上限値が低すぎる)の兆候
+```
+
+結果にある値(識別子・fingerprint・時刻)を、Issue・PR・コメントなど公開面へそのまま貼らない(DISCLOSURE = PUBLIC_SANITIZED。
+必要なら件数・有無だけを書く)。
+
+### 38.4 手動で停止する(AWS の書込。実行ごとに USER の承認)
+
+停止する理由の例: Issue の量産が疑われるとき、GitHub 側の障害・誤作動で書込を止めたいとき。
+**書込に使う資格情報は、本節では指定しない**(実行する資格情報と実施主体は、実行の前に USER の承認とあわせて決める)。
+
+```bash
+aws dynamodb update-item --table-name $TABLE \
+  --key '{"fingerprint": {"S": "__control__:github_issue"}}' \
+  --update-expression "SET github_issue_kill_switch = :on, kill_switch_reason = :reason, kill_switch_set_at = :now REMOVE kill_switch_notified_at" \
+  --condition-expression "attribute_not_exists(github_issue_kill_switch) OR github_issue_kill_switch = :off" \
+  --expression-attribute-values '{":on": {"BOOL": true}, ":off": {"BOOL": false}, ":reason": {"S": "MANUAL"}, ":now": {"S": "2026-01-01T00:00:00+00:00"}}'
+```
+
+```
+・:now は実行時の UTC の ISO 8601 時刻(上は架空の例)
+・condition-expression は『まだ停止していないときだけ』成立する(実装と同じ条件)。既に停止中なら ConditionalCheckFailedException になる = 何も変わらない
+・次の signal から効く(制御項目は signal ごとに強い整合性で読む)。実行後は 38.3 で確認する
+・MANUAL は LINE へ通知されない
+・PowerShell での引用は未確認(38.3 の注記と同じ)
+```
+
+### 38.5 再開する(AWS の書込。実行ごとに USER の承認)
+
+**先に原因を確認してから再開する**(原因が残っていると、再開してもすぐ再停止する)。
+
+```
+1 停止の理由と時刻を 38.3 で確認する(kill_switch_reason / kill_switch_set_at)
+2 AUTO_GLOBAL_FLOOD の場合: 何が全体の上限を超えさせたかを調べる(GitHub の Issue 一覧・LINE の通知・fingerprint ごとの github_issue_suppressed_count)
+3 起票の量産が原因なら、GitHub 側の Issue の整理(close 等)は別の作業として USER が判断する(本手順は GitHub の Issue を操作しない)
+```
+
+```bash
+aws dynamodb update-item --table-name $TABLE \
+  --key '{"fingerprint": {"S": "__control__:github_issue"}}' \
+  --update-expression "SET github_issue_kill_switch = :off REMOVE kill_switch_notified_at" \
+  --condition-expression "github_issue_kill_switch = :on" \
+  --expression-attribute-values '{":on": {"BOOL": true}, ":off": {"BOOL": false}}'
+```
+
+```
+・項目を DELETE しない(窓ごとの件数・上限を超えた試行の数が消え、記録も失われる。false へ戻すだけにする)
+・false へ戻した項目は、次の停止(手動・自動)でそのまま使える
+```
+
+**同じ日(JST)に再開する場合の注意**: 再開しても、その窓で全体の上限に達している間は、新しい Issue は作られず、上限を超えた試行が
+数え続けられる。**しきい値に達していれば、次の signal で再び自動停止する**。選択肢は次のとおり(いずれも USER の判断):
+
+```
+A  JST の日付が替わる(窓が替わる)まで再開しない        追加の書込が要らない。通常はこれ
+B  上限値を引き上げる(38.7。配信が要る)
+C  上限を超えた試行の数を 0 に戻す(追加の AWS 書込。別の承認):
+
+   aws dynamodb update-item --table-name $TABLE \
+     --key '{"fingerprint": {"S": "__control__:github_issue"}}' \
+     --update-expression "SET global_denied_count = :zero" \
+     --condition-expression "attribute_exists(fingerprint)" \
+     --expression-attribute-values '{":zero": {"N": "0"}}'
+
+   (全体の作成件数 global_created_count は戻さない = 上限の意味を変えない)
+```
+
+再開後の確認: 38.3 で github_issue_kill_switch = false を確認し、次の incident で Issue が作られる / 抑止の理由が fingerprint の行に
+残ることを確認する(起票の量産が再発していないかを見る)。
+
+### 38.6 自動停止の通知が届かない場合
+
+```
+・LINE への通知は『確保 -> push -> 失敗なら解放』で 1 回だけ。push に失敗した場合は kill_switch_notified_at が消え、次の signal で再試行される
+・incident の signal が当面来ない場合は、通知も当面来ない(停止自体は有効)。定期的に 38.3 で確認できる
+・手動停止(MANUAL)は通知しない。通知が届かなかったのではない
+```
+
+### 38.7 上限値を変更する(配信が要る。AWS への直接の書込ではない)
+
+上限値は `config/incident_issue_limits.yaml`(ConfigLayer)にある。**実行中の Lambda の値は、新しい ConfigLayer の version を
+配信するまで変わらない**(即時には変えられない)。
+
+```
+項目                              意味
+new_issue_min_interval_minutes    同じ fingerprint で、前回の作成からこの分数が経つまで新規を作らない
+new_issue_limit_per_fingerprint   fingerprint あたり、1 窓(JST の日付)に作れる新規の最大件数
+new_issue_limit_global            全体で、1 窓に作れる新規の最大件数
+auto_stop_denied_threshold        全体の上限を超えた試行がこの回数に達したら自動停止
+```
+
+```
+1 値を決める(USER の決定。AI は値を決めない)
+2 config/incident_issue_limits.yaml を、null から正の整数へ変更する PR(コード / config の PR。独立 review・CI。merge の合図は管理者)
+3 反映前に手元で検証する(読取のみ。AWS に接続しない):
+
+   python -c "from jstock_advisor.domain.notification.incident_issue_limits import load_incident_issue_limits as l; print(l().missing())"
+
+   -> () が出れば、4 項目が全て決定済み。未決定の項目名が出れば、まだ新規 Issue は作られない
+4 新しい ConfigLayer の version の配信(ChangeSet の CREATE / EXECUTE は各別の USER の承認。34.1 と同じ)
+5 反映後に 38.3 で挙動を確認する
+```
+
+```
+・4 項目は全て正の整数。1 つでも 0 以下・小数・真偽値・文字列・未知のキーがあれば、ファイル全体が『未決定』に縮退する(安全側 = 新規 Issue を作らない)。
+  縮退は WARNING として CloudWatch Logs に残る(型だけ。値は出ない)
+・null のままの項目が 1 つでもあれば、その間は新規 Issue を作らない(OPEN の Issue へのコメントは続く)
+・窓は JST の日付。窓が替わると、件数は 0 から数え直す
+```
+
+### 38.8 してはいけないこと
+
+```
+・制御項目 __control__:github_issue を DELETE する(記録が失われる。false へ戻す)
+・IncidentStateTable を Scan する・TTL を設定する(制御項目が消える・全件走査になる)
+・USER の承認なしに、停止・再開・カウンタの書込を実行する
+・結果の識別子・fingerprint・時刻を公開面(Issue・PR・コメント)へそのまま貼る
+```
+
+### 38.9 この節が確認していないこと(未確認)
+
+```
+・観測用 role(jstock-observer)が <TablePrefix>-incident_state の GetItem を許可されているか(AWS に接続していない)
+・書込に使う資格情報と実施主体(本節は指定しない。実行の前に USER の承認とあわせて決める)
+・PowerShell での JSON の引用(上のコマンドは bash 用。PowerShell では未実行)
+・本節のコマンドの実行結果(いずれも実行していない。PR #928 の反映前は、制御項目はまだ存在しない)
+・上限値の具体的な数値(USER の決定。本節は数値を決めない)
+```
+
+### 38.10 参考
+
+```
+・設計・実装: Issue #926 / PR #928。USER 判断 #122 issuecomment-6114810773 の【1】
+・直接の AWS 操作 = Human Gate の先例: 34.2
+・異常を知ったときの手順: 27節
+```
