@@ -10,7 +10,8 @@ true にする(その切替は別の USER 承認)。
 
 ## 何を検証するか
 
-    (a) 出荷 config は false で、YAML の真偽値として読める(`"false"` `no` のような文字列ではない)。
+    (a) 出荷 config は false で、YAML の真偽値として読める(引用符つきの文字列ではない。
+        `"false"` などは不可。YAML の `no` / `off` は bool の False として読まれ、値も型も同じ)。
         他の値(dedup_window_minutes など)・キーの集合・label は #876 の前後で変えていない
     (b) 出荷 config のまま(テスト側で config を上書きしない)なら、配線(環境変数)が揃っていても
         GitHub を一切呼ばない。LINE は送られ、状態は SENT のまま(これが今回の Production の状態)
@@ -61,7 +62,7 @@ _NOW = dt.datetime(2026, 9, 25, 0, 0, tzinfo=dt.UTC)
 
 def test_shipped_config_keeps_issue_creation_disabled_as_a_real_boolean() -> None:
     raw = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8"))
-    assert raw["issue_creation_enabled"] is False  # 文字列の "false" / "no" ではない
+    assert raw["issue_creation_enabled"] is False  # 引用符つきの文字列("false" など)ではない
     assert load_config().incident_notification.issue_creation_enabled is False
 
 
@@ -233,12 +234,14 @@ def test_with_shipped_config_and_full_wiring_github_is_never_called(
     fake = _install_urlopen(monkeypatch, [])
     message = _alarm_message()
 
-    # handler の load_config を上書きしない = 出荷 config がそのまま使われる
-    result = handler_module.handler(_sns_event(message), None)
+    # handler の load_config を上書きしない = 出荷 config がそのまま使われる。
+    # 同じ signal を 3 回届けても(再配信・再試行を想定)、GitHub は一度も呼ばれない
+    for _ in range(3):
+        result = handler_module.handler(_sns_event(message), None)
+        assert result == {"processed": 1}
 
-    assert result == {"processed": 1}
     assert fake.requests == []  # installation token の取得も Issue の作成もない
-    assert len(line.sent) == 1  # LINE は送られる
+    assert len(line.sent) == 1  # LINE は 1 通(2 回目以降は LINE 側の dedup で抑止される)
     state = tracker.get_incident_state(_fingerprint_of(message))
     assert state["status"] == "SENT"
     assert "github_issue_create_status" not in state  # 無効の間は状態も書かない
