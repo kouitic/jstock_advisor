@@ -364,18 +364,32 @@ def test_the_control_item_does_not_disturb_the_line_claim_of_any_fingerprint() -
     assert outcome is tracker.IncidentClaimOutcome.CLAIMED_NEW and token is not None
 
 
-def test_the_tracker_never_scans_or_queries_the_table() -> None:
-    # 同表を全件 Scan / Query する経路は無い(制御項目が想定外の行として集計・走査されない)
+def test_the_tracker_calls_only_key_addressed_table_apis() -> None:
+    """tracker が `_table()` に呼ぶ DynamoDB の API は、key を指定する 4 つだけ(allowlist)。
+
+    Scan / Query / BatchGetItem 等の全件・範囲の走査が混ざらない = 制御項目が想定外の行として
+    集計・走査されない。対象は本 module の `_table().<method>(...)` の形の呼び出しで、
+    他の module がこのテーブルを別の経路で開く場合は、下の『表名の literal』のテストが見る。
+    """
     tree = ast.parse(Path(tracker.__file__).read_text(encoding="utf-8"))
-    names = {
-        (n.func.attr if isinstance(n.func, ast.Attribute) else getattr(n.func, "id", ""))
+    called = {
+        n.func.attr
         for n in ast.walk(tree)
         if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and isinstance(n.func.value, ast.Call)
+        and getattr(n.func.value.func, "id", "") == "_table"
     }
-    assert not names & {"scan", "query", "batch_get_item", "list_tables"}
+    assert called, "`_table().<method>()` の呼び出しが見つからない(検出器の不具合)"
+    assert called <= {"get_item", "put_item", "update_item", "delete_item"}
 
 
-def test_no_other_source_reads_the_incident_state_table() -> None:
+def test_only_the_tracker_names_the_incident_state_table_literal() -> None:
+    """表名の literal を含む src のファイルは tracker だけ。
+
+    handler と service は tracker の関数を import して使う(表を直接開かない)。
+    これは『表名の literal』の検査で、動的に組み立てた表名や別名までは見ない。
+    """
     src = _REPO / "src" / "jstock_advisor"
     readers = []
     for path in src.rglob("*.py"):
@@ -386,6 +400,11 @@ def test_no_other_source_reads_the_incident_state_table() -> None:
 
 
 def test_the_table_has_no_ttl_so_the_control_item_is_never_expired() -> None:
+    """template の IncidentStateTable と IncidentNotifierFunction の見出しの間に、TTL の設定が無い。
+
+    範囲は 2 つの見出しの文字列で切り出す(間に別の resource が入れば範囲が変わる。
+    どちらかの見出しが無くなれば例外で落ちる = 安全側)。
+    """
     text = (_REPO / "infra" / "template.yaml").read_text(encoding="utf-8")
     start = text.index("\n  IncidentStateTable:")
     end = text.index("\n  IncidentNotifierFunction:", start)
@@ -541,3 +560,128 @@ def test_creation_records_a_zero_occurrence_too() -> None:
     tracker.try_claim_new_github_issue_creation(_FP, _NOW, 10)
     tracker.mark_github_issue_created(_FP, 7, created_at=_NOW, occurrence_count=0)
     assert int(_state()["github_issue_last_created_occurrence"]) == 0
+
+
+# --- 『予算を消費した』印(stale 復旧が二重に消費しない・消費を飛ばさない。Issue #926)
+# ------------------------------------------------------------------------------------
+
+
+def _claim(fingerprint: str = _FP) -> None:
+    _row(fingerprint)
+    assert tracker.try_claim_new_github_issue_creation(fingerprint, _NOW, 10) is True
+
+
+def test_the_budget_mark_is_written_only_while_a_claim_is_creating() -> None:
+    _row()
+    tracker.mark_github_issue_budget_consumed(_FP, _W1)  # claim が無い
+    assert "github_issue_budget_window" not in _state()
+    _claim_after_row = tracker.try_claim_new_github_issue_creation(_FP, _NOW, 10)
+    assert _claim_after_row is True
+    tracker.mark_github_issue_budget_consumed(_FP, _W1)
+    assert _state()["github_issue_budget_window"] == _W1
+
+
+def test_the_budget_mark_never_creates_a_row() -> None:
+    tracker.mark_github_issue_budget_consumed(_FP, _W1)
+    tracker.clear_github_issue_budget_window(_FP)
+    assert tracker.get_incident_state(_FP) is None
+
+
+def test_clearing_the_budget_mark_removes_only_the_mark() -> None:
+    _claim()
+    tracker.mark_github_issue_budget_consumed(_FP, _W1)
+    tracker.clear_github_issue_budget_window(_FP)
+    st = _state()
+    assert "github_issue_budget_window" not in st
+    assert st["github_issue_create_status"] == "CREATING"  # claim は残る
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    [
+        lambda: tracker.mark_github_issue_created(_FP, 7),
+        lambda: tracker.mark_github_issue_creation_failed(_FP),
+        lambda: tracker.mark_github_issue_configuration_error(_FP),
+        lambda: tracker.mark_github_issue_suppressed(_FP, guard.DenyReason.GLOBAL_LIMIT, _NOW),
+    ],
+    ids=["created", "failed", "configuration_error", "suppressed"],
+)
+def test_every_terminal_state_clears_the_budget_mark(terminal: Callable[[], None]) -> None:
+    _claim()
+    tracker.mark_github_issue_budget_consumed(_FP, _W1)
+    terminal()
+    assert "github_issue_budget_window" not in _state()
+
+
+def test_a_new_claim_does_not_inherit_an_old_budget_mark() -> None:
+    _row()
+    tracker._table().update_item(
+        Key={"fingerprint": _FP},
+        UpdateExpression="SET github_issue_budget_window = :w",
+        ExpressionAttributeValues={":w": _W1},
+    )
+    assert tracker.try_claim_new_github_issue_creation(_FP, _NOW, 10) is True
+    assert "github_issue_budget_window" not in _state()
+
+
+def test_a_stale_reclaim_keeps_the_budget_mark() -> None:
+    _claim()
+    tracker.mark_github_issue_budget_consumed(_FP, _W1)
+    claimed_at = _state()["github_issue_claimed_at"]
+    later = _NOW + dt.timedelta(minutes=11)
+    assert tracker.try_reclaim_stale_github_issue_creation(_FP, claimed_at, later, 10) is True
+    assert _state()["github_issue_budget_window"] == _W1
+
+
+# --- 窓の切替の競合で、予算に余裕があるのに拒否しない(record_global_denied と同じ再試行)
+# ------------------------------------------------------------------------------------
+
+
+def _concurrent_window_start(count: int) -> Callable[[], None]:
+    real = tracker._table()
+
+    def action() -> None:
+        # 自分の窓の切替(SET)の直前に、別の実行が同じ窓を先に始めて count まで数えた
+        real.update_item(
+            Key={"fingerprint": _FP},
+            UpdateExpression=(
+                "SET github_issue_window_id = :w, github_issue_window_created_count = :c"
+            ),
+            ExpressionAttributeValues={":w": _W1, ":c": count},
+        )
+
+    return action
+
+
+def test_a_lost_window_switch_race_still_consumes_when_there_is_room(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _row()
+    _plan(monkeypatch, {2: _concurrent_window_start(0)})
+    assert tracker.try_consume_fingerprint_budget(_FP, _W1, 2) is True
+    assert int(_state()["github_issue_window_created_count"]) == 1
+
+
+def test_a_lost_window_switch_race_is_still_denied_at_the_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _row()
+    _plan(monkeypatch, {2: _concurrent_window_start(2)})
+    assert tracker.try_consume_fingerprint_budget(_FP, _W1, 2) is False
+    assert int(_state()["github_issue_window_created_count"]) == 2  # 超過して数えない
+
+
+def test_marking_the_budget_propagates_an_unexpected_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    _claim()
+    _plan(monkeypatch, {1: _raise_unexpected})
+    with pytest.raises(ClientError):
+        tracker.mark_github_issue_budget_consumed(_FP, _W1)
+
+
+def test_clearing_the_budget_mark_propagates_an_unexpected_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _claim()
+    _plan(monkeypatch, {1: _raise_unexpected})
+    with pytest.raises(ClientError):
+        tracker.clear_github_issue_budget_window(_FP)

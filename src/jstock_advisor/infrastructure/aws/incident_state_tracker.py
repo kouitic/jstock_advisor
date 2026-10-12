@@ -364,7 +364,8 @@ def try_claim_new_github_issue_creation(
             Key={"fingerprint": fingerprint},
             UpdateExpression=(
                 "SET github_issue_create_status = :creating, "
-                "github_issue_claimed_at = :now, github_issue_claim_expires_at = :expires"
+                "github_issue_claimed_at = :now, github_issue_claim_expires_at = :expires "
+                "REMOVE github_issue_budget_window"
             ),
             ConditionExpression=(
                 "attribute_not_exists(github_issue_create_status) OR "
@@ -457,7 +458,8 @@ def mark_github_issue_created(
         UpdateExpression=(
             "SET "
             + ", ".join(sets)
-            + " REMOVE github_issue_claimed_at, github_issue_claim_expires_at"
+            + " REMOVE github_issue_claimed_at, github_issue_claim_expires_at,"
+            + " github_issue_budget_window"
         ),
         ExpressionAttributeValues=values,
     )
@@ -471,12 +473,48 @@ def mark_github_issue_creation_failed(fingerprint: str) -> None:
         Key={"fingerprint": fingerprint},
         UpdateExpression=(
             "SET github_issue_create_status = :failed "
-            "REMOVE github_issue_claimed_at, github_issue_claim_expires_at"
+            "REMOVE github_issue_claimed_at, github_issue_claim_expires_at, "
+            "github_issue_budget_window"
         ),
         ExpressionAttributeValues={
             ":failed": IncidentGithubIssueStatus.ISSUE_CREATION_FAILED.value
         },
     )
+
+
+def mark_github_issue_budget_consumed(fingerprint: str, window: str) -> None:
+    """この claim の作成のために、`window` の予算(fingerprint 単位と全体)を消費したことを行に残す。
+
+    stale 復旧(別の起動が claim を引き継ぐ)は、この印が現在の窓と一致するときだけ『消費済み』と
+    みなして再消費しない。印が無い(claim と消費の間で落ちた)・窓が違うときは、復旧も事前確認と
+    消費を通す(Issue #926: 上限を超えて起票しない)。CREATING の claim が無ければ何もしない。
+    """
+    try:
+        _table().update_item(
+            Key={"fingerprint": fingerprint},
+            UpdateExpression="SET github_issue_budget_window = :w",
+            ConditionExpression="github_issue_create_status = :creating",
+            ExpressionAttributeValues={
+                ":w": window,
+                ":creating": IncidentGithubIssueStatus.CREATING.value,
+            },
+        )
+    except ClientError as e:
+        if not _is_condition_failure(e):
+            raise
+
+
+def clear_github_issue_budget_window(fingerprint: str) -> None:
+    """『予算を消費した』印を消す(予算を返す前に呼ぶ。印が残ったまま返すと、復旧が消費せずに起票する)。"""
+    try:
+        _table().update_item(
+            Key={"fingerprint": fingerprint},
+            UpdateExpression="REMOVE github_issue_budget_window",
+            ConditionExpression="attribute_exists(fingerprint)",
+        )
+    except ClientError as e:
+        if not _is_condition_failure(e):
+            raise
 
 
 def mark_github_issue_configuration_error(fingerprint: str) -> None:
@@ -488,7 +526,8 @@ def mark_github_issue_configuration_error(fingerprint: str) -> None:
         Key={"fingerprint": fingerprint},
         UpdateExpression=(
             "SET github_issue_create_status = :error "
-            "REMOVE github_issue_claimed_at, github_issue_claim_expires_at"
+            "REMOVE github_issue_claimed_at, github_issue_claim_expires_at, "
+            "github_issue_budget_window"
         ),
         ExpressionAttributeValues={":error": IncidentGithubIssueStatus.CONFIGURATION_ERROR.value},
     )
@@ -616,31 +655,36 @@ def _consume_budget(
 ) -> bool:
     row = " AND attribute_exists(fingerprint)" if require_row else ""
     names = {"#w": window_attr, "#c": count_attr}
-    try:
-        _table().update_item(
-            Key={"fingerprint": key},
-            UpdateExpression="ADD #c :one",
-            ConditionExpression=f"#w = :w AND #c < :limit{row}",
-            ExpressionAttributeNames=names,
-            ExpressionAttributeValues={":w": window, ":limit": limit, ":one": 1},
-        )
-        return True
-    except ClientError as e:
-        if not _is_condition_failure(e):
-            raise
-    try:
-        _table().update_item(
-            Key={"fingerprint": key},
-            UpdateExpression="SET #w = :w, #c = :one",
-            ConditionExpression=f"(attribute_not_exists(#w) OR #w <> :w){row}",
-            ExpressionAttributeNames=names,
-            ExpressionAttributeValues={":w": window, ":one": 1},
-        )
-        return True
-    except ClientError as e:
-        if _is_condition_failure(e):
-            return False
-        raise
+    # 窓の切替の競合(別の実行が先に新しい窓を始めた)に備え、1 回だけ再試行する。上限そのものでの
+    # 拒否(窓が同じで件数が上限)は再試行しても結果が変わらず、行が無いときも同じ(False)。
+    for attempt in range(2):
+        try:
+            _table().update_item(
+                Key={"fingerprint": key},
+                UpdateExpression="ADD #c :one",
+                ConditionExpression=f"#w = :w AND #c < :limit{row}",
+                ExpressionAttributeNames=names,
+                ExpressionAttributeValues={":w": window, ":limit": limit, ":one": 1},
+            )
+            return True
+        except ClientError as e:
+            if not _is_condition_failure(e):
+                raise
+        if attempt == 1:
+            return False  # 窓を切り替える SET に競合で負けた後の加算でも通らない = 上限
+        try:
+            _table().update_item(
+                Key={"fingerprint": key},
+                UpdateExpression="SET #w = :w, #c = :one",
+                ConditionExpression=f"(attribute_not_exists(#w) OR #w <> :w){row}",
+                ExpressionAttributeNames=names,
+                ExpressionAttributeValues={":w": window, ":one": 1},
+            )
+            return True
+        except ClientError as e:
+            if not _is_condition_failure(e):
+                raise
+    return False
 
 
 def _refund_budget(key: str, window_attr: str, count_attr: str, window: str) -> None:
@@ -805,7 +849,8 @@ def mark_github_issue_suppressed(fingerprint: str, reason: DenyReason, now: dt.d
             UpdateExpression=(
                 "SET github_issue_create_status = :suppressed, "
                 "github_issue_last_denied_reason = :reason, github_issue_last_denied_at = :now "
-                "REMOVE github_issue_claimed_at, github_issue_claim_expires_at "
+                "REMOVE github_issue_claimed_at, github_issue_claim_expires_at, "
+                "github_issue_budget_window "
                 "ADD github_issue_suppressed_count :one"
             ),
             ConditionExpression="attribute_exists(fingerprint)",

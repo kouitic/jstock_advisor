@@ -205,35 +205,65 @@ def _create_new_issue(
         fingerprint, now, config.github_issue_claim_timeout_minutes
     )
     if not claimed:
-        _reconcile_stale_issue_creation(client, notice, config, now, previous_issue_number)
-        return guard.IssueGuardOutcome()
+        return _reconcile_stale_issue_creation(
+            client, notice, config, now, limits, previous_issue_number
+        )
 
-    # 層2: 上限の消費(原子的)。事前確認を通った = 上限は決定済み(None ではない)。
+    return _consume_and_create(
+        client, notice, config, now, limits, previous_issue_number, budget_consumed=False
+    )
+
+
+def _consume_and_create(
+    client: GithubIssueClient,
+    notice: IncidentIssueNotice,
+    config: IncidentNotificationConfig,
+    now: dt.datetime,
+    limits: IncidentIssueLimits,
+    previous_issue_number: int | None,
+    *,
+    budget_consumed: bool,
+) -> guard.IssueGuardOutcome:
+    """claim を持つ起動が、上限の予算を消費して Issue を作る(層 2・3)。
+
+    `budget_consumed` は、stale 復旧で、元の起動が**今の窓の**予算を消費した印を行に見つけたときだけ
+    True にする。claim は予算の消費より先に取られるため、claim の直後(消費の前)に落ちた起動の後の
+    復旧は印が無く、消費を通す(上限を超えて起票しない。Issue #926)。
+    """
+    fingerprint = notice.fingerprint
     window = guard.window_id(now)
-    per_fingerprint = cast(int, limits.new_issue_limit_per_fingerprint)
-    global_limit = cast(int, limits.new_issue_limit_global)
-    threshold = cast(int, limits.auto_stop_denied_threshold)
-    if not tracker.try_consume_fingerprint_budget(fingerprint, window, per_fingerprint):
-        tracker.mark_github_issue_suppressed(fingerprint, guard.DenyReason.FINGERPRINT_LIMIT, now)
-        return guard.IssueGuardOutcome()
-    if not tracker.try_consume_global_budget(window, global_limit):
-        tracker.refund_fingerprint_budget(fingerprint, window)
-        tracker.mark_github_issue_suppressed(fingerprint, guard.DenyReason.GLOBAL_LIMIT, now)
-        # 全体の上限を超えた試行の数だけが自動停止の入力(fingerprint単位の抑止は入力にしない)
-        if tracker.record_global_denied(window) >= threshold and tracker.try_trip_kill_switch(
-            now, guard.KILL_SWITCH_REASON_AUTO
-        ):
-            return guard.IssueGuardOutcome(auto_stop_notification_due=True)
-        return guard.IssueGuardOutcome()
+
+    if not budget_consumed:
+        # 事前確認を通った = 上限は決定済み(None ではない)。
+        per_fingerprint = cast(int, limits.new_issue_limit_per_fingerprint)
+        global_limit = cast(int, limits.new_issue_limit_global)
+        threshold = cast(int, limits.auto_stop_denied_threshold)
+        if not tracker.try_consume_fingerprint_budget(fingerprint, window, per_fingerprint):
+            tracker.mark_github_issue_suppressed(
+                fingerprint, guard.DenyReason.FINGERPRINT_LIMIT, now
+            )
+            return guard.IssueGuardOutcome()
+        if not tracker.try_consume_global_budget(window, global_limit):
+            tracker.refund_fingerprint_budget(fingerprint, window)
+            tracker.mark_github_issue_suppressed(fingerprint, guard.DenyReason.GLOBAL_LIMIT, now)
+            # 全体の上限を超えた試行の数だけが自動停止の入力(fingerprint単位の抑止は入力にしない)
+            if tracker.record_global_denied(window) >= threshold and tracker.try_trip_kill_switch(
+                now, guard.KILL_SWITCH_REASON_AUTO
+            ):
+                return guard.IssueGuardOutcome(auto_stop_notification_due=True)
+            return guard.IssueGuardOutcome()
 
     try:
+        if not budget_consumed:
+            # 消費したことを行に残す(stale 復旧が二重に消費しないため)
+            tracker.mark_github_issue_budget_consumed(fingerprint, window)
         title = build_incident_issue_title(notice)
         body = build_incident_issue_body(notice, previous_issue_number=previous_issue_number)
         issue = client.create_issue(title, body, config.issue_labels, now)
     except Exception:
         # 作成に失敗したら予算を返す(GitHubの障害中に予算だけが減らない)。
         # 呼び出し側が失敗として記録する。
-        _refund_budgets(fingerprint, window)
+        _release_budgets(fingerprint, window)
         raise
     tracker.mark_github_issue_created(
         fingerprint,
@@ -245,8 +275,19 @@ def _create_new_issue(
     return guard.IssueGuardOutcome()
 
 
-def _refund_budgets(fingerprint: str, window: str) -> None:
-    """消費した予算を返す。返却の失敗は握る(元の失敗を隠さない。予算は多めに消費された側=安全側)。"""
+def _release_budgets(fingerprint: str, window: str) -> None:
+    """消費した予算を返す。失敗は握る(元の失敗を隠さない。返せなければ多めに消費された側=安全側)。
+
+    先に『消費済み』の印を消す。印が残ったまま返すと、後の stale 復旧が『消費済み』とみなして
+    消費せずに起票する(返した分だけ上限を超える)。印を消せなかったときは返さない。
+    """
+    try:
+        tracker.clear_github_issue_budget_window(fingerprint)
+    except Exception:
+        logger.warning(
+            "incident_github_issue_service budget mark clear failed (budgets kept consumed)"
+        )
+        return
     try:
         tracker.refund_fingerprint_budget(fingerprint, window)
     except Exception:
@@ -264,24 +305,27 @@ def _reconcile_stale_issue_creation(
     notice: IncidentIssueNotice,
     config: IncidentNotificationConfig,
     now: dt.datetime,
+    limits: IncidentIssueLimits,
     previous_issue_number: int | None,
-) -> None:
+) -> guard.IssueGuardOutcome:
     state = tracker.get_incident_state(notice.fingerprint)
     if (
         state is None
         or state.get("github_issue_create_status")
         != tracker.IncidentGithubIssueStatus.CREATING.value
     ):
-        return  # 他実行が既に別状態(CREATED/FAILED等)へ進めた。何もしない。
+        return (
+            guard.IssueGuardOutcome()
+        )  # 他実行が既に別状態(CREATED/FAILED等)へ進めた。何もしない。
 
     expires_raw = state.get("github_issue_claim_expires_at")
     claimed_raw = state.get("github_issue_claimed_at")
     if not expires_raw or not claimed_raw:
-        return  # 他実行が処理中
+        return guard.IssueGuardOutcome()  # 他実行が処理中
 
     expires_at = dt.datetime.fromisoformat(expires_raw)
     if now < expires_at:
-        return  # 他実行が処理中(未失効)
+        return guard.IssueGuardOutcome()  # 他実行が処理中(未失効)
 
     # stale: 先にGitHub側の実在確認(二重Issue作成を防ぐ)。
     marker = issue_marker(notice.fingerprint)
@@ -290,23 +334,18 @@ def _reconcile_stale_issue_creation(
         tracker.mark_github_issue_created(
             notice.fingerprint, found.number, previous_issue_number=previous_issue_number
         )
-        return
+        return guard.IssueGuardOutcome()
 
     if not tracker.try_reclaim_stale_github_issue_creation(
         notice.fingerprint, claimed_raw, now, config.github_issue_claim_timeout_minutes
     ):
-        return  # 他実行に先を越された
+        return guard.IssueGuardOutcome()  # 他実行に先を越された
 
-    title = build_incident_issue_title(notice)
-    body = build_incident_issue_body(notice, previous_issue_number=previous_issue_number)
-    issue = client.create_issue(title, body, config.issue_labels, now)
-    # 元のclaimで予算は消費済み(再消費しない)。作成の時刻・occurrenceは次の抑止の入力に残す。
-    tracker.mark_github_issue_created(
-        notice.fingerprint,
-        issue.number,
-        previous_issue_number=previous_issue_number,
-        created_at=now,
-        occurrence_count=notice.occurrence_count,
+    # 元の起動が今の窓の予算を消費していれば再消費しない。印が無い(消費の前に落ちた)・窓が違うときは
+    # 消費を通す。事前確認(最小間隔・同じ occurrence)は、この signal について呼び出し元で通過済み。
+    consumed = state.get("github_issue_budget_window") == guard.window_id(now)
+    return _consume_and_create(
+        client, notice, config, now, limits, previous_issue_number, budget_consumed=consumed
     )
 
 

@@ -183,3 +183,20 @@ def test_the_module_imports_no_infrastructure_and_reads_no_clock() -> None:
             func = node.func
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
             assert name not in {"now", "utcnow", "today"}, name
+
+
+# --- 不正な値は、4 項目のどれでもファイル全体を未決定へ縮退させる(StrictInt を緩めると落ちる)
+# -----------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", _FIELDS)
+@pytest.mark.parametrize(
+    "literal",
+    ["'5'", "'360'", "true", "false", "0", "-3", "2.5", ".nan", ".inf"],
+    ids=["str5", "str360", "true", "false", "zero", "negative", "float", "nan", "inf"],
+)
+def test_an_invalid_value_in_any_of_the_four_items_makes_the_whole_file_undecided(
+    tmp_path: Path, name: str, literal: str
+) -> None:
+    text = _decided_yaml(**{name: literal})
+    assert load_incident_issue_limits(_write(tmp_path, text)) == undecided_limits()

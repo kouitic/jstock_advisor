@@ -99,6 +99,7 @@ class FakeGithub:
         self.state: dict[int, str] = {}
         self.requests: list[tuple[str, str]] = []
         self.fail_create = False
+        self.before_create: Any = None  # 作成の直前に呼ぶ(行の状態を観測する)
 
     def __call__(self, request: Any, timeout: int = 15) -> Any:
         method, url = request.get_method(), request.full_url
@@ -108,6 +109,8 @@ class FakeGithub:
         if method == "POST" and url.endswith("/comments"):
             return _Resp(None)
         if method == "POST" and url.endswith("/issues"):
+            if self.before_create is not None:
+                self.before_create()
             if self.fail_create:
                 raise urllib.error.URLError("boom")
             number = self.next_number
@@ -633,3 +636,152 @@ def test_a_failing_global_refund_does_not_hide_the_fingerprint_refund(
     line_row(_FP_A)
     run(secret_arn, config, decided())
     assert int(state().get("github_issue_window_created_count", 0)) == 0
+
+
+# --- stale 復旧は、上限を超えて起票しない・二重に消費しない(PR #928 の独立 review の SHOULD-1) ---
+
+
+def _later(config: Any) -> dt.datetime:
+    return _NOW + dt.timedelta(minutes=config.github_issue_claim_timeout_minutes + 1)
+
+
+def _crash_after_claim(config: Any, fingerprint: str) -> None:
+    """claim を取った直後(予算の消費の前)に落ちた起動の状態を作る。"""
+    line_row(fingerprint)
+    assert tracker.try_claim_new_github_issue_creation(
+        fingerprint, _NOW, config.github_issue_claim_timeout_minutes
+    )
+
+
+def _crash_after_consumption(config: Any, fingerprint: str) -> None:
+    """予算を消費して印を残した直後(作成の前)に落ちた起動の状態を作る。"""
+    _crash_after_claim(config, fingerprint)
+    window = guard.window_id(_NOW)
+    assert tracker.try_consume_fingerprint_budget(fingerprint, window, 2)
+    assert tracker.try_consume_global_budget(window, 5)
+    tracker.mark_github_issue_budget_consumed(fingerprint, window)
+
+
+def _counts(fingerprint: str) -> tuple[int, int]:
+    control = tracker.read_github_issue_control() or {}
+    return (
+        int(state(fingerprint).get("github_issue_window_created_count", 0)),
+        int(control.get("global_created_count", 0)),
+    )
+
+
+def test_a_recovery_after_a_crash_before_consumption_never_exceeds_the_global_limit(
+    secret_arn, config, github
+) -> None:
+    limits = decided(new_issue_limit_global=1)
+    line_row(_FP_A)
+    run(secret_arn, config, limits, fingerprint=_FP_A)  # 全体の上限(1)を使い切る
+    _crash_after_claim(config, _FP_B)
+    run(secret_arn, config, limits, fingerprint=_FP_B, now=_later(config))
+    assert github.creations == 1  # 復旧が上限を超えて 2 件目を作らない
+    assert state(_FP_B)["github_issue_create_status"] == "SUPPRESSED"
+    assert state(_FP_B)["github_issue_last_denied_reason"] == "GLOBAL_LIMIT"
+    assert "github_issue_claimed_at" not in state(_FP_B)
+
+
+def test_a_recovery_after_a_crash_before_consumption_consumes_exactly_once(
+    secret_arn, config, github
+) -> None:
+    _crash_after_claim(config, _FP_A)
+    assert _counts(_FP_A) == (0, 0)
+    run(secret_arn, config, decided(), fingerprint=_FP_A, occurrence=2, now=_later(config))
+    assert github.creations == 1
+    assert state()["github_issue_create_status"] == "CREATED"
+    assert _counts(_FP_A) == (1, 1)
+    assert "github_issue_budget_window" not in state()
+
+
+def test_a_recovery_after_a_crash_before_consumption_respects_the_fingerprint_limit(
+    secret_arn, config, github
+) -> None:
+    limits = decided(new_issue_limit_per_fingerprint=1, new_issue_min_interval_minutes=1)
+    line_row(_FP_A)
+    run(secret_arn, config, limits)  # この fingerprint の 1 窓の上限(1)を使い切る
+    github.close_all()
+    tracker.mark_github_issue_creation_failed(_FP_A)  # 次の claim ができる状態へ
+    assert tracker.try_claim_new_github_issue_creation(
+        _FP_A, _NOW, config.github_issue_claim_timeout_minutes
+    )
+    run(secret_arn, config, limits, occurrence=2, now=_later(config))
+    assert github.creations == 1
+    assert state()["github_issue_last_denied_reason"] == "FINGERPRINT_LIMIT"
+
+
+def test_a_recovery_after_a_crash_after_consumption_does_not_consume_again(
+    secret_arn, config, github
+) -> None:
+    _crash_after_consumption(config, _FP_A)
+    assert _counts(_FP_A) == (1, 1)
+    run(secret_arn, config, decided(), fingerprint=_FP_A, occurrence=2, now=_later(config))
+    assert github.creations == 1
+    assert state()["github_issue_create_status"] == "CREATED"
+    assert _counts(_FP_A) == (1, 1)  # 二重に消費しない
+    assert "github_issue_budget_window" not in state()
+
+
+def test_a_budget_mark_from_another_window_is_not_trusted(secret_arn, config, github) -> None:
+    _crash_after_claim(config, _FP_A)
+    tracker.mark_github_issue_budget_consumed(_FP_A, "2026-10-11")  # 前日の窓で消費した印
+    run(secret_arn, config, decided(), occurrence=2, now=_later(config))
+    assert github.creations == 1
+    assert _counts(_FP_A) == (1, 1)  # 今の窓では、改めて消費する
+
+
+def test_a_failed_recovery_returns_the_budget_and_clears_the_mark(
+    secret_arn, config, github
+) -> None:
+    _crash_after_consumption(config, _FP_A)
+    github.fail_create = True
+    run(secret_arn, config, decided(), occurrence=2, now=_later(config))
+    assert state()["github_issue_create_status"] == "ISSUE_CREATION_FAILED"
+    assert "github_issue_budget_window" not in state()
+    assert _counts(_FP_A) == (0, 0)  # 印を消してから返す = 後の復旧が消費せずに起票しない
+
+
+def test_the_budget_mark_is_present_while_the_issue_is_being_created(
+    secret_arn, config, github
+) -> None:
+    seen: list[object] = []
+    github.before_create = lambda: seen.append(state().get("github_issue_budget_window"))
+    line_row(_FP_A)
+    run(secret_arn, config, decided())
+    assert seen == [guard.window_id(_NOW)]
+    assert "github_issue_budget_window" not in state()  # 作成後は消える
+
+
+def test_an_unexpected_error_after_consumption_clears_the_mark_and_returns_the_budget(
+    monkeypatch: pytest.MonkeyPatch, secret_arn, config, github
+) -> None:
+    def boom(*a: object, **k: object) -> str:
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(service, "build_incident_issue_title", boom)
+    line_row(_FP_A)
+    outcome = run(secret_arn, config, decided())
+    assert outcome == guard.IssueGuardOutcome()  # 例外は伝播しない
+    st = state()
+    assert (
+        st["github_issue_create_status"] == "CREATING"
+    )  # 終端の状態にはならない(stale 復旧の対象)
+    assert "github_issue_budget_window" not in st
+    assert _counts(_FP_A) == (0, 0)
+    assert github.creations == 0
+
+
+def test_when_the_mark_cannot_be_cleared_the_budget_stays_consumed(
+    monkeypatch: pytest.MonkeyPatch, secret_arn, config, github
+) -> None:
+    def boom(*a: object, **k: object) -> None:
+        raise RuntimeError("dynamodb")
+
+    monkeypatch.setattr(tracker, "clear_github_issue_budget_window", boom)
+    github.fail_create = True
+    line_row(_FP_A)
+    run(secret_arn, config, decided())
+    # 印が残るなら、返さない(返すと、後の復旧が『消費済み』とみなして上限を超える)
+    assert _counts(_FP_A) == (1, 1)
