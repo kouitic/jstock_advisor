@@ -11,10 +11,13 @@ from __future__ import annotations
 import ast
 import datetime as dt
 import re
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 from moto import mock_aws
 
 from jstock_advisor.domain.notification import incident_issue_guard as guard
@@ -396,3 +399,145 @@ def test_the_tracker_sets_no_ttl_attribute() -> None:
     text = Path(tracker.__file__).read_text(encoding="utf-8")
     # docstring の説明(本 module は ttl を書かない)は残る。属性として書く式は無い
     assert re.search(r"(:ttl\b|\bttl\s*=|\"ttl\")", text) is None
+
+
+# --- 想定外のエラーは握らない / 行を作らない(変異試験で見つかった穴)
+# -------------------------------------------------------------------------
+
+
+def _client_error(code: str = "ProvisionedThroughputExceededException") -> ClientError:
+    return ClientError({"Error": {"Code": code, "Message": "x"}}, "UpdateItem")
+
+
+class _ProxyTable:
+    """update_item の n 回目の直前に処理(例外・競合する書込)を差し込む。"""
+
+    def __init__(self, real: Any, plan: dict[int, Callable[[], None]]) -> None:
+        self._real = real
+        self._plan = plan
+        self.calls = 0
+
+    def update_item(self, **kwargs: Any) -> Any:
+        self.calls += 1
+        action = self._plan.get(self.calls)
+        if action is not None:
+            action()
+        return self._real.update_item(**kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+def _raise_unexpected() -> None:
+    raise _client_error()
+
+
+def _plan(monkeypatch: pytest.MonkeyPatch, plan: dict[int, Callable[[], None]]) -> _ProxyTable:
+    proxy = _ProxyTable(tracker._table(), plan)
+    monkeypatch.setattr(tracker, "_table", lambda: proxy)
+    return proxy
+
+
+@pytest.mark.parametrize("failing_call", [1, 2])
+def test_a_budget_consumption_propagates_an_unexpected_error(
+    monkeypatch: pytest.MonkeyPatch, failing_call: int
+) -> None:
+    _row()
+    _plan(monkeypatch, {failing_call: _raise_unexpected})
+    with pytest.raises(ClientError):
+        tracker.try_consume_fingerprint_budget(_FP, _W1, 2)
+
+
+def test_a_budget_refund_propagates_an_unexpected_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    _row()
+    tracker.try_consume_fingerprint_budget(_FP, _W1, 2)
+    _plan(monkeypatch, {1: _raise_unexpected})
+    with pytest.raises(ClientError):
+        tracker.refund_fingerprint_budget(_FP, _W1)
+
+
+@pytest.mark.parametrize("failing_call", [1, 2])
+def test_the_denied_count_propagates_an_unexpected_error(
+    monkeypatch: pytest.MonkeyPatch, failing_call: int
+) -> None:
+    _plan(monkeypatch, {failing_call: _raise_unexpected})
+    with pytest.raises(ClientError):
+        tracker.record_global_denied(_W1)
+
+
+def test_the_denied_count_survives_a_concurrent_window_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real = tracker._table()
+
+    def concurrent_reset() -> None:
+        # 自分の窓の切替(SET)の直前に、別の実行が同じ窓を先に始めて 4 まで数えた
+        real.update_item(
+            Key={"fingerprint": guard.CONTROL_KEY},
+            UpdateExpression="SET global_denied_window_id = :w, global_denied_count = :c",
+            ExpressionAttributeValues={":w": _W1, ":c": 4},
+        )
+
+    _plan(monkeypatch, {2: concurrent_reset})
+    # 切替は条件で負け、数え直して加算する(別の実行の 4 を 1 へ戻さない)
+    assert tracker.record_global_denied(_W1) == 5
+
+
+def test_tripping_propagates_an_unexpected_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    _plan(monkeypatch, {1: _raise_unexpected})
+    with pytest.raises(ClientError):
+        tracker.try_trip_kill_switch(_NOW, guard.KILL_SWITCH_REASON_AUTO)
+
+
+def test_claiming_the_notification_propagates_an_unexpected_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker.try_trip_kill_switch(_NOW, guard.KILL_SWITCH_REASON_AUTO)
+    _plan(monkeypatch, {1: _raise_unexpected})
+    with pytest.raises(ClientError):
+        tracker.try_claim_kill_switch_notification(_NOW)
+
+
+def test_releasing_the_notification_propagates_an_unexpected_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker.try_trip_kill_switch(_NOW, guard.KILL_SWITCH_REASON_AUTO)
+    tracker.try_claim_kill_switch_notification(_NOW)
+    _plan(monkeypatch, {1: _raise_unexpected})
+    with pytest.raises(ClientError):
+        tracker.release_kill_switch_notification()
+
+
+def test_recording_a_suppression_propagates_an_unexpected_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _row()
+    _plan(monkeypatch, {1: _raise_unexpected})
+    with pytest.raises(ClientError):
+        tracker.record_github_issue_suppressed(_FP, guard.DenyReason.MIN_INTERVAL, _NOW)
+
+
+def test_marking_a_suppression_propagates_an_unexpected_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _row()
+    _plan(monkeypatch, {1: _raise_unexpected})
+    with pytest.raises(ClientError):
+        tracker.mark_github_issue_suppressed(_FP, guard.DenyReason.GLOBAL_LIMIT, _NOW)
+
+
+def test_marking_a_suppression_never_creates_a_row() -> None:
+    tracker.mark_github_issue_suppressed(_FP, guard.DenyReason.GLOBAL_LIMIT, _NOW)
+    assert tracker.get_incident_state(_FP) is None
+
+
+def test_releasing_the_notification_never_creates_the_control_item() -> None:
+    tracker.release_kill_switch_notification()
+    assert tracker.read_github_issue_control() is None
+
+
+def test_creation_records_a_zero_occurrence_too() -> None:
+    _row()
+    tracker.try_claim_new_github_issue_creation(_FP, _NOW, 10)
+    tracker.mark_github_issue_created(_FP, 7, created_at=_NOW, occurrence_count=0)
+    assert int(_state()["github_issue_last_created_occurrence"]) == 0

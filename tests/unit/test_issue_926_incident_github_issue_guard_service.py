@@ -114,6 +114,8 @@ class FakeGithub:
             self.next_number += 1
             self.state[number] = "open"
             return _Resp(self._issue(number))
+        if method == "GET" and "/search/issues" in url:
+            return _Resp({"items": []})  # stale 復旧の実在確認: 既存の Issue は無い
         if method == "GET" and "/issues/" in url:
             number = int(url.rsplit("/", 1)[1])
             return _Resp(self._issue(number))
@@ -565,3 +567,69 @@ def test_random_arrivals_never_exceed_the_limits(secret_arn, config, github) -> 
             assert b - a >= dt.timedelta(minutes=120)
     for day in {jst(t) for _, t in created}:
         assert sum(1 for _, t in created if jst(t) == day) <= 4
+
+
+# --- 変異試験で見つかった穴 -------------------------------------------------------------------
+
+
+def test_a_per_fingerprint_denial_after_the_claim_never_counts_toward_the_auto_stop(
+    secret_arn, config, github
+) -> None:
+    limits = decided(
+        new_issue_min_interval_minutes=1,
+        new_issue_limit_per_fingerprint=1,
+        auto_stop_denied_threshold=1,
+    )
+    line_row(_FP_A)
+    run(secret_arn, config, limits)
+    github.close_all()
+    later = _NOW + dt.timedelta(minutes=5)
+    run(secret_arn, config, limits, occurrence=2, now=later)  # 事前確認は通り、fp の上限で拒否
+    assert state()["github_issue_last_denied_reason"] == "FINGERPRINT_LIMIT"
+    control = tracker.read_github_issue_control()
+    assert control is not None and not tracker.is_kill_switch_on(control)
+    assert int(control.get("global_denied_count", 0)) == 0
+
+
+def test_a_stale_claim_recreation_records_the_gate_inputs(secret_arn, config, github) -> None:
+    line_row(_FP_A)
+    tracker.try_claim_new_github_issue_creation(
+        _FP_A, _NOW, config.github_issue_claim_timeout_minutes
+    )
+    later = _NOW + dt.timedelta(minutes=config.github_issue_claim_timeout_minutes + 1)
+    run(secret_arn, config, decided(), occurrence=3, now=later)
+    st = state()
+    assert st["github_issue_create_status"] == "CREATED"
+    assert st["github_issue_last_created_at"] == later.isoformat()
+    assert int(st["github_issue_last_created_occurrence"]) == 3
+    # 次の同じ occurrence は作られない(復旧の経路でも gate が効く)
+    github.close_all()
+    run(secret_arn, config, decided(), occurrence=3, now=later + dt.timedelta(hours=7))
+    assert github.creations == 1
+
+
+def test_a_failing_fingerprint_refund_does_not_stop_the_global_refund(
+    monkeypatch: pytest.MonkeyPatch, secret_arn, config, github
+) -> None:
+    def boom(*a: object, **k: object) -> None:
+        raise RuntimeError("dynamodb")
+
+    monkeypatch.setattr(tracker, "refund_fingerprint_budget", boom)
+    github.fail_create = True
+    line_row(_FP_A)
+    run(secret_arn, config, decided())
+    control = tracker.read_github_issue_control()
+    assert control is not None and int(control["global_created_count"]) == 0
+
+
+def test_a_failing_global_refund_does_not_hide_the_fingerprint_refund(
+    monkeypatch: pytest.MonkeyPatch, secret_arn, config, github
+) -> None:
+    def boom(*a: object, **k: object) -> None:
+        raise RuntimeError("dynamodb")
+
+    monkeypatch.setattr(tracker, "refund_global_budget", boom)
+    github.fail_create = True
+    line_row(_FP_A)
+    run(secret_arn, config, decided())
+    assert int(state().get("github_issue_window_created_count", 0)) == 0

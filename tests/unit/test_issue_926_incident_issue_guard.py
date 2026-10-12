@@ -263,3 +263,11 @@ def test_the_module_is_pure() -> None:
             assert name not in {"now", "utcnow", "today", "open", "print", "float"}, name
         if isinstance(node, ast.Constant):
             assert not isinstance(node.value, float)
+
+
+# --- 防御の分岐(事前確認を通った後は到達しないが、単体で fail-closed であること)
+# -----------------------------------------------------------------------------
+
+
+def test_an_undecided_interval_is_read_as_inside_the_interval() -> None:
+    assert guard._within_interval(_NOW.isoformat(), _NOW, undecided_limits()) is True
