@@ -5740,6 +5740,11 @@ global_denied_window_id / global_denied_count  全体の窓と、その窓で上
 fingerprint の行にも、抑止の記録が残る: `github_issue_last_denied_reason`(LIMITS_UNDECIDED / SAME_OCCURRENCE / MIN_INTERVAL /
 FINGERPRINT_LIMIT / GLOBAL_LIMIT)・`github_issue_last_denied_at`・`github_issue_suppressed_count`・`github_issue_last_created_at`・
 `github_issue_last_created_occurrence`・`github_issue_window_id` / `github_issue_window_created_count`。
+claim の最中(CREATING)の行には、`github_issue_budget_window`(この claim の作成のために予算を消費した窓。stale 復旧が二重に消費しないための印。
+作成・失敗・抑止のいずれかで終わると消える)が付くことがある。
+
+**コメントの件数(参考)**: コメントは既存の OPEN の Issue への追記で、全体の上限は置かない。1 fingerprint あたり、健全時は最大 48 件/日
+(dedup window 30 分ごとに occurrence が 1 進む)、claim が stale になる異常時は 5 分きざみで最大 288 件/日になりうる。
 
 **Scan / Query はしない**(このテーブルに TTL は無く、tracker は全件走査をしない設計)。確認は key を指定した GetItem だけで行う。
 
