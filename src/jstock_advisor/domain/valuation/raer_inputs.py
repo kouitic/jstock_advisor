@@ -538,9 +538,9 @@ def _parse_detection(
     cyclical_known_false = bool(observed["industry"]) and RiskFlag.CYCLICAL_INDUSTRY not in flags
     if not (cyclical_known_false or (bool(observed["industry"]) and bool(observed["eps"]))):
         unobserved.add(RiskFlag.TEMPORARY_EARNINGS_BOOST_RISK)
-    if flags & unobserved:
-        return None  # 観測できなかったのに該当した語がある = 記録の矛盾。使わない
-    return flags, frozenset(unobserved)
+    # 該当した(True と確定した)語は、観測できた語として扱う。観測できなかった語は『該当しない』と
+    # 言えない語だけ(例: 業種が分からなくても、景気型の銘柄分類で景気業種に該当すると確定する)
+    return flags, frozenset(unobserved - flags)
 
 
 def risk_flag_view(facts: CandidateRaerFacts) -> RiskFlagView:
@@ -574,7 +574,7 @@ class HoldingMarketView:
 
     price: Decimal | None
     price_as_of_date: date | None
-    buy_industry_sector: BuyIndustrySector | None
+    buy_industry_sector: BuyIndustrySector
 
 
 def holding_market_view(facts: CandidateRaerFacts) -> HoldingMarketView:
@@ -582,7 +582,13 @@ def holding_market_view(facts: CandidateRaerFacts) -> HoldingMarketView:
     return HoldingMarketView(
         price=price,
         price_as_of_date=facts.price_as_of_date,
-        buy_industry_sector=facts.buy_industry_sector,
+        # 業種の『不明』は BuyIndustrySector.UNKNOWN の 1 表現にそろえる(#603 F1 の
+        # HoldingRecord.sector と同じ。None と UNKNOWN の 2 表現を継ぎ目に作らない)
+        buy_industry_sector=(
+            facts.buy_industry_sector
+            if facts.buy_industry_sector is not None
+            else BuyIndustrySector.UNKNOWN
+        ),
     )
 
 

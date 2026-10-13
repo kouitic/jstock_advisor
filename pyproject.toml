@@ -85,6 +85,7 @@ markers = [
   "cohort_solo_incident_state_tracker_guard: 起票の抑止の予算・停止・通知の確保(窓の切替・返却)のsolo cohort(Issue #926 / #145)",
   "cohort_solo_incident_github_issue_guard_service: 起票の抑止の層1〜3の契約(固定clockでの間隔・窓・stale復旧)のsolo cohort(Issue #926 / #145)",
   "cohort_solo_incident_notifier_handler_guard: 自動停止のLINE通知(1回だけ)の配線のsolo cohort(Issue #926 / #145)",
+  "cohort_solo_allocation_inputs: 購入側Shadowの入力の組み立て(最終棚卸しの経過日数 = JSTの暦日の差の境界)のsolo cohort(Issue #603 / #145)",
   "real_market_calendar: 市場休場日gate(_market_holiday)を実カレンダーで検証するテスト。既定は営業日扱い(Issue #440)",
 ]
 

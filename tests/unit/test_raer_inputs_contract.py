@@ -1058,6 +1058,21 @@ def test_the_detection_record_contract_literals_are_fixed_for_the_producer() -> 
     assert ri._OBSERVED_KEYS == ("earnings_date", "liquidity", "industry", "eps")
 
 
+def test_a_word_that_was_detected_is_observed_even_when_its_input_was_not() -> None:
+    # 該当(True)は観測できた証拠。観測できなかった語は『該当しない』と言えない語だけ。
+    # 例: 業種の文字列が取れなくても、景気型の銘柄分類で景気業種に該当すると確定する
+    view = risk_flag_view(_facts(risk_detection=_detection(["cyclical_industry"], industry=False)))
+    assert view.source is RiskFlagSource.DETECTION_RECORD
+    assert RiskFlag.CYCLICAL_INDUSTRY in view.flags
+    assert RiskFlag.CYCLICAL_INDUSTRY not in view.unobserved
+    assert RiskFlag.MAJOR_CUSTOMER_DEPENDENCY in view.unobserved  # 業種が不明なので言えない
+    small = risk_flag_view(
+        _facts(risk_detection=_detection(["small_cap_or_low_liquidity"], liquidity=False))
+    )
+    assert small.flags == frozenset({RiskFlag.SMALL_CAP_OR_LOW_LIQUIDITY})
+    assert small.unobserved == frozenset()
+
+
 def test_a_detection_record_with_everything_observed_gives_a_fully_observed_view() -> None:
     view = risk_flag_view(_facts(risk_detection=_detection(["cyclical_industry"])))
     assert view.source is RiskFlagSource.DETECTION_RECORD
@@ -1145,17 +1160,6 @@ _FLAGGED_SMALL = ["small_cap_or_low_liquidity"]
         {"version": 1, "flags": [], "observed": {**_ALL_OBSERVED, "liquidity": "yes"}},
         {"version": 1, "flags": [], "observed": {**_ALL_OBSERVED, "liquidity": 1}},
         {"version": 1, "flags": [], "observed": None},
-        # 観測できなかったのに該当した語がある = 矛盾
-        {
-            "version": 1,
-            "flags": _FLAGGED_SMALL,
-            "observed": {**_ALL_OBSERVED, "liquidity": False},
-        },
-        {
-            "version": 1,
-            "flags": ["cyclical_industry"],
-            "observed": {**_ALL_OBSERVED, "industry": False},
-        },
     ],
     ids=repr,
 )
@@ -1256,12 +1260,16 @@ def test_the_holding_market_view_is_read_from_the_recommendation_without_amounts
     }  # 株数・取得単価・損益・保有 ID を持たない
 
 
-def test_a_missing_market_fact_stays_none_and_is_never_filled() -> None:
+def test_a_missing_market_fact_stays_none_and_an_unknown_sector_is_one_representation() -> None:
     rec = _recommendation(price_as_of_date=None, buy_industry_sector=None)
     view = holding_market_view_from_recommendation(rec)
     assert view.price_as_of_date is None
-    assert view.buy_industry_sector is None
+    assert view.buy_industry_sector is BuyIndustrySector.UNKNOWN  # None を作らない
     assert view.price == D("1000")
+    explicit = holding_market_view_from_recommendation(
+        _recommendation(buy_industry_sector=BuyIndustrySector.UNKNOWN)
+    )
+    assert explicit.buy_industry_sector is BuyIndustrySector.UNKNOWN
 
 
 @pytest.mark.parametrize("price", [D("0"), D("-1")])
