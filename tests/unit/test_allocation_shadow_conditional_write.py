@@ -24,7 +24,8 @@ from botocore.client import BaseClient
 from moto import mock_aws
 
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
-from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, log_ref
+from jstock_advisor.domain.entities.identifier_ref import owner_ref
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.domain.signals.allocation_shadow_config import (
     AllocationShadowConfig,
     AllocationShadowMode,
@@ -44,6 +45,19 @@ from jstock_advisor.services.audit_service import AuditService
 _REGION = "ap-northeast-1"
 _NOW = dt.datetime(2026, 10, 12, 8, 0, tzinfo=dt.UTC)
 _BATCH = "buy-candidates-2026-10-12"
+
+
+@pytest.fixture
+def allow_any_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """予算・件数の挙動を複数 owner で試験するため、kv0 の owner の制限だけを外す(試験の中だけ)。
+
+    本番の制限(DEFAULT_OWNER 以外を kv0 で永続しない)は test_kv0_boundary で別に固定している。
+    """
+    from jstock_advisor.services import allocation_shadow_service as service_module
+
+    monkeypatch.setattr(service_module, "require_persistable", lambda owner: None)
+
+
 _SHADOW = AllocationShadowConfig(mode=AllocationShadowMode.SHADOW)
 _PLENTY_OF_TIME = lambda: 300_000  # noqa: E731 - 残り 300 秒
 
@@ -105,7 +119,7 @@ def test_a_single_run_stores_one_item_with_the_deterministic_id(audit_table: Any
     [item] = _items(audit_table)
     # 既定の計算は『未実装』= スキップなので、スキップの ID（結果の ID とは別の鍵。Q-B）
     assert item["audit_id"] == skip_audit_id(_BATCH, DEFAULT_OWNER)
-    assert item["audit_id"] == f"{SKIP_ID_PREFIX}:{_BATCH}:{log_ref(DEFAULT_OWNER)}"
+    assert item["audit_id"] == f"{SKIP_ID_PREFIX}:{_BATCH}:{owner_ref(DEFAULT_OWNER)}"
 
 
 def test_eight_concurrent_runs_store_exactly_one_item(audit_table: Any) -> None:
@@ -139,6 +153,7 @@ def test_second_run_hits_conditional_check_failed_and_keeps_the_item(audit_table
     assert _items(audit_table) == [before]
 
 
+@pytest.mark.usefixtures("allow_any_owner")
 def test_distinct_owners_are_stored_separately(audit_table: Any) -> None:
     assert _observe(["owner-a", "owner-b"]) is True
 
@@ -168,7 +183,7 @@ def test_stored_item_contains_no_owner_name_or_money(audit_table: Any) -> None:
     [item] = _items(audit_table)
     text = repr(item)
     assert DEFAULT_OWNER not in text  # 実名(固定の既定 owner 文字列)は保存しない
-    assert log_ref(DEFAULT_OWNER) in text  # 符号は保存する
+    assert owner_ref(DEFAULT_OWNER) in text  # 符号は保存する
     assert "COMPUTE_NOT_IMPLEMENTED" in text
 
 
