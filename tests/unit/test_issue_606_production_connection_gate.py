@@ -182,6 +182,13 @@ _UNCONNECTED_NAME_TOKENS = (
     "today_actions",
     "buy_affordability",
     "exit_architecture",
+    # allocation_policy: ★ 前向きの網 ★(#603 PR-E)。loader は dormant で、今この語を外しても
+    # 何も落ちない。実効の網は test_issue_603_pre_allocation_policy_config.py の
+    # test_nothing_in_src_imports_the_policy_loader(src の全走査)。handler・CLI から
+    # 到達させる変更が入ったとき、この語が test_no_handler_or_cli_reaches_an_unconnected_module
+    # を落とす
+    "allocation_policy",
+    "allocation_inputs",  # #603 PR-F1(入力の組み立て。同じく前向きの網)
 )
 
 
@@ -696,38 +703,83 @@ def test_the_template_has_no_parameter_environment_or_resource_for_a_128_feature
     assert sorted(set(tokens)) == []
 
 
-#: #128 の機能の config のうち、出荷してよいもの(1 要素 1 行・アルファベット順。後から足す PR は
-#: 1 行を足すだけ)。いずれも『有効化の入口でない』ことを個別のテストで固定する。
-#: raer_coefficients.yaml = #602 PR-E(承認済みの係数の置き場。dormant・入口のキーなし)。
-#: これは『接続を許す変更』ではない(運用手順書 37.5): どこからも読まれず、mode のキーも持たない。
-_APPROVED_128_CONFIGS = frozenset(
-    {
-        "allocation_shadow.yaml",  # Q'(mode = OFF)
-        "raer_coefficients.yaml",  # #602 PR-E(係数。入口なし)
-    }
-)
+#: #128 の機能の名前を持つ config と、その『役割』。全走査で許可リストと比べる
+#: (新しい config は新しい経路)。allocation_policy.yaml は方針値の置き場
+#: (#603 PR-E。USER 承認: #122 …6114810773【3】判断 B・…6137093887・…6138622792)で、
+#: 有効化の入口ではない(下の専用テストで固定)。接続を許す変更ではない
+_A_128_CONFIG_FILES = {
+    "allocation_policy.yaml": "POLICY_VALUES_ONLY",
+    "allocation_shadow.yaml": "SHADOW_MODE_SWITCH_SHIPPED_OFF",
+    # #602 PR-E: RAER の承認済みの係数の置き場。有効化の入口ではない(下の専用テストで固定)
+    "raer_coefficients.yaml": "COEFFICIENT_VALUES_ONLY",
+}
 
 
-def test_the_only_config_files_for_a_128_feature_are_the_approved_ones() -> None:
+def test_the_only_config_files_for_a_128_feature_are_the_off_shadow_and_the_policy_values() -> None:
     by_name = sorted(p.name for p in _SHIPPED_CONFIG_DIR.iterdir() if _FEATURE_TOKEN.search(p.name))
-    assert by_name == sorted(_APPROVED_128_CONFIGS)
+    assert by_name == sorted(_A_128_CONFIG_FILES)
     by_content = sorted(
         p.name
         for p in _SHIPPED_CONFIG_DIR.iterdir()
         if p.suffix in {".yaml", ".json"}
-        and p.name not in _APPROVED_128_CONFIGS
+        and p.name not in _A_128_CONFIG_FILES
         and re.search(r"(expected_return|raer\b|allocation)", p.read_text(encoding="utf-8"))
     )
     assert by_content == []
 
 
-def test_the_allocation_shadow_config_stays_off_and_the_raer_coefficients_have_no_mode() -> None:
+def _all_yaml_keys(value: object) -> list[str]:
+    keys: list[str] = []
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            keys.append(str(key))
+            keys.extend(_all_yaml_keys(inner))
+    elif isinstance(value, list):
+        for inner in value:
+            keys.extend(_all_yaml_keys(inner))
+    return keys
+
+
+def test_the_raer_coefficients_file_is_not_an_entry_point_for_enabling_anything() -> None:
+    """raer_coefficients.yaml は承認済みの係数だけ。有効化の入口(mode / enabled の類)を持たない。
+
+    許可リストへ足したことは『接続を許す』ことではない(運用手順書 37.5)。loader はどこからも
+    import されない(dormant)。出荷の Shadow の入口は allocation_shadow.yaml(出荷 OFF)のまま。
+    """
+    assert _A_128_CONFIG_FILES["raer_coefficients.yaml"] == "COEFFICIENT_VALUES_ONLY"
+    data = yaml.safe_load((_SHIPPED_CONFIG_DIR / "raer_coefficients.yaml").read_text("utf-8"))
+    keys = {key.lower() for key in _all_yaml_keys(data)}
+    # キーを '_' で分けた語で見る(model_version のような別の語を入口と誤判定しない)
+    entrance_words = {"on", "off", "mode", "enable", "enabled", "active", "shadow", "dry", "switch"}
+    assert not [key for key in keys if set(key.split("_")) & entrance_words]
     shadow = (_SHIPPED_CONFIG_DIR / "allocation_shadow.yaml").read_text(encoding="utf-8")
     assert re.search(r'^mode:\s*"?OFF"?\s*(#.*)?$', shadow, re.MULTILINE)
-    coefficients = (_SHIPPED_CONFIG_DIR / "raer_coefficients.yaml").read_text(encoding="utf-8")
-    keys = re.findall(r"^\s*([A-Za-z_][A-Za-z0-9_]*):", coefficients, re.MULTILINE)
-    entrance = {"mode", "enabled", "active", "on", "off", "enable", "switch", "flag"}
-    assert entrance & {key.lower() for key in keys} == set()
+
+
+def test_the_policy_values_file_is_not_an_entry_point_for_enabling_anything() -> None:
+    """allocation_policy.yaml は閾値だけ。有効化の入口(mode / enabled の類)を持たない。
+
+    許可リストへ足したことは『接続を許す』ことではない。有効にできる入口は allocation_shadow.yaml
+    (出荷 OFF。上のテスト)だけで、本ファイルの loader はどこからも import されない
+    (`test_no_handler_or_cli_reaches_an_unconnected_module`)。
+    """
+    assert _A_128_CONFIG_FILES["allocation_policy.yaml"] == "POLICY_VALUES_ONLY"
+    data = yaml.safe_load((_SHIPPED_CONFIG_DIR / "allocation_policy.yaml").read_text("utf-8"))
+    keys = {key.lower() for key in _all_yaml_keys(data)}
+    # 短い語は完全一致、長い語は部分一致(auto_enable・shadow_mode・入れ子のキーも拾う)
+    assert not keys & {"on", "off"}
+    assert not [
+        key
+        for key in keys
+        if any(word in key for word in ("mode", "enable", "active", "shadow", "dry_run", "switch"))
+    ]
+    # 値が 'OFF' / 'SHADOW' / 'ACTIVE' の項目も無い(mode を別名で持たない)
+    assert not {str(v).upper() for v in data.values() if isinstance(v, str)} & {
+        "OFF",
+        "SHADOW",
+        "ACTIVE",
+        "ON",
+    }
 
 
 # --- (2) 運用手順書の新節(§37) ---
