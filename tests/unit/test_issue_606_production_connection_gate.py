@@ -696,17 +696,38 @@ def test_the_template_has_no_parameter_environment_or_resource_for_a_128_feature
     assert sorted(set(tokens)) == []
 
 
-def test_the_only_config_file_for_a_128_feature_is_the_off_allocation_shadow() -> None:
+#: #128 の機能の config のうち、出荷してよいもの(1 要素 1 行・アルファベット順。後から足す PR は
+#: 1 行を足すだけ)。いずれも『有効化の入口でない』ことを個別のテストで固定する。
+#: raer_coefficients.yaml = #602 PR-E(承認済みの係数の置き場。dormant・入口のキーなし)。
+#: これは『接続を許す変更』ではない(運用手順書 37.5): どこからも読まれず、mode のキーも持たない。
+_APPROVED_128_CONFIGS = frozenset(
+    {
+        "allocation_shadow.yaml",  # Q'(mode = OFF)
+        "raer_coefficients.yaml",  # #602 PR-E(係数。入口なし)
+    }
+)
+
+
+def test_the_only_config_files_for_a_128_feature_are_the_approved_ones() -> None:
     by_name = sorted(p.name for p in _SHIPPED_CONFIG_DIR.iterdir() if _FEATURE_TOKEN.search(p.name))
-    assert by_name == ["allocation_shadow.yaml"]
+    assert by_name == sorted(_APPROVED_128_CONFIGS)
     by_content = sorted(
         p.name
         for p in _SHIPPED_CONFIG_DIR.iterdir()
         if p.suffix in {".yaml", ".json"}
-        and p.name != "allocation_shadow.yaml"
+        and p.name not in _APPROVED_128_CONFIGS
         and re.search(r"(expected_return|raer\b|allocation)", p.read_text(encoding="utf-8"))
     )
     assert by_content == []
+
+
+def test_the_allocation_shadow_config_stays_off_and_the_raer_coefficients_have_no_mode() -> None:
+    shadow = (_SHIPPED_CONFIG_DIR / "allocation_shadow.yaml").read_text(encoding="utf-8")
+    assert re.search(r'^mode:\s*"?OFF"?\s*(#.*)?$', shadow, re.MULTILINE)
+    coefficients = (_SHIPPED_CONFIG_DIR / "raer_coefficients.yaml").read_text(encoding="utf-8")
+    keys = re.findall(r"^\s*([A-Za-z_][A-Za-z0-9_]*):", coefficients, re.MULTILINE)
+    entrance = {"mode", "enabled", "active", "on", "off", "enable", "switch", "flag"}
+    assert entrance & {key.lower() for key in keys} == set()
 
 
 # --- (2) 運用手順書の新節(§37) ---
