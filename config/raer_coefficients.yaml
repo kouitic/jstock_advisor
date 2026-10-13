@@ -1,0 +1,50 @@
+# RAER(Risk Adjusted Expected Return。#128 / #602)の暫定式の係数。承認済みの初期値そのもの。
+#
+# 承認: USER #122 issuecomment-6114461065【1】(A-1〜A-5。A-4 = 例示の係数を初期値とし、
+#       Shadow の観測で調整する)。確定仕様の整理 = #602 issuecomment-6114608473。
+# 設計: #602 issuecomment-6137314302(PR-E 設計 rev1)/ サブちゃんの設計レビュー PASS
+#       = #602 issuecomment-6137645260。
+#
+# ★ このファイルは『有効化の入口』ではない。モードや有効・無効のキーは持たない。
+#   読み込んでも、どこからも使われない(dormant)。RAER の計算が Production の判断・通知へ
+#   つながることはない。係数が全て決定済みでも、使われない理由は次の 3 つだけである:
+#     ① どこからも import されない(配線なし)② 入力の供給・配線が未実装 ③ Shadow の mode が OFF
+#   「値が出ないのは未決だから」ではない。
+#
+# 値を変えるときは、USER の確認・モデル版の更新・golden の契約テスト(coefficient_set_id)の
+# 更新を一緒に行う(係数だけが黙って変わらない)。トレンド点 s の重みは既存の
+# earnings_trend_rules.yaml の値で、ここには置かない(重複した値を作らない)。
+# 重複の除外の規則(3 営業日と 7 営業日 / 景気業種と一時増益)は規則であり係数ではない(コード側)。
+
+version: 1
+# RAER の組合せのモデル版。コード側の COMBINED_MODEL_VERSION と一致しなければ読み込みを拒否する。
+model_version: "raer-combined-v1-provisional-axes-y"
+
+# 軸 1: Fair Value の信頼度ごとの、上値余地への割引(掛け算。0 < LOW <= MEDIUM <= HIGH <= 1)
+fv_confidence_factor:
+  HIGH: 1.00
+  MEDIUM: 0.85
+  LOW: 0.60
+
+# 軸 2: 企業品質(0〜50 点)。d2 = deduction_max x (1 - Q / max_score)
+quality:
+  deduction_max: 4
+  max_score: 50
+
+# 軸 3: 重複を除いた各リスクの引く量(% ポイント)。6 語すべてが必須。
+risk_deductions:
+  earnings_within_3_business_days: 3.0
+  earnings_within_7_business_days: 1.5
+  cyclical_industry: 1.5
+  major_customer_dependency: 1.5
+  temporary_earnings_boost_risk: 2.0
+  small_cap_or_low_liquidity: 2.0
+risk_deduction_cap: 6
+
+# 軸 5: 営業トレンド(悪化だけ減点)。d5 = trend_deduction_scale x max(0, -s) / 100
+trend_deduction_scale: 3
+
+# 必須の軸と最低の適用軸数(A-3)
+min_applied_axes: 3
+required_axes:
+  - FAIR_VALUE_CONFIDENCE

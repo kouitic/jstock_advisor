@@ -711,6 +711,8 @@ def test_the_template_has_no_parameter_environment_or_resource_for_a_128_feature
 _A_128_CONFIG_FILES = {
     "allocation_policy.yaml": "POLICY_VALUES_ONLY",
     "allocation_shadow.yaml": "SHADOW_MODE_SWITCH_SHIPPED_OFF",
+    # #602 PR-E: RAER の承認済みの係数の置き場。有効化の入口ではない(下の専用テストで固定)
+    "raer_coefficients.yaml": "COEFFICIENT_VALUES_ONLY",
 }
 
 
@@ -737,6 +739,22 @@ def _all_yaml_keys(value: object) -> list[str]:
         for inner in value:
             keys.extend(_all_yaml_keys(inner))
     return keys
+
+
+def test_the_raer_coefficients_file_is_not_an_entry_point_for_enabling_anything() -> None:
+    """raer_coefficients.yaml は承認済みの係数だけ。有効化の入口(mode / enabled の類)を持たない。
+
+    許可リストへ足したことは『接続を許す』ことではない(運用手順書 37.5)。loader はどこからも
+    import されない(dormant)。出荷の Shadow の入口は allocation_shadow.yaml(出荷 OFF)のまま。
+    """
+    assert _A_128_CONFIG_FILES["raer_coefficients.yaml"] == "COEFFICIENT_VALUES_ONLY"
+    data = yaml.safe_load((_SHIPPED_CONFIG_DIR / "raer_coefficients.yaml").read_text("utf-8"))
+    keys = {key.lower() for key in _all_yaml_keys(data)}
+    # キーを '_' で分けた語で見る(model_version のような別の語を入口と誤判定しない)
+    entrance_words = {"on", "off", "mode", "enable", "enabled", "active", "shadow", "dry", "switch"}
+    assert not [key for key in keys if set(key.split("_")) & entrance_words]
+    shadow = (_SHIPPED_CONFIG_DIR / "allocation_shadow.yaml").read_text(encoding="utf-8")
+    assert re.search(r'^mode:\s*"?OFF"?\s*(#.*)?$', shadow, re.MULTILINE)
 
 
 def test_the_policy_values_file_is_not_an_entry_point_for_enabling_anything() -> None:
