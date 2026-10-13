@@ -535,7 +535,10 @@ def test_nothing_in_src_imports_the_policy_loader() -> None:
         if path != _MODULE_PATH
         and any("allocation_policy_config" in name for name in _imported_modules(_tree(path)))
     )
-    assert importers == ["domain/signals/allocation_inputs.py"]
+    assert importers == [
+        "domain/signals/allocation_inputs.py",
+        "domain/signals/allocation_shadow_record.py",  # #603 PR-F2-1(方針の値を記録へ写す)
+    ]
 
 
 def test_the_loader_imports_only_pure_dependencies() -> None:

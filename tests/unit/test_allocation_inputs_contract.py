@@ -931,10 +931,11 @@ def test_the_module_uses_no_float_and_no_aws_or_service_layer() -> None:
 
 
 def test_nothing_in_src_imports_the_assembler() -> None:
-    """dormant: PR-F2 が Shadow の差し込み先から呼ぶまで、どこからも import されない。"""
+    """dormant: PR-F2-2 が配線するまで、本流・handler・CLI から import されない。"""
     importers = sorted(
         path.relative_to(_PACKAGE).as_posix()
         for path in _PACKAGE.rglob("*.py")
         if path != _MODULE_PATH and "allocation_inputs" in path.read_text(encoding="utf-8")
     )
-    assert importers == []
+    # 許可は PR-F2-1 の記録の組み立て(入力の型を受ける。それ自体が dormant)の明示の 1 件だけ
+    assert importers == ["domain/signals/allocation_shadow_record.py"]
