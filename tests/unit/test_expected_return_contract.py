@@ -451,6 +451,7 @@ def test_only_the_allowed_modules_import_expected_return() -> None:
         "domain/exit_architecture/expected_return_adapter.py",
         "domain/valuation/raer.py",
         "domain/valuation/raer_composition.py",
+        "domain/valuation/raer_inputs.py",  # #602 PR-G1(compute_expected_return を呼ぶ)
     }
     importers = set()
     for path in sorted((_SRC / "jstock_advisor").rglob("*.py")):
