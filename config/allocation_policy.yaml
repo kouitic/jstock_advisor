@@ -1,0 +1,48 @@
+# 購入側の資金配分(Portfolio Allocation。Issue #603 PR-E)の方針値。
+#
+# 買付余力を、買い判定を済ませた候補へ RAER の順に割り当てるときの『人が決める値』だけを置く。
+# 値は USER が承認した判断 B(標準的。#122 issuecomment-6114810773 の【3】)のとおりで、ここでは変えない。
+# 値を変える必要が出たら、実装ではなく USER の判断(名前 policy_id も変える)。
+#
+# ★ このファイルは『設定の置き場』であり、有効化の入口ではない。mode / enabled の類のキーを持たない。
+#   どこからも import されない(dormant)。Production の判断・通知・保存を変えない。
+#   Shadow を動かす入口は config/allocation_shadow.yaml(出荷は OFF)であり、本ファイルではない。
+#
+# 項目:
+#   policy_id               記録に残す方針の名前(承認済みの『標準的』の組)
+#   comparison_key          RAER の比較条件の鍵。★ 未決定(null)のまま = 配分しない(POLICY_INCOMPLETE)。
+#                           RAER の版・適用軸は #602 が決めた後に、別の変更で設定する
+#   min_raer_to_allocate    これ未満の RAER の候補には配分しない(判断 B。RAER の確定後に妥当性を再検証する)
+#   max_single_stock_amount 1 銘柄の金額の上限。『上限なし』は大きな有限値で表す(判断 B の (a)。
+#                           実質上限なしで、具体の桁は内部の選択)
+#   max_single_stock_ratio  1 銘柄の比率の上限(0 より大きく 1 以下)
+#   max_sector_ratio        1 業種の比率の上限
+#   max_high_risk_ratio     高リスク銘柄の合計の比率の上限
+#   high_risk_flags         何を高リスクと数えるか(RAER のリスクの印の語彙から選ぶ。判断 B の『標準的』)
+#   tier_quantity_caps      価格帯の段階ごとに、上限株数へ掛ける割合(0 より大きく 1 以下。3 段階すべて)
+#   unknown_price_tier_as   価格帯の段階が分からない候補を、どの段階として扱うか(判断 B の (b))
+#
+# 買付余力が未登録のときに算出不能とする(判断 B の (c))のは、設定ではなく契約(CASH_NOT_REGISTERED)。
+# 売買単位は本ファイルに置かない: config/profit_taking_rules.yaml の trading_unit.default_trading_unit
+# を、呼び出し側が loader へ渡す(同じ値を 2 か所に持たない)。
+#
+# 数値は引用符で囲まない(文字列は不正として全体が未決定へ縮退する)。null は『未決定』であり、
+# 『制約なし』ではない。このファイルが無い・読めない・不正な場合は、全項目を未決定として扱う
+# (= 配分しない側へ倒す)。本流の起動を落とさない。
+version: 1
+policy_id: "standard-2026-10"
+comparison_key: null
+min_raer_to_allocate: 12
+max_single_stock_amount: 1000000000000000
+max_single_stock_ratio: 0.15
+max_sector_ratio: 0.30
+max_high_risk_ratio: 0.20
+high_risk_flags:
+  - major_customer_dependency
+  - temporary_earnings_boost_risk
+  - small_cap_or_low_liquidity
+tier_quantity_caps:
+  ENTRY: 0.33
+  STANDARD: 0.67
+  STRONG: 1.0
+unknown_price_tier_as: "ENTRY"

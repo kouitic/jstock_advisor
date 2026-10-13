@@ -934,6 +934,7 @@ _ALLOWED_IMPORTERS = {
     "domain/signals/portfolio_allocation.py",  # #603 PR-C
     "domain/signals/capital_rotation.py",  # #603 PR-D(入替元の RaerResult)
     "domain/valuation/raer_composition.py",  # #602 PR-B2(式。本 module のデータ型を使う)
+    "domain/signals/allocation_policy_config.py",  # #603 PR-E(RiskFlag の語彙を検証)
 }
 
 
