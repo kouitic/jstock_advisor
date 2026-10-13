@@ -71,7 +71,7 @@ class IdentifierRefError(ValueError):
 
 
 class KeyedReferenceRequiredError(IdentifierRefError):
-    """実在の owner の記録には鍵つきの符号(kv1)が要る。kv0 では永続しない(USER 決定 #925 …6142405238)。"""
+    """実在の owner の記録には鍵つきの符号(kv1)が要る。kv0 では永続しない(USER 決定 #925)。"""
 
 
 def _fail(problem: str) -> IdentifierRefError:

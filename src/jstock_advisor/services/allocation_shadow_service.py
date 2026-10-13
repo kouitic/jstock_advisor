@@ -300,7 +300,7 @@ def record_result(
 ) -> bool:
     """結果を AuditLog へ条件付きで追記する(期限つき)。追記したら True。失敗は握る。
 
-    実在の owner を kv0(鍵なし)で永続化することは禁止(USER 決定 #925 …6142405238)。DEFAULT_OWNER 以外は
+    実在の owner を kv0(鍵なし)で永続化することは禁止(USER 決定 #925)。DEFAULT_OWNER 以外は
     書かずに False を返す(鍵つきの kv1 の実装後に、許可を kv1 のときへ替える)。
     """
     try:
