@@ -58,14 +58,19 @@ from jstock_advisor.domain.valuation.raer_composition import (
 )
 from jstock_advisor.domain.valuation.raer_inputs import (
     RAER_FULL_COMPARISON_KEY,
+    RISK_DETECTION_FACTS_KEY,
     AssemblerPolicy,
     CandidateRaerFacts,
     ProvenanceItem,
     ProvenanceNote,
     ProvenanceReason,
+    RiskFlagSource,
+    RiskFlagView,
     assemble_raer_inputs,
     facts_from_recommendation,
     raer_result_for_candidate,
+    risk_flag_view,
+    risk_flag_view_from_recommendation,
 )
 from jstock_advisor.domain.valuation.yield_calc import BenefitProgramState
 from jstock_advisor.services.buy_signal_service import SHADOW_STATE_COMPUTED
@@ -146,6 +151,7 @@ def _facts(**overrides: Any) -> CandidateRaerFacts:
         "margin_computed": True,
         "margin_adjustment_codes": (),
         "margin_superseded_codes": (),
+        "risk_detection": None,
         "common_quality": _common_quality(),
         "earnings_trend_metrics": _trend_metrics(),
     }
@@ -1022,6 +1028,210 @@ def test_the_provenance_carries_no_value_code_amount_or_holding_identifier() -> 
         text = f"{entry.item} {entry.source} {entry.reason} {entry.notes}"
         assert not any(ch.isdigit() for ch in text), text
         assert "1234" not in text
+
+
+# ---- H1: 検出の記録(buy_score_input_facts[raer_risk_detection])と RiskFlagView ----------------
+
+_ALL_OBSERVED = {"earnings_date": True, "liquidity": True, "industry": True, "eps": True}
+
+
+def _detection(flags: list[str] | None = None, **observed: bool) -> dict[str, object]:
+    return {
+        "version": 1,
+        "flags": list(flags or []),
+        "observed": {**_ALL_OBSERVED, **observed},
+    }
+
+
+def test_the_detection_record_contract_literals_are_fixed_for_the_producer() -> None:
+    # 生産側(買い判定の記録。H2)は domain の raer 系 module を import できず、同じ literal を持つ。
+    # 変えるときは生産側と一緒に(契約テストが両方を見る)
+    assert RISK_DETECTION_FACTS_KEY == "raer_risk_detection"
+    assert ri.RISK_DETECTION_VERSION == 1
+    assert ri._OBSERVED_KEYS == ("earnings_date", "liquidity", "industry", "eps")
+
+
+def test_a_detection_record_with_everything_observed_gives_a_fully_observed_view() -> None:
+    view = risk_flag_view(_facts(risk_detection=_detection(["cyclical_industry"])))
+    assert view.source is RiskFlagSource.DETECTION_RECORD
+    assert view.flags == frozenset({RiskFlag.CYCLICAL_INDUSTRY})
+    assert view.unobserved == frozenset()
+    assert view.observed_all()
+
+
+@pytest.mark.parametrize(
+    ("observed", "expected_unobserved"),
+    [
+        (
+            {"earnings_date": False},
+            {RiskFlag.EARNINGS_WITHIN_3_BUSINESS_DAYS, RiskFlag.EARNINGS_WITHIN_7_BUSINESS_DAYS},
+        ),
+        ({"liquidity": False}, {RiskFlag.SMALL_CAP_OR_LOW_LIQUIDITY}),
+        (
+            {"industry": False},
+            {
+                RiskFlag.CYCLICAL_INDUSTRY,
+                RiskFlag.MAJOR_CUSTOMER_DEPENDENCY,
+                RiskFlag.TEMPORARY_EARNINGS_BOOST_RISK,
+            },
+        ),
+        # eps は『景気業種でない』と確定していれば要らない(一時増益のリスクは景気業種のときだけ)
+        ({"eps": False}, set()),
+    ],
+    ids=["earnings", "liquidity", "industry", "eps-not-needed"],
+)
+def test_each_unobserved_input_makes_exactly_its_words_unobserved(
+    observed: dict[str, bool], expected_unobserved: set[RiskFlag]
+) -> None:
+    view = risk_flag_view(_facts(risk_detection=_detection(**observed)))
+    assert view.unobserved == frozenset(expected_unobserved)
+    assert view.flags == frozenset()
+    assert view.observed_all() is (not expected_unobserved)
+
+
+def test_the_temporary_boost_needs_the_eps_observation_only_for_a_cyclical_stock() -> None:
+    cyclical_without_eps = risk_flag_view(
+        _facts(risk_detection=_detection(["cyclical_industry"], eps=False))
+    )
+    assert RiskFlag.TEMPORARY_EARNINGS_BOOST_RISK in cyclical_without_eps.unobserved
+    cyclical_with_eps = risk_flag_view(
+        _facts(risk_detection=_detection(["cyclical_industry"], eps=True))
+    )
+    assert RiskFlag.TEMPORARY_EARNINGS_BOOST_RISK not in cyclical_with_eps.unobserved
+    flagged = risk_flag_view(
+        _facts(risk_detection=_detection(["cyclical_industry", "temporary_earnings_boost_risk"]))
+    )
+    assert RiskFlag.TEMPORARY_EARNINGS_BOOST_RISK in flagged.flags
+
+
+def test_the_view_lets_the_caller_check_only_the_words_it_needs() -> None:
+    high_risk = frozenset(
+        {
+            RiskFlag.MAJOR_CUSTOMER_DEPENDENCY,
+            RiskFlag.TEMPORARY_EARNINGS_BOOST_RISK,
+            RiskFlag.SMALL_CAP_OR_LOW_LIQUIDITY,
+        }
+    )
+    earnings_unknown = risk_flag_view(_facts(risk_detection=_detection(earnings_date=False)))
+    assert not earnings_unknown.observed_all()
+    assert earnings_unknown.observed_all(
+        high_risk
+    )  # 決算日が不明でも high-risk の 3 語は観測できた
+    liquidity_unknown = risk_flag_view(_facts(risk_detection=_detection(liquidity=False)))
+    assert not liquidity_unknown.observed_all(high_risk)
+
+
+_FLAGGED_SMALL = ["small_cap_or_low_liquidity"]
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"version": 2, "flags": [], "observed": _ALL_OBSERVED},
+        {"version": True, "flags": [], "observed": _ALL_OBSERVED},
+        {"flags": [], "observed": _ALL_OBSERVED},
+        {"version": 1, "flags": "cyclical_industry", "observed": _ALL_OBSERVED},
+        {"version": 1, "flags": ["no_such_word"], "observed": _ALL_OBSERVED},
+        {"version": 1, "flags": [1], "observed": _ALL_OBSERVED},
+        {"version": 1, "flags": [], "observed": {"earnings_date": True}},
+        {"version": 1, "flags": [], "observed": {**_ALL_OBSERVED, "extra": True}},
+        {"version": 1, "flags": [], "observed": {**_ALL_OBSERVED, "liquidity": "yes"}},
+        {"version": 1, "flags": [], "observed": {**_ALL_OBSERVED, "liquidity": 1}},
+        {"version": 1, "flags": [], "observed": None},
+        # 観測できなかったのに該当した語がある = 矛盾
+        {
+            "version": 1,
+            "flags": _FLAGGED_SMALL,
+            "observed": {**_ALL_OBSERVED, "liquidity": False},
+        },
+        {
+            "version": 1,
+            "flags": ["cyclical_industry"],
+            "observed": {**_ALL_OBSERVED, "industry": False},
+        },
+    ],
+    ids=repr,
+)
+def test_an_invalid_detection_record_is_never_corrected_and_falls_back_to_the_margin_record(
+    record: dict[str, object],
+) -> None:
+    fallback = risk_flag_view(
+        _facts(
+            risk_detection=record,
+            margin_computed=True,
+            margin_adjustment_codes=("small_cap_or_low_liquidity",),
+        )
+    )
+    assert fallback.source is RiskFlagSource.MARGIN_ADJUSTMENTS
+    assert fallback.flags == frozenset({RiskFlag.SMALL_CAP_OR_LOW_LIQUIDITY})
+    assert not fallback.observed_all()  # 旧い記録は『確認できた』と言えない
+    unobserved = risk_flag_view(_facts(risk_detection=record, margin_computed=False))
+    assert unobserved.source is RiskFlagSource.NOT_OBSERVED
+    assert unobserved.unobserved == frozenset(RiskFlag)
+
+
+def test_the_detection_record_is_used_even_when_the_margin_was_not_computed() -> None:
+    # Fair Value の信頼度が LOW で安全余裕率が算出されない銘柄でも、検出の記録があれば読める
+    view = risk_flag_view(
+        _facts(
+            risk_detection=_detection(_FLAGGED_SMALL),
+            margin_computed=False,
+            margin_adjustment_codes=(),
+        )
+    )
+    assert view.source is RiskFlagSource.DETECTION_RECORD
+    assert view.flags == frozenset({RiskFlag.SMALL_CAP_OR_LOW_LIQUIDITY})
+    assembled = _assemble(_facts(risk_detection=_detection(_FLAGGED_SMALL), margin_computed=False))
+    assert assembled.inputs.risk_flags == frozenset({RiskFlag.SMALL_CAP_OR_LOW_LIQUIDITY})
+    assert assembled.provenance.entry(PI.BUSINESS_RISK).derived
+
+
+def test_the_old_margin_record_cannot_prove_observation_so_it_is_not_fully_observed() -> None:
+    view = risk_flag_view(_facts(margin_computed=True, margin_adjustment_codes=()))
+    assert view.source is RiskFlagSource.MARGIN_ADJUSTMENTS
+    assert view.flags == frozenset()
+    assert view.unobserved == frozenset()  # 区別できない
+    assert not view.observed_all()  # ただし『確認できた』とは言わない(保有側は代替値を置かない)
+
+
+def test_the_candidate_provenance_distinguishes_fully_observed_from_treated_as_not_flagged() -> (
+    None
+):
+    full = _assemble(_facts(risk_detection=_detection()))
+    notes = full.provenance.entry(PI.BUSINESS_RISK).notes
+    assert ProvenanceNote.RISK_ALL_WORDS_OBSERVED in notes
+    assert ProvenanceNote.CANDIDATE_UNOBSERVED_TREATED_AS_NOT_FLAGGED not in notes
+    partial = _assemble(_facts(risk_detection=_detection(liquidity=False)))
+    notes = partial.provenance.entry(PI.BUSINESS_RISK).notes
+    assert ProvenanceNote.CANDIDATE_UNOBSERVED_TREATED_AS_NOT_FLAGGED in notes
+    assert ProvenanceNote.RISK_ALL_WORDS_OBSERVED not in notes
+    assert partial.inputs.risk_flags == frozenset()  # R1: 候補側は未観測を『該当なし』として扱う
+    old = _assemble(_facts(margin_computed=True))
+    assert ProvenanceNote.CANDIDATE_UNOBSERVED_TREATED_AS_NOT_FLAGGED in (
+        old.provenance.entry(PI.BUSINESS_RISK).notes
+    )
+
+
+def test_the_view_is_the_same_function_for_a_candidate_and_a_held_stock() -> None:
+    rec = _recommendation(
+        buy_score_input_facts={
+            "common_quality_shadow": _common_quality(),
+            RISK_DETECTION_FACTS_KEY: _detection(["major_customer_dependency"]),
+        }
+    )
+    view = risk_flag_view_from_recommendation(rec)
+    assert view == risk_flag_view(facts_from_recommendation(rec))
+    assert view.flags == frozenset({RiskFlag.MAJOR_CUSTOMER_DEPENDENCY})
+    assert isinstance(view, RiskFlagView)
+
+
+def test_the_view_rejects_a_flag_that_is_also_unobserved() -> None:
+    with pytest.raises(ValueError):
+        RiskFlagView(
+            frozenset({RiskFlag.CYCLICAL_INDUSTRY}),
+            frozenset({RiskFlag.CYCLICAL_INDUSTRY}),
+            RiskFlagSource.DETECTION_RECORD,
+        )
 
 
 def test_the_facts_keep_a_code_the_buy_decision_marked_as_superseded() -> None:

@@ -94,6 +94,14 @@ COMMON_QUALITY_FACTS_KEY: Final = "common_quality_shadow"
 #: と同じ値(domain は services を import できないため、契約テストで一致を固定する)。
 SHADOW_STATE_COMPUTED: Final = "COMPUTED"
 
+#: 推奨の `buy_score_input_facts` の中の、リスクの印の『検出の記録』のキー(#602 H2。買い判定が
+#: 検出済みの語と、語ごとの観測の有無を写す)。生産側(buy_signal_service)は domain の raer 系
+#: module を import できない(#606 の到達性の契約)ため、同じ literal を持ち、契約テストで
+#: 一致を固定する。
+RISK_DETECTION_FACTS_KEY: Final = "raer_risk_detection"
+RISK_DETECTION_VERSION: Final = 1
+_OBSERVED_KEYS: Final = ("earnings_date", "liquidity", "industry", "eps")
+
 _RISK_FLAG_VALUES: Final = frozenset(flag.value for flag in RiskFlag)
 
 
@@ -133,6 +141,8 @@ class ProvenanceNote(StrEnum):
     # 未観測を区別するには買い判定の記録へ観測の有無を足す別の変更が要る(R2 以降)。
     # 保有側(PR-G3)は未観測を区別する(非対称)。観測できる形で必ず残す
     CANDIDATE_UNOBSERVED_TREATED_AS_NOT_FLAGGED = "CANDIDATE_UNOBSERVED_TREATED_AS_NOT_FLAGGED"
+    # 検出の記録(H2)があり、6 語すべてを観測できた(『リスクなし』は確認したうえでの値)
+    RISK_ALL_WORDS_OBSERVED = "RISK_ALL_WORDS_OBSERVED"
     # 軸 2 の充足度の下限は、買い側が意図的に保留している(shadow calibration で決める)ため、
     # 保有側の既存の値(coverage_thresholds.company_quality_minimum)を借用している
     COVERAGE_MINIMUM_BORROWED_FROM_HOLDING_SIDE = "COVERAGE_MINIMUM_BORROWED_FROM_HOLDING_SIDE"
@@ -195,6 +205,7 @@ class CandidateRaerFacts:
     margin_computed: bool
     margin_adjustment_codes: tuple[str, ...]
     margin_superseded_codes: tuple[str, ...]
+    risk_detection: Mapping[str, object] | None
     common_quality: Mapping[str, object] | None
     earnings_trend_metrics: Mapping[str, object] | None
 
@@ -231,6 +242,7 @@ def facts_from_recommendation(rec: Recommendation) -> CandidateRaerFacts:
     """永続済みの推奨から、RAER の入力の事実を取り出す。フィールド名への依存はここだけ。"""
     score_facts = rec.buy_score_input_facts
     common_quality = score_facts.get(COMMON_QUALITY_FACTS_KEY) if score_facts is not None else None
+    risk_detection = score_facts.get(RISK_DETECTION_FACTS_KEY) if score_facts is not None else None
     trend = rec.earnings_trend_metrics
     return CandidateRaerFacts(
         price=rec.price_at_recommendation,
@@ -248,6 +260,7 @@ def facts_from_recommendation(rec: Recommendation) -> CandidateRaerFacts:
             for adjustment in rec.margin_adjustments
             if adjustment.superseded_by is not None
         ),
+        risk_detection=risk_detection if isinstance(risk_detection, Mapping) else None,
         common_quality=common_quality if isinstance(common_quality, Mapping) else None,
         earnings_trend_metrics=trend if trend else None,
     )
@@ -444,30 +457,134 @@ def _quality(
 # --- 軸 3 事業・業種リスク ------------------------------------------------------------------------
 
 _RISK_SOURCE: Final = "margin_adjustments / required_margin_of_safety_entry"
+_DETECTION_SOURCE: Final = f"buy_score_input_facts.{RISK_DETECTION_FACTS_KEY}"
+
+
+class RiskFlagSource(StrEnum):
+    """RiskFlagView の出所。"""
+
+    DETECTION_RECORD = "DETECTION_RECORD"  # 検出の記録(H2)。語ごとの観測の有無が分かる
+    MARGIN_ADJUSTMENTS = "MARGIN_ADJUSTMENTS"  # 旧い記録。『不明 → 該当しない』を区別できない
+    NOT_OBSERVED = "NOT_OBSERVED"  # 観測できていない(安全余裕率が算出されず、検出の記録も無い)
+
+
+@dataclass(frozen=True)
+class RiskFlagView:
+    """推奨から読んだ、リスクの印 6 語の状態。候補にも保有銘柄にも同じ関数で作る。
+
+    flags      = 観測できて該当した語
+    unobserved = 観測できなかった語(『リスクなし』にしない)
+    『観測できて該当しない語』= 6 語 − flags − unobserved
+
+    ★ `source = MARGIN_ADJUSTMENTS` は旧い記録で、観測できなかった語を区別できない(unobserved は
+    空に見えるが、それは『確認できた』ではない)。保有側のように代替値を置かない用途は、
+    `observed_all` を使う。
+    """
+
+    flags: frozenset[RiskFlag]
+    unobserved: frozenset[RiskFlag]
+    source: RiskFlagSource
+
+    def __post_init__(self) -> None:
+        if self.flags & self.unobserved:
+            raise ValueError("該当した語が観測できなかった語に含まれている")
+
+    def observed_all(self, words: frozenset[RiskFlag] | None = None) -> bool:
+        """指定した語(省略時は 6 語)をすべて観測できたと言えるか。検出の記録があるときだけ True。"""
+        if self.source is not RiskFlagSource.DETECTION_RECORD:
+            return False
+        return not (self.unobserved & (words if words is not None else frozenset(RiskFlag)))
+
+
+def _parse_detection(
+    record: Mapping[str, object] | None,
+) -> tuple[frozenset[RiskFlag], frozenset[RiskFlag]] | None:
+    """検出の記録を (該当した語, 観測できなかった語) へ。契約に合わない形は None(補正しない)。"""
+    version = None if record is None else record.get("version")
+    if isinstance(version, bool) or version != RISK_DETECTION_VERSION:
+        return None
+    assert record is not None
+    raw_flags = record.get("flags")
+    observed = record.get("observed")
+    if not isinstance(raw_flags, list | tuple) or not isinstance(observed, Mapping):
+        return None
+    if set(observed) != set(_OBSERVED_KEYS) or any(
+        not isinstance(value, bool) for value in observed.values()
+    ):
+        return None
+    if any(not isinstance(word, str) or word not in _RISK_FLAG_VALUES for word in raw_flags):
+        return None
+    flags = frozenset(RiskFlag(word) for word in raw_flags)
+    unobserved: set[RiskFlag] = set()
+    if not observed["earnings_date"]:
+        unobserved |= {
+            RiskFlag.EARNINGS_WITHIN_3_BUSINESS_DAYS,
+            RiskFlag.EARNINGS_WITHIN_7_BUSINESS_DAYS,
+        }
+    if not observed["liquidity"]:
+        unobserved.add(RiskFlag.SMALL_CAP_OR_LOW_LIQUIDITY)
+    if not observed["industry"]:
+        unobserved |= {RiskFlag.CYCLICAL_INDUSTRY, RiskFlag.MAJOR_CUSTOMER_DEPENDENCY}
+    # 一時的な増益のリスクは『景気業種』のときだけ判定される。景気業種でないと確定していれば
+    # 該当なしを確認できており、景気業種なら EPS の観測が要る。業種が分からなければ観測できない
+    cyclical_known_false = bool(observed["industry"]) and RiskFlag.CYCLICAL_INDUSTRY not in flags
+    if not (cyclical_known_false or (bool(observed["industry"]) and bool(observed["eps"]))):
+        unobserved.add(RiskFlag.TEMPORARY_EARNINGS_BOOST_RISK)
+    if flags & unobserved:
+        return None  # 観測できなかったのに該当した語がある = 記録の矛盾。使わない
+    return flags, frozenset(unobserved)
+
+
+def risk_flag_view(facts: CandidateRaerFacts) -> RiskFlagView:
+    """リスクの印 6 語の状態を、検出の記録(優先)または旧い記録(安全余裕率の調整)から読む。"""
+    parsed = _parse_detection(facts.risk_detection)
+    if parsed is not None:
+        flags, unobserved = parsed
+        return RiskFlagView(flags, unobserved, RiskFlagSource.DETECTION_RECORD)
+    if not facts.margin_computed:
+        return RiskFlagView(frozenset(), frozenset(RiskFlag), RiskFlagSource.NOT_OBSERVED)
+    flags = frozenset(
+        RiskFlag(code) for code in facts.margin_adjustment_codes if code in _RISK_FLAG_VALUES
+    )
+    return RiskFlagView(flags, frozenset(), RiskFlagSource.MARGIN_ADJUSTMENTS)
+
+
+def risk_flag_view_from_recommendation(rec: Recommendation) -> RiskFlagView:
+    """永続済みの推奨(候補・保有銘柄どちらも)から、リスクの印 6 語の状態を読む。"""
+    return risk_flag_view(facts_from_recommendation(rec))
 
 
 def _risk_flags(
     facts: CandidateRaerFacts,
 ) -> tuple[frozenset[RiskFlag] | None, ProvenanceEntry]:
-    if not facts.margin_computed:
+    view = risk_flag_view(facts)
+    if view.source is RiskFlagSource.NOT_OBSERVED:
         return None, ProvenanceEntry(
             ProvenanceItem.BUSINESS_RISK,
             _RISK_SOURCE,
             derived=False,
             reason=ProvenanceReason.MARGIN_NOT_COMPUTED,
         )
-    flags = frozenset(
-        RiskFlag(code) for code in facts.margin_adjustment_codes if code in _RISK_FLAG_VALUES
-    )
     superseded_included = any(code in _RISK_FLAG_VALUES for code in facts.margin_superseded_codes)
-    return flags, ProvenanceEntry(
+    if view.source is RiskFlagSource.DETECTION_RECORD:
+        # 検出の記録がある: 観測できた / できなかった語を区別できる。候補側は R1 では、
+        # 観測できなかった語を『該当なし』として扱う(買い判定の既存の挙動。HANAKO の判断)。
+        # その事実を印として残す
+        coverage_note = (
+            ProvenanceNote.CANDIDATE_UNOBSERVED_TREATED_AS_NOT_FLAGGED
+            if view.unobserved
+            else ProvenanceNote.RISK_ALL_WORDS_OBSERVED
+        )
+        source = _DETECTION_SOURCE
+    else:
+        coverage_note = ProvenanceNote.CANDIDATE_UNOBSERVED_TREATED_AS_NOT_FLAGGED
+        source = _RISK_SOURCE
+    return view.flags, ProvenanceEntry(
         ProvenanceItem.BUSINESS_RISK,
-        _RISK_SOURCE,
+        source,
         derived=True,
-        notes=(
-            (ProvenanceNote.CANDIDATE_UNOBSERVED_TREATED_AS_NOT_FLAGGED,)
-            + ((ProvenanceNote.SUPERSEDED_CODES_INCLUDED,) if superseded_included else ())
-        ),
+        notes=(coverage_note,)
+        + ((ProvenanceNote.SUPERSEDED_CODES_INCLUDED,) if superseded_included else ()),
     )
 
 
