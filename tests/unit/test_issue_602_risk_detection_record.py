@@ -167,6 +167,51 @@ def test_the_industry_observation_means_the_sector_string_was_obtained_not_a_sto
     assert RiskFlag.MAJOR_CUSTOMER_DEPENDENCY in view.unobserved
 
 
+_SCENARIOS: list[tuple[str, Any, dict[str, Any] | None]] = [
+    ("pharma", _NIHON_SHINYAKU, None),
+    ("auto-parts", _TACHI_S, None),
+    ("no-earnings-date", _NIHON_SHINYAKU, {"business_days_to_earnings": None}),
+    ("no-trading-value", _NIHON_SHINYAKU, {"avg_trading_value": None}),
+    ("auto-parts-no-earnings-date", _TACHI_S, {"business_days_to_earnings": None}),
+    ("auto-parts-no-trading-value", _TACHI_S, {"avg_trading_value": None}),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "fixture", "override"), _SCENARIOS, ids=[s[0] for s in _SCENARIOS]
+)
+def test_a_flag_is_recorded_only_when_it_is_determined_true_by_an_observed_input(
+    monkeypatch: pytest.MonkeyPatch, name: str, fixture: Any, override: dict[str, Any] | None
+) -> None:
+    """★ 唯一の砦(サブちゃんの merge 条件): flags に入る語は、その時点で True と確定した語だけ ★
+
+    読み手は『矛盾した記録(観測できなかったのに該当した語)』を検出せず、flags の語を観測済みとして
+    扱う。したがって生産側が、観測できていない入力から語を flags に入れてはならない。
+    """
+    record = _record(_analyze(monkeypatch, fixture, override=override))
+    flags = set(record["flags"])
+    observed = record["observed"]
+    # 決算 3 / 7 営業日以内の語 = 決算日が分かるときだけ
+    if flags & {"earnings_within_3_business_days", "earnings_within_7_business_days"}:
+        assert observed["earnings_date"] is True
+    # 小型・低流動性の語 = 平均売買代金が分かるときだけ
+    if "small_cap_or_low_liquidity" in flags:
+        assert observed["liquidity"] is True
+    # 主要顧客依存 = 業種の文字列が取れて、自動車部品に分類されたときだけ
+    if "major_customer_dependency" in flags:
+        assert observed["industry"] is True
+    # 一時的な増益のリスク = 景気業種で、EPS が両方取れたときだけ
+    if "temporary_earnings_boost_risk" in flags:
+        assert "cyclical_industry" in flags
+        assert observed["eps"] is True
+    # 検出された語は、安全余裕率の調整(買い判定が検出した語)の部分集合
+    detected = {
+        a.code for a in _analyze(monkeypatch, fixture, override=override).margin_adjustments
+    }
+    assert flags <= set(service_module._RAER_RISK_WORDS)
+    assert flags >= (detected & set(service_module._RAER_RISK_WORDS))
+
+
 def test_the_eps_observation_needs_both_the_normalized_and_the_forecast_eps() -> None:
     both = _facts(eps_observed=True)["observed"]
     assert isinstance(both, dict) and both["eps"] is True
