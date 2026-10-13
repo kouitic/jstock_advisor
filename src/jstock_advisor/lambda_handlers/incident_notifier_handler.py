@@ -52,6 +52,7 @@ from typing import Any
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.config.models import AppConfig
 from jstock_advisor.domain.jst import require_timezone_aware
+from jstock_advisor.domain.notification import incident_issue_guard as issue_guard
 from jstock_advisor.domain.notification.incident_fingerprint import (
     IncidentFingerprintInput,
     compute_fingerprint,
@@ -315,7 +316,8 @@ def _process_signal(signal: IncidentSignal, config: AppConfig, now: dt.datetime)
     # (LINE側はGitHub側の失敗の影響を一切受けない)に違反する。
     if github_safe_to_attempt:
         try:
-            _attempt_github_issue(signal, fingerprint, config, now)
+            github_outcome = _attempt_github_issue(signal, fingerprint, config, now)
+            _notify_auto_stop_if_due(github_outcome, now)
         except Exception:
             logger.exception(
                 "incident_notifier github issue attempt failed unexpectedly fingerprint=%s",
@@ -377,9 +379,27 @@ def _send_line(
     return None
 
 
+def _notify_auto_stop_if_due(outcome: issue_guard.IssueGuardOutcome, now: dt.datetime) -> None:
+    """GitHub起票の自動停止(Issue #926)をLINEへ1回だけ知らせる。
+
+    通知の権利を先に条件つきで確保し(1回だけ)、pushに失敗したら確保を戻す(次のsignalで再試行)。
+    ★ LINEのincident通知の送信・成否判定・claimには一切影響しない(失敗はここで握らず、呼び出し元の
+    try/exceptがログにだけ残す)。
+    """
+    if not outcome.auto_stop_notification_due:
+        return
+    if not tracker.try_claim_kill_switch_notification(now):
+        return
+    try:
+        build_live_line_client_from_env().push_message(issue_guard.build_auto_stop_message())
+    except Exception:
+        tracker.release_kill_switch_notification()
+        logger.warning("incident_notifier auto-stop line push failed; will retry on a later signal")
+
+
 def _attempt_github_issue(
     signal: IncidentSignal, fingerprint: str, config: AppConfig, now: dt.datetime
-) -> None:
+) -> issue_guard.IssueGuardOutcome:
     """GitHub Issue自動起票(Issue #508)を試行する。GitHub API呼び出し自体の例外は
     `incident_github_issue_service.process_incident_issue()`内で完全に握りつぶされる。
     本関数自身(`IncidentIssueNotice`構築等、API呼び出し前のセットアップ)の例外は、
@@ -402,7 +422,7 @@ def _attempt_github_issue(
         is_ongoing=signal.is_ongoing,
     )
     repo_owner, repo_name = _split_github_repository()
-    incident_github_issue_service.process_incident_issue(
+    return incident_github_issue_service.process_incident_issue(
         notice,
         config.incident_notification,
         now,

@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import ast
 import datetime as dt
+import random
 import re
+import uuid
 from pathlib import Path
 
 import pytest
@@ -167,6 +169,44 @@ def test_normalization_absorbs_identifiers_timestamps_and_counts() -> None:
         "after 7 attempts (id=cafebabe87654321)",
     )
     assert a == b
+
+
+def _random_uuids_with_letters(count: int) -> list[str]:
+    """実在の乱数 UUID と同じ形(16 進の英字を含む)の固定の fixture。seed 固定で決定的。"""
+    rng = random.Random(926)
+    values: list[str] = []
+    while len(values) < count:
+        value = str(uuid.UUID(int=rng.getrandbits(128), version=4))
+        if all(any(c in "abcdef" for c in group) for group in value.split("-")):
+            values.append(value)
+    return values
+
+
+def test_normalization_collapses_random_uuids_that_contain_letters() -> None:
+    """UUID の規則そのものを固定する(Issue #926。#188 の変異 A10)。
+
+    数字だけの UUID は後段の 16 進数・数字の規則でも潰れるため、UUID の規則を外しても
+    気づけない。英字を含む乱数 UUID は、UUID の規則が無いと別の署名になり、同一 root cause の
+    再発のたびに別の fingerprint (= 新しい Issue)になる。
+    """
+    uuids = _random_uuids_with_letters(50)
+    uuids += [value.upper() for value in uuids]  # 大文字で出力するライブラリもある
+    signatures = {
+        normalize_error_signature("ProviderDataError", f"request {value} failed") for value in uuids
+    }
+    assert signatures == {"ProviderDataError: request <ID> failed"}
+
+
+def test_the_random_uuid_fixtures_are_discriminating_without_the_uuid_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """反証: UUID の規則を外すと、同じ fixture で署名が分かれる(= 上のテストが落ちる)。"""
+    monkeypatch.setattr(incident_fingerprint, "_UUID_RE", re.compile(r"(?!x)x"))
+    signatures = {
+        normalize_error_signature("ProviderDataError", f"request {value} failed")
+        for value in _random_uuids_with_letters(50)
+    }
+    assert len(signatures) > 1
 
 
 def test_normalization_still_distinguishes_different_exception_types() -> None:
