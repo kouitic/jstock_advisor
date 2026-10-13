@@ -24,6 +24,7 @@ from jstock_advisor.domain.notification.incident_github_issue_message import (
     IncidentIssueNotice,
     issue_marker,
 )
+from jstock_advisor.domain.notification.incident_issue_limits import IncidentIssueLimits
 from jstock_advisor.domain.notification.incident_message import IncidentJob
 from jstock_advisor.infrastructure.aws import incident_state_tracker as tracker
 from jstock_advisor.infrastructure.github import client as github_client_module
@@ -133,6 +134,23 @@ def _issue_response(number: int = 1, state: str = "open") -> dict[str, Any]:
 
 def _search_response(items: list[dict[str, Any]]) -> dict[str, Any]:
     return {"items": items}
+
+
+@pytest.fixture(autouse=True)
+def _decided_issue_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """起票の抑止(Issue #926)の上限を、本ファイルの対象(起票・コメント・失敗の分離)を妨げない
+    寛容な決定済みの値にする。出荷の専用 YAML は全項目 null(未決定 = 新規 Issue を作らない)で、
+    その挙動は test_issue_926_* が固定している。"""
+    monkeypatch.setattr(
+        incident_github_issue_service,
+        "load_incident_issue_limits",
+        lambda: IncidentIssueLimits(
+            new_issue_min_interval_minutes=1,
+            new_issue_limit_per_fingerprint=99,
+            new_issue_limit_global=99,
+            auto_stop_denied_threshold=99,
+        ),
+    )
 
 
 # --- 設定状態の区別 --------------------------------------------------------------

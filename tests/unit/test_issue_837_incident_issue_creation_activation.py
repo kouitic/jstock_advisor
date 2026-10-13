@@ -16,7 +16,14 @@ true にする(その切替は別の USER 承認)。
     (b) 出荷 config のまま(テスト側で config を上書きしない)なら、配線(環境変数)が揃っていても
         GitHub を一切呼ばない。LINE は送られ、状態は SENT のまま(これが今回の Production の状態)
     (b') 有効の config(テスト側で明示的に true にする)と配線があれば、GitHub Issue を 1 件作成し、
-        出荷 config の label を付ける(有効化したときの経路が壊れていないことの固定)
+        出荷 config の label を付ける(有効化したときの経路が壊れていないことの固定)。
+        ★ Issue #926 以降は、新規起票の上限値(config/incident_issue_limits.yaml)が決定済みで
+        あることが条件になる。出荷値は全項目 null(未決定)のため、このテストは上限値を
+        決定済みの値へ差し替える
+    (b2) 有効の config(テスト側で明示的に true にする)と配線が揃っていても、上限値が未決定のまま
+        (出荷値)なら、新規 Issue を作らない(GitHub を一切呼ばない)。LINE は送られ、状態に
+        抑止の理由(LIMITS_UNDECIDED)を残す。(b)(出荷 flag = false)と合わせて、有効化の前提が
+        『flag を true にする』と『上限値を決める』の 2 つであることを固定する
     (c) 有効の config でも、配線が無ければ GitHub を一切呼ばず、LINE も送られる
         (配線されていない環境では、状態に CONFIGURATION_ERROR を記録するだけで安全にスキップする)
     (d) LINE の通知(送った文面・件数・handler の戻り値・状態の SENT)は、flag が false のときと
@@ -47,9 +54,11 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 from moto import mock_aws
 
 from jstock_advisor.config.loader import load_config
+from jstock_advisor.domain.notification.incident_issue_limits import IncidentIssueLimits
 from jstock_advisor.infrastructure.aws import incident_state_tracker as tracker
 from jstock_advisor.infrastructure.github import client as github_client_module
 from jstock_advisor.lambda_handlers import incident_notifier_handler as handler_module
+from jstock_advisor.services import incident_github_issue_service
 
 _REGION = "ap-northeast-1"
 _SECRET_NAME = "github-app-incident-activation"
@@ -224,6 +233,20 @@ def _enabled_config() -> Any:
     )
 
 
+def _decide_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """上限値(Issue #926)を、起票を妨げない決定済みの値にする(出荷値は全項目 null)。"""
+    monkeypatch.setattr(
+        incident_github_issue_service,
+        "load_incident_issue_limits",
+        lambda: IncidentIssueLimits(
+            new_issue_min_interval_minutes=1,
+            new_issue_limit_per_fingerprint=99,
+            new_issue_limit_global=99,
+            auto_stop_denied_threshold=99,
+        ),
+    )
+
+
 # --- (b) 出荷 config のまま: 配線が揃っていても GitHub を呼ばない(今回の Production の状態) ------
 
 
@@ -257,6 +280,7 @@ def test_with_an_enabled_config_and_wiring_one_github_issue_is_created(
     enabled = _enabled_config()
     monkeypatch.setattr(handler_module, "load_config", lambda: enabled)
     _wire(monkeypatch, secret_arn)
+    _decide_limits(monkeypatch)
     fake = _install_urlopen(monkeypatch, [_TOKEN, _ISSUE])
     message = _alarm_message()
 
@@ -269,6 +293,30 @@ def test_with_an_enabled_config_and_wiring_one_github_issue_is_created(
     state = tracker.get_incident_state(_fingerprint_of(message))
     assert state["github_issue_create_status"] == "CREATED"
     assert state["github_issue_number"] == 7
+
+
+# --- (b2) 有効の config でも、出荷の上限値が未決定のままなら新規 Issue は作らない(Issue #926)
+
+
+def test_with_an_enabled_config_and_undecided_limits_no_issue_is_created_and_line_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch, line: _RecordingLineClient, secret_arn: str
+) -> None:
+    enabled = _enabled_config()
+    monkeypatch.setattr(handler_module, "load_config", lambda: enabled)
+    _wire(monkeypatch, secret_arn)
+    fake = _install_urlopen(monkeypatch, [])
+    message = _alarm_message()
+
+    # limits を差し替えない = 出荷の専用 YAML(全項目 null = 未決定)がそのまま使われる
+    result = handler_module.handler(_sns_event(message), None)
+
+    assert result == {"processed": 1}
+    assert fake.requests == []  # GitHub を一切呼ばない
+    assert len(line.sent) == 1  # LINE は通常どおり
+    state = tracker.get_incident_state(_fingerprint_of(message))
+    assert state["status"] == "SENT"
+    assert "github_issue_number" not in state
+    assert state["github_issue_last_denied_reason"] == "LIMITS_UNDECIDED"
 
 
 # --- (c) 有効の config でも、配線が無ければ GitHub を呼ばない ------------------------------
