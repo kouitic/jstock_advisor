@@ -524,14 +524,18 @@ def _imported_modules(tree: ast.Module) -> set[str]:
 
 
 def test_nothing_in_src_imports_the_policy_loader() -> None:
-    """dormant: 本 module はどこからも import されない(Production へ接続しない)。"""
+    """dormant: 本 module を import してよい src は明示の 1 件だけ(Production へ接続しない)。
+
+    許可は PR-F1 の入力の組み立て(`allocation_inputs`。方針の束の型を受ける。それ自体が dormant)。
+    handler・CLI・services から import されたら落ちる。
+    """
     importers = sorted(
         path.relative_to(_PACKAGE).as_posix()
         for path in _PACKAGE.rglob("*.py")
         if path != _MODULE_PATH
         and any("allocation_policy_config" in name for name in _imported_modules(_tree(path)))
     )
-    assert importers == []
+    assert importers == ["domain/signals/allocation_inputs.py"]
 
 
 def test_the_loader_imports_only_pure_dependencies() -> None:
