@@ -13,7 +13,12 @@
     配当の None から 0 を推測しない
   ・★ 確定しないもの(UNDETERMINED で表現する。USER 承認の範囲 #122 …6100082651)★
       composite(合成式が未決)・annualized(年率換算。到達期間を信頼できる形で推定できない間は
-      行わない)・revision(Fair Value Revision。規則は PR-2)。重み・閾値は持たない
+      行わない)。重み・閾値は持たない
+  ・revision(Fair Value Revision): 規則は `fair_value_revision.py`(PR-2)。PR-2c で、その結果を
+    任意引数 `revision` で受けて載せられるようにした(接続)。渡さなければ従来どおり
+    REVISION_NOT_IMPLEMENTED。★ 確認済みの方向(UP / STABLE / DOWN)だけが値(`confirmed_revision_pct`)
+    を持ち、未確認・UNDETERMINED は値を作らず理由を持つ(未確認の参考値を算入しない)。
+    revision は composite にも RAER の土台にも入れない(値の記録のみ。二重計上しない)
   ・Revision を UPSIDE に足し込まない設計の前提: Fair Value の変化は UPSIDE(現在の Fair Value と
     現在価格の差)に既に反映されている。足すと同じ事実を 2 回数える(二重計上)
   ・時計・営業日・timezone を読まない: evaluation_date は呼び出し側が渡す記録用の値
@@ -38,6 +43,10 @@ from enum import StrEnum
 from jstock_advisor.domain.entities.enums import ConfidenceLevel
 from jstock_advisor.domain.entities.valuation import FairValueUnusableReasonCode
 from jstock_advisor.domain.price_freshness import PriceFreshnessVerdict
+from jstock_advisor.domain.valuation.fair_value_revision import (
+    FairValueRevisionResult,
+    RevisionReason,
+)
 from jstock_advisor.domain.valuation.yield_calc import BenefitProgramState, compute_total_yield_pct
 
 #: 式・規則の版。composite が決まる前の『構成要素のみ』の版であることを示す。
@@ -53,9 +62,19 @@ class ReasonCode(StrEnum):
     FAIR_VALUE_NOT_USABLE = "FAIR_VALUE_NOT_USABLE"  # usable_for_trading_judgment = False
     DIVIDEND_UNKNOWN = "DIVIDEND_UNKNOWN"  # 予想配当が不明(None から 0 を推測しない)
     BENEFIT_UNVALUABLE = "BENEFIT_UNVALUABLE"  # 優待の制度はあるが値付けできない
-    REVISION_NOT_IMPLEMENTED = "REVISION_NOT_IMPLEMENTED"  # Fair Value Revision の規則は PR-2
+    REVISION_NOT_IMPLEMENTED = "REVISION_NOT_IMPLEMENTED"  # revision を渡さなかった(接続前)
     COMPOSITION_RULE_NOT_DECIDED = "COMPOSITION_RULE_NOT_DECIDED"  # composite の合成式が未決
     HORIZON_NOT_ESTIMATED = "HORIZON_NOT_ESTIMATED"  # 年率換算に要る到達期間を推定していない
+    # --- PR-2c: Fair Value Revision の結果を載せるとき(RevisionReason と 1 対 1)---
+    REVISION_UNCONFIRMED = (
+        "REVISION_UNCONFIRMED"  # 方向の兆候はあるが水準の持続が未確認(算入しない)
+    )
+    REVISION_PARAMETERS_NOT_DECIDED = "REVISION_PARAMETERS_NOT_DECIDED"  # 数値パラメータが未決
+    REVISION_NO_HISTORY = "REVISION_NO_HISTORY"  # 評価日までに履歴の点が無い
+    REVISION_ONLY_UNUSABLE_POINTS = "REVISION_ONLY_UNUSABLE_POINTS"  # 適格な点が無い
+    REVISION_INSUFFICIENT_HISTORY = "REVISION_INSUFFICIENT_HISTORY"  # 窓内の適格な点が足りない
+    REVISION_STALE_HISTORY = "REVISION_STALE_HISTORY"  # 最新の適格な点が古すぎる
+    REVISION_METHOD_SET_CHANGED = "REVISION_METHOD_SET_CHANGED"  # 比べる点の手法の集合が違う
 
 
 class Note(StrEnum):
@@ -201,6 +220,55 @@ def compute_income(income: IncomeInput) -> ComponentResult:
     return ComponentResult(reasons=tuple(reasons))
 
 
+#: Fair Value Revision の理由 -> ReasonCode(RevisionReason の全メンバーを明示。1 対 1)。
+#: 新しい RevisionReason が増えたら、ここと adapter の写像を同じ PR で決める。
+_REVISION_REASON_TO_CODE: dict[RevisionReason, ReasonCode] = {
+    RevisionReason.REVISION_UNCONFIRMED: ReasonCode.REVISION_UNCONFIRMED,
+    RevisionReason.REVISION_PARAMETERS_NOT_DECIDED: ReasonCode.REVISION_PARAMETERS_NOT_DECIDED,
+    RevisionReason.NO_HISTORY: ReasonCode.REVISION_NO_HISTORY,
+    RevisionReason.ONLY_UNUSABLE_POINTS: ReasonCode.REVISION_ONLY_UNUSABLE_POINTS,
+    RevisionReason.INSUFFICIENT_HISTORY: ReasonCode.REVISION_INSUFFICIENT_HISTORY,
+    RevisionReason.STALE_HISTORY: ReasonCode.REVISION_STALE_HISTORY,
+    RevisionReason.METHOD_SET_CHANGED: ReasonCode.REVISION_METHOD_SET_CHANGED,
+}
+
+
+def _revision_component(
+    revision: FairValueRevisionResult | None, evaluation_date: date
+) -> ComponentResult:
+    """Fair Value Revision の結果を構成要素 1 つへ載せる(値は確認済みの方向だけ)。
+
+    ・None: 従来どおり REVISION_NOT_IMPLEMENTED(接続前と完全に同一)
+    ・確認済み(UP / STABLE / DOWN): 値 = `confirmed_revision_pct`(符号つきの %)。方向は detail
+    ・未確認(UP_UNCONFIRMED / DOWN_UNCONFIRMED): ★ 値を作らない ★(参考値を算入しない・載せない)。
+      理由 REVISION_UNCONFIRMED。方向と、両側に振れた印だけを detail に残す(数は載せない)
+    ・UNDETERMINED: 値を作らない(0 で埋めない)。PR-2 の理由を ReasonCode へ 1 対 1 に写す
+    """
+    if revision is None:
+        return ComponentResult(reasons=(ReasonCode.REVISION_NOT_IMPLEMENTED,))
+    if revision.evaluation_date != evaluation_date:
+        raise ValueError(
+            "Fair Value Revision の評価日は Expected Return の評価日と一致しなければならない"
+        )
+    confirmed = revision.confirmed_revision_pct
+    if confirmed is not None:
+        return ComponentResult(
+            value=confirmed,
+            detail=f"direction={revision.direction.value};n_points={revision.n_points}",
+        )
+    reason = revision.reason
+    if reason is None:  # 確認済みは reason を持たず上で返っている。型の絞り込み用(到達不能)
+        raise ValueError("確認済みでない Fair Value Revision は理由を持つ")
+    # 値・数(参考値・点数)は載せない(adapter が detail をそのまま写す。公開面に実値を出さない)
+    parts = [f"direction={revision.direction.value}"]
+    if revision.latest_points_disagree:
+        parts.append("latest_points_disagree=True")
+    return ComponentResult(
+        reasons=(_REVISION_REASON_TO_CODE[reason],),
+        detail=";".join(parts),
+    )
+
+
 def compute_expected_return(
     *,
     evaluation_date: date,
@@ -208,10 +276,14 @@ def compute_expected_return(
     price_freshness: PriceFreshnessVerdict,
     fair_value: FairValueInput,
     income: IncomeInput,
+    revision: FairValueRevisionResult | None = None,
 ) -> ExpectedReturnResult:
     """Expected Return の構成要素(UPSIDE・INCOME)を計算する。純粋関数。
 
-    revision・composite・annualized は常に UNDETERMINED(理由つき)で、値を作らない。
+    composite・annualized は常に UNDETERMINED(理由つき)で、値を作らない。revision は、渡された
+    Fair Value Revision の結果を載せる(`_revision_component`)。渡さなければ
+    REVISION_NOT_IMPLEMENTED。
+    revision は composite にも UPSIDE / INCOME にも足さない。
     取得価格・含み益・available_cash・時計は引数に持たない。
     """
     notes: list[Note] = []
@@ -226,7 +298,7 @@ def compute_expected_return(
             current_price=current_price, price_freshness=price_freshness, fair_value=fair_value
         ),
         income=compute_income(income),
-        revision=ComponentResult(reasons=(ReasonCode.REVISION_NOT_IMPLEMENTED,)),
+        revision=_revision_component(revision, evaluation_date),
         composite=ComponentResult(reasons=(ReasonCode.COMPOSITION_RULE_NOT_DECIDED,)),
         annualized=ComponentResult(reasons=(ReasonCode.HORIZON_NOT_ESTIMATED,)),
         notes=tuple(notes),
