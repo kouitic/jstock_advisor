@@ -257,9 +257,12 @@ def _raer_risk_detection_facts(
     observed の意味(読み側の `risk_flag_view` が語へ展開する):
       earnings_date = 次回決算までの営業日数が分かる(決算 3 / 7 営業日以内の 2 語)
       liquidity     = 20 日平均売買代金が分かる(小型・低流動性の語)
-      industry      = 業種を分類できた(景気業種・主要顧客依存の 2 語。分類が UNKNOWN でない、
-                      または景気型に該当)
-      eps           = 平準化 EPS と会社予想 EPS が揃う(景気業種のときの一時的な増益の語)
+      industry      = 業種の文字列が取れた(= buy_industry_sector が UNKNOWN でない)。
+                      景気業種・主要顧客依存の 2 語の判定は、この分類が前提。銘柄分類〔景気型〕
+                      だけで景気業種に該当した場合は、該当した語として flags に載るが、
+                      主要顧客依存は言えない
+      eps           = 平準化 EPS と会社予想 EPS の『両方』が取れた(片方だけでは一時的な増益の
+                      リスクは不定。景気業種のときの一時的な増益の語)
     """
     return {
         "version": RAER_RISK_DETECTION_VERSION,
@@ -1494,10 +1497,7 @@ class BuySignalService:
                     adjustment_codes=adjustment_codes,
                     business_days_to_earnings=business_days_to_earnings,
                     avg_trading_value=avg_trading_value,
-                    industry_classified=(
-                        buy_industry_sector != BuyIndustrySector.UNKNOWN
-                        or StockType.CYCLICAL in snapshot.stock_type_classification.types
-                    ),
+                    industry_classified=(buy_industry_sector != BuyIndustrySector.UNKNOWN),
                     eps_observed=(
                         eps_result.normalized_eps is not None and financial.forecast_eps is not None
                     ),

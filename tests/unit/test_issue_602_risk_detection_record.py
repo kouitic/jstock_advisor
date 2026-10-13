@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from jstock_advisor.domain.entities.enums import RecommendationType
+from jstock_advisor.domain.entities.enums import RecommendationType, StockType
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.valuation import raer_inputs
 from jstock_advisor.domain.valuation.raer import RiskFlag
@@ -136,6 +136,42 @@ def test_a_missing_input_is_recorded_as_not_observed_and_never_as_a_flag(
         "liquidity": {"small_cap_or_low_liquidity"},
     }[key]
     assert not (set(record["flags"]) & words)
+
+
+def test_the_industry_observation_means_the_sector_string_was_obtained_not_a_stock_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SHOULD-4: industry = 業種の文字列が取れた(buy_industry_sector が UNKNOWN でない)。
+
+    銘柄分類(景気型)では観測済みにしない。
+    """
+    unknown = _analyze(
+        monkeypatch,
+        override={
+            "financial": _build_snapshot(_NIHON_SHINYAKU).financial.model_copy(
+                update={"industry": None, "sector": None}
+            ),
+            # 銘柄分類(景気型)に該当しても、業種の文字列が取れたことにはならない
+            "stock_type_classification": _build_snapshot(
+                _NIHON_SHINYAKU
+            ).stock_type_classification.model_copy(update={"types": [StockType.CYCLICAL]}),
+        },
+    )
+    record = _record(unknown)
+    assert record["observed"]["industry"] is False
+    assert "cyclical_industry" in record["flags"]  # 景気型の分類で該当は確定している
+    # 業種が不明なら、主要顧客依存・景気業種(業種の分類が前提の語)は『該当しない』と言えない
+    view = raer_inputs.risk_flag_view_from_recommendation(unknown)
+    assert RiskFlag.CYCLICAL_INDUSTRY in view.flags
+    assert RiskFlag.CYCLICAL_INDUSTRY not in view.unobserved  # 該当は観測できた証拠
+    assert RiskFlag.MAJOR_CUSTOMER_DEPENDENCY in view.unobserved
+
+
+def test_the_eps_observation_needs_both_the_normalized_and_the_forecast_eps() -> None:
+    both = _facts(eps_observed=True)["observed"]
+    assert isinstance(both, dict) and both["eps"] is True
+    neither = _facts(eps_observed=False)["observed"]
+    assert isinstance(neither, dict) and neither["eps"] is False
 
 
 def test_the_industry_is_not_observed_only_when_the_classification_is_unknown(
