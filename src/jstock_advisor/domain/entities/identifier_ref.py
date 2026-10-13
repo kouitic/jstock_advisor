@@ -53,7 +53,7 @@ import hashlib
 import re
 from typing import Final, NewType
 
-from jstock_advisor.domain.entities.owner import normalize_owner
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, normalize_owner
 
 OwnerRef = NewType("OwnerRef", str)
 
@@ -68,6 +68,10 @@ _REF_PATTERN: Final = re.compile(rf"^(kv[0-9]+):([0-9a-f]{{{_DIGEST_HEX_LENGTH}}
 
 class IdentifierRefError(ValueError):
     """符号化できない入力・不正な符号。メッセージに値を含めない。"""
+
+
+class KeyedReferenceRequiredError(IdentifierRefError):
+    """実在の owner の記録には鍵つきの符号(kv1)が要る。kv0 では永続しない(USER 決定 #925 …6142405238)。"""
 
 
 def _fail(problem: str) -> IdentifierRefError:
@@ -87,6 +91,17 @@ def owner_ref(owner: str) -> OwnerRef:
     if not normalized:
         raise _fail("owner must not be empty")
     return OwnerRef(f"{CURRENT_VERSION}:{_digest(_OWNER_LABEL, normalized)}")
+
+
+def require_persistable(owner: str) -> None:
+    """kv0 の符号で記録してよい owner か。DEFAULT_OWNER 以外は拒否する(例外に値を含めない)。
+
+    USER の決定(#925 …6142405238): 実在の owner を kv0(鍵なし)で永続化することを禁止する。
+    現在の Shadow の配線は DEFAULT_OWNER だけを渡す。実在の owner を渡す変更(PR-F2-2 の配線)は、
+    鍵つきの符号(kv1)の実装の後で、その時にこの関数の判定を kv1 のときの許可へ替える。
+    """
+    if not isinstance(owner, str) or normalize_owner(owner) != normalize_owner(DEFAULT_OWNER):
+        raise KeyedReferenceRequiredError("identifier_ref: a keyed reference (kv1) is required")
 
 
 def parse_ref(ref: str) -> tuple[str, str]:

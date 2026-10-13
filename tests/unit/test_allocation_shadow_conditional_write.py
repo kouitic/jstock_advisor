@@ -45,6 +45,19 @@ from jstock_advisor.services.audit_service import AuditService
 _REGION = "ap-northeast-1"
 _NOW = dt.datetime(2026, 10, 12, 8, 0, tzinfo=dt.UTC)
 _BATCH = "buy-candidates-2026-10-12"
+
+
+@pytest.fixture
+def allow_any_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """予算・件数の挙動を複数 owner で試験するため、kv0 の owner の制限だけを外す(試験の中だけ)。
+
+    本番の制限(DEFAULT_OWNER 以外を kv0 で永続しない)は test_kv0_boundary で別に固定している。
+    """
+    from jstock_advisor.services import allocation_shadow_service as service_module
+
+    monkeypatch.setattr(service_module, "require_persistable", lambda owner: None)
+
+
 _SHADOW = AllocationShadowConfig(mode=AllocationShadowMode.SHADOW)
 _PLENTY_OF_TIME = lambda: 300_000  # noqa: E731 - 残り 300 秒
 
@@ -140,6 +153,7 @@ def test_second_run_hits_conditional_check_failed_and_keeps_the_item(audit_table
     assert _items(audit_table) == [before]
 
 
+@pytest.mark.usefixtures("allow_any_owner")
 def test_distinct_owners_are_stored_separately(audit_table: Any) -> None:
     assert _observe(["owner-a", "owner-b"]) is True
 

@@ -74,7 +74,11 @@ from botocore.exceptions import ClientError
 
 from jstock_advisor.domain.entities.available_cash import AvailableCash
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
-from jstock_advisor.domain.entities.identifier_ref import owner_ref
+from jstock_advisor.domain.entities.identifier_ref import (
+    KeyedReferenceRequiredError,
+    owner_ref,
+    require_persistable,
+)
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.domain.signals.allocation_shadow_config import (
     AllocationShadowConfig,
@@ -294,7 +298,16 @@ def record_result(
     now: dt.datetime,
     io_timeout_seconds: float,
 ) -> bool:
-    """結果を AuditLog へ条件付きで追記する(期限つき)。追記したら True。失敗は握る。"""
+    """結果を AuditLog へ条件付きで追記する(期限つき)。追記したら True。失敗は握る。
+
+    実在の owner を kv0(鍵なし)で永続化することは禁止(USER 決定 #925 …6142405238)。DEFAULT_OWNER 以外は
+    書かずに False を返す(鍵つきの kv1 の実装後に、許可を kv1 のときへ替える)。
+    """
+    try:
+        require_persistable(owner)
+    except KeyedReferenceRequiredError:
+        logger.warning("allocation shadow record refused: a keyed reference is required")
+        return False
     output_values: dict[str, Any] = {
         "outcome": result.outcome.value,
         "reason": result.reason.value if result.reason is not None else None,
@@ -395,7 +408,14 @@ def _observe(
     deadline = Deadline(config.time_limit_seconds, monotonic)  # 区間全体で 1 つ(総予算。Q-G)
     recorded = False
     over_budget_write_used = False
+    refused = 0
     for position, owner in enumerate(owners):
+        try:
+            require_persistable(owner)
+        except KeyedReferenceRequiredError:
+            # 実在の owner は kv0 で記録しない(計算にも進まない)。件数だけ数える
+            refused += 1
+            continue
         precheck = _precheck(config, remaining_time_ms)  # owner ごとに毎回読む(Q-F)
         if deadline.expired():
             result = ShadowResult(ShadowOutcome.SKIPPED, ShadowSkipReason.TIME_LIMIT)
@@ -436,5 +456,9 @@ def _observe(
                 io_timeout_seconds=write_timeout,
             )
             or recorded
+        )
+    if refused:
+        logger.warning(
+            "allocation shadow refused %d owner(s): a keyed reference is required", refused
         )
     return recorded

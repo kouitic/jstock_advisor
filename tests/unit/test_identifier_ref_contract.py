@@ -24,9 +24,11 @@ from jstock_advisor.domain.entities.identifier_ref import (
     CURRENT_VERSION,
     KNOWN_VERSIONS,
     IdentifierRefError,
+    KeyedReferenceRequiredError,
     OwnerRef,
     owner_ref,
     parse_ref,
+    require_persistable,
 )
 from jstock_advisor.domain.entities.owner import log_ref
 
@@ -233,3 +235,41 @@ def test_the_module_is_pure() -> None:
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             assert node.func.attr not in forbidden_calls
+
+
+# --- kv0 の境界(USER 決定 #925 …6142405238 の 4)-----------------------------------------
+
+
+def test_only_the_default_owner_may_be_persisted_with_the_unkeyed_reference() -> None:
+    from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
+
+    require_persistable(DEFAULT_OWNER)
+    require_persistable(f"  {DEFAULT_OWNER}  ")  # 正規化後に同じ owner
+
+
+@pytest.mark.parametrize("owner", ["owner-b", "owner-a", "", "  ", "本人2", "他人"])
+def test_any_other_owner_is_refused_without_echoing_it(owner: str) -> None:
+    with pytest.raises(KeyedReferenceRequiredError) as caught:
+        require_persistable(owner)
+
+    assert owner.strip() == "" or owner not in str(caught.value)
+    assert isinstance(caught.value, IdentifierRefError)
+
+
+@pytest.mark.parametrize("value", [None, 5, b"x", ["a"]])
+def test_a_non_str_owner_is_refused_too(value: object) -> None:
+    with pytest.raises(KeyedReferenceRequiredError):
+        require_persistable(value)  # type: ignore[arg-type]
+
+
+def test_the_refusal_error_is_built_without_a_value() -> None:
+    tree = ast.parse(_MODULE_PATH.read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "KeyedReferenceRequiredError"
+    ]
+    assert len(calls) == 1
+    assert all(isinstance(arg, ast.Constant) for arg in calls[0].args)
