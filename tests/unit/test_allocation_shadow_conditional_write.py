@@ -24,7 +24,8 @@ from botocore.client import BaseClient
 from moto import mock_aws
 
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
-from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, log_ref
+from jstock_advisor.domain.entities.identifier_ref import owner_ref
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.domain.signals.allocation_shadow_config import (
     AllocationShadowConfig,
     AllocationShadowMode,
@@ -105,7 +106,7 @@ def test_a_single_run_stores_one_item_with_the_deterministic_id(audit_table: Any
     [item] = _items(audit_table)
     # 既定の計算は『未実装』= スキップなので、スキップの ID（結果の ID とは別の鍵。Q-B）
     assert item["audit_id"] == skip_audit_id(_BATCH, DEFAULT_OWNER)
-    assert item["audit_id"] == f"{SKIP_ID_PREFIX}:{_BATCH}:{log_ref(DEFAULT_OWNER)}"
+    assert item["audit_id"] == f"{SKIP_ID_PREFIX}:{_BATCH}:{owner_ref(DEFAULT_OWNER)}"
 
 
 def test_eight_concurrent_runs_store_exactly_one_item(audit_table: Any) -> None:
@@ -168,7 +169,7 @@ def test_stored_item_contains_no_owner_name_or_money(audit_table: Any) -> None:
     [item] = _items(audit_table)
     text = repr(item)
     assert DEFAULT_OWNER not in text  # 実名(固定の既定 owner 文字列)は保存しない
-    assert log_ref(DEFAULT_OWNER) in text  # 符号は保存する
+    assert owner_ref(DEFAULT_OWNER) in text  # 符号は保存する
     assert "COMPUTE_NOT_IMPLEMENTED" in text
 
 

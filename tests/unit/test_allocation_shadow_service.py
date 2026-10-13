@@ -34,7 +34,8 @@ from jstock_advisor.domain.entities.enums import (
     NotificationMode,
 )
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
-from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, log_ref
+from jstock_advisor.domain.entities.identifier_ref import owner_ref
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.domain.signals.allocation_shadow_config import (
     AllocationShadowConfig,
     AllocationShadowMode,
@@ -243,15 +244,15 @@ def test_audit_ids_are_deterministic_separate_for_result_and_skip_and_hide_the_o
 
     [skip_record] = skipped.records
     [result_record] = computed.records
-    assert skip_record["audit_id"] == f"{SKIP_ID_PREFIX}:{_BATCH}:{log_ref(DEFAULT_OWNER)}"
-    assert result_record["audit_id"] == f"{DECISION_TYPE}:{_BATCH}:{log_ref(DEFAULT_OWNER)}"
+    assert skip_record["audit_id"] == f"{SKIP_ID_PREFIX}:{_BATCH}:{owner_ref(DEFAULT_OWNER)}"
+    assert result_record["audit_id"] == f"{DECISION_TYPE}:{_BATCH}:{owner_ref(DEFAULT_OWNER)}"
     assert skip_record["audit_id"] == skip_audit_id(_BATCH, DEFAULT_OWNER)
     assert result_record["audit_id"] == result_audit_id(_BATCH, DEFAULT_OWNER)
     assert skip_record["audit_id"] != result_record["audit_id"]  # 別の鍵(Q-B)
     assert skip_record["decision_type"] == result_record["decision_type"] == DECISION_TYPE
     for record in (skip_record, result_record):
         assert DEFAULT_OWNER not in repr(record)  # 実名はどこにも出ない
-        assert record["input_values"] == {"batch_id": _BATCH, "owner_ref": log_ref(DEFAULT_OWNER)}
+        assert record["input_values"] == {"batch_id": _BATCH, "owner_ref": owner_ref(DEFAULT_OWNER)}
 
 
 def test_a_skip_and_a_later_result_coexist_and_each_is_recorded_once() -> None:
@@ -707,7 +708,7 @@ def test_one_failed_record_does_not_stop_the_other_owners() -> None:
 
     class _FirstFails(_FakeAudit):
         def record_if_absent(self, audit_id: str, decision_type: str, **kwargs: Any) -> Any:
-            if log_ref("owner-a") in audit_id:
+            if owner_ref("owner-a") in audit_id:
                 raise RuntimeError("down")
             return super().record_if_absent(audit_id, decision_type, **kwargs)
 

@@ -26,7 +26,7 @@
      audit_id は決定的で、結果 = `allocation_shadow:{batch_id}:{owner の符号}`、スキップ・失敗 =
      `allocation_shadow_skip:{batch_id}:{owner の符号}`(Q-B)。再試行・重複・競合でも各 ID は 1 件
   6. 記録する値は件数・理由コード・真偽・短い識別子のみ(`ShadowResult.facts` は scalar だけ)。
-     銘柄・株数・金額・owner の実名は記録しない(owner は `log_ref` の符号)
+     銘柄・株数・金額・owner の実名は記録しない(owner は `owner_ref` の符号。#925 段階 0)
 
 ## 既知の振る舞い(契約)
 
@@ -74,7 +74,8 @@ from botocore.exceptions import ClientError
 
 from jstock_advisor.domain.entities.available_cash import AvailableCash
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
-from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, log_ref
+from jstock_advisor.domain.entities.identifier_ref import owner_ref
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.domain.signals.allocation_shadow_config import (
     AllocationShadowConfig,
     load_allocation_shadow_config,
@@ -267,13 +268,13 @@ def compute_not_implemented(run: ShadowRun) -> ShadowResult:
 
 
 def result_audit_id(batch_id: str, owner: str) -> str:
-    """結果(COMPUTED)の決定的な監査 ID。owner は `log_ref` の符号(実名を出さない)。"""
-    return f"{DECISION_TYPE}:{batch_id}:{log_ref(owner)}"
+    """結果(COMPUTED)の決定的な監査 ID。owner は `owner_ref` の符号(実名を出さない)。"""
+    return f"{DECISION_TYPE}:{batch_id}:{owner_ref(owner)}"
 
 
 def skip_audit_id(batch_id: str, owner: str) -> str:
     """スキップ・失敗の決定的な監査 ID(結果とは別の鍵。後から結果が書けるようにする。Q-B)。"""
-    return f"{SKIP_ID_PREFIX}:{batch_id}:{log_ref(owner)}"
+    return f"{SKIP_ID_PREFIX}:{batch_id}:{owner_ref(owner)}"
 
 
 def shadow_audit_id(batch_id: str, owner: str, outcome: ShadowOutcome) -> str:
@@ -305,7 +306,7 @@ def record_result(
             audit_id=shadow_audit_id(batch_id, owner, result.outcome),
             decision_type=DECISION_TYPE,
             stock_code=None,
-            input_values={"batch_id": batch_id, "owner_ref": log_ref(owner)},
+            input_values={"batch_id": batch_id, "owner_ref": owner_ref(owner)},
             calculation_formulas={"schema_version": str(SCHEMA_VERSION)},
             output_values=output_values,
             data_sources=[],
