@@ -34,7 +34,12 @@ from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.price_freshness import PriceFreshnessVerdict
 from jstock_advisor.domain.signals.earnings_trend import earnings_trend_result_to_metrics
 from jstock_advisor.domain.valuation import raer_inputs as ri
-from jstock_advisor.domain.valuation.expected_return import Note, ReasonCode
+from jstock_advisor.domain.valuation.expected_return import (
+    IncomeInput,
+    Note,
+    ReasonCode,
+    compute_income,
+)
 from jstock_advisor.domain.valuation.raer import (
     COMBINED_MODEL_VERSION,
     AxisCode,
@@ -62,6 +67,7 @@ from jstock_advisor.domain.valuation.raer_inputs import (
     facts_from_recommendation,
     raer_result_for_candidate,
 )
+from jstock_advisor.domain.valuation.yield_calc import BenefitProgramState
 from jstock_advisor.services.buy_signal_service import SHADOW_STATE_COMPUTED
 from tests.factories import build_recommendation
 
@@ -139,6 +145,7 @@ def _facts(**overrides: Any) -> CandidateRaerFacts:
         "total_yield_pct": 3.0,
         "margin_computed": True,
         "margin_adjustment_codes": (),
+        "margin_superseded_codes": (),
         "common_quality": _common_quality(),
         "earnings_trend_metrics": _trend_metrics(),
     }
@@ -321,14 +328,51 @@ def test_a_missing_fair_value_confidence_leaves_axis_one_unavailable_and_the_rae
             ProvenanceNote.BENEFIT_STATE_DERIVED_FROM_YIELDS,
             PR.SOURCE_MISSING,
         ),
-        # 矛盾: 総合があるのに配当が無い → 配当を不明として扱う
+        # 突き合わせの不一致(再計算した総合利回りが永続値と違う)→ 値を作らない
+        # ・総合があるのに配当が無い
         (
             None,
             None,
             3.0,
             None,
             ProvenanceNote.BENEFIT_STATE_DERIVED_FROM_YIELDS,
-            PR.INCONSISTENT_YIELD_RECORD,
+            PR.TOTAL_YIELD_MISMATCH,
+        ),
+        # ・★ 優待が総合に入っていたのに、優待利回りが永続されていない(黙って過小にしない)
+        (
+            3.0,
+            None,
+            3.5,
+            None,
+            ProvenanceNote.BENEFIT_STATE_DERIVED_FROM_YIELDS,
+            PR.TOTAL_YIELD_MISMATCH,
+        ),
+        # ・配当と優待が揃っているのに総合が欠測
+        (
+            3.0,
+            0.5,
+            None,
+            None,
+            ProvenanceNote.BENEFIT_STATE_DERIVED_FROM_YIELDS,
+            PR.TOTAL_YIELD_MISMATCH,
+        ),
+        # ・総合が配当 + 優待と違う
+        (
+            3.0,
+            0.5,
+            3.4,
+            None,
+            ProvenanceNote.BENEFIT_STATE_DERIVED_FROM_YIELDS,
+            PR.TOTAL_YIELD_MISMATCH,
+        ),
+        # ・優待があるのに配当が不明で、総合だけある
+        (
+            None,
+            0.5,
+            3.5,
+            None,
+            ProvenanceNote.BENEFIT_STATE_DERIVED_FROM_YIELDS,
+            PR.TOTAL_YIELD_MISMATCH,
         ),
     ],
 )
@@ -349,6 +393,53 @@ def test_the_benefit_state_is_read_back_from_the_persisted_yields(
     assert entry.derived is (income is not None)
     assert entry.reason is reason
     assert note in entry.notes
+
+
+def test_a_total_yield_mismatch_gives_no_income_and_a_generic_reason_with_a_marker() -> None:
+    result = _assemble(
+        _facts(dividend_yield_pct=3.0, benefit_yield_pct=None, total_yield_pct=3.5)
+    ).inputs.expected_return.income
+    assert result.value is None
+    assert result.reasons == (ReasonCode.DIVIDEND_UNKNOWN,)
+    assert result.detail == "yield_record_mismatch"
+
+
+def test_the_total_yield_comparison_tolerance_is_one_fixed_constant_and_inclusive() -> None:
+    tolerance = ri.YIELD_RECORD_TOLERANCE
+    assert tolerance == 1e-9
+    within = _assemble(
+        _facts(dividend_yield_pct=3.0, benefit_yield_pct=0.5, total_yield_pct=3.5 + 5e-10)
+    )
+    assert within.inputs.expected_return.income.value is not None
+    outside = _assemble(
+        _facts(dividend_yield_pct=3.0, benefit_yield_pct=0.5, total_yield_pct=3.5 + 1e-8)
+    )
+    assert outside.inputs.expected_return.income.value is None
+    assert outside.provenance.entry(PI.INCOME).reason is PR.TOTAL_YIELD_MISMATCH
+
+
+def test_the_comparison_runs_for_every_derived_state_not_only_for_the_valued_branch() -> None:
+    # 優待あり / 制度なし / 評価不能 / 不明のどの導出でも、永続値とずれれば値を作らない
+    for dividend, benefit, total in [
+        (3.0, 0.5, 3.6),  # VALUED
+        (3.0, None, 3.1),  # NO_PROGRAM
+        (3.0, None, 0.0),  # NO_PROGRAM(0 は欠測ではない)
+        (None, None, 0.0),  # 配当が不明
+    ]:
+        income = _assemble(
+            _facts(dividend_yield_pct=dividend, benefit_yield_pct=benefit, total_yield_pct=total)
+        ).inputs.expected_return.income
+        assert income.value is None, (dividend, benefit, total)
+
+
+def test_an_unvaluable_and_a_valued_without_yield_give_the_same_income_result() -> None:
+    # 逆算は『出力同値』であり、状態の復元ではない。2 つの状態が同じ結果を返す前提を固定する
+    # (将来この 2 つの扱いが分かれたら、このテストが落ちて逆算の見直しに気づける)
+    unvaluable = compute_income(IncomeInput(3.0, None, BenefitProgramState.UNVALUABLE))
+    valued_without_yield = compute_income(IncomeInput(3.0, None, BenefitProgramState.VALUED))
+    assert unvaluable == valued_without_yield
+    assert unvaluable.value is None
+    assert unvaluable.reasons == (ReasonCode.BENEFIT_UNVALUABLE,)
 
 
 def test_an_unvaluable_benefit_is_reported_and_the_income_is_not_summed_without_it() -> None:
@@ -794,6 +885,126 @@ def test_the_facts_are_read_from_the_persisted_recommendation_fields() -> None:
     assert facts.margin_adjustment_codes == ("cyclical_industry",)
     assert facts.common_quality == _common_quality()
     assert facts.earnings_trend_metrics == _trend_metrics()
+
+
+def test_a_superseded_risk_code_that_is_counted_is_noted_in_the_provenance() -> None:
+    # 買い側は同一カテゴリで大きい方だけを採用する(superseded)。RAER は検出された全部を渡す。
+    # 景気業種 + 大口顧客依存は RAER では両方数える(承認済み)。その事実を記録し、観測で数えられる
+    both = _assemble(
+        _facts(
+            margin_adjustment_codes=("cyclical_industry", "major_customer_dependency"),
+            margin_superseded_codes=("major_customer_dependency",),
+        )
+    )
+    assert ProvenanceNote.SUPERSEDED_CODES_INCLUDED in both.provenance.entry(PI.BUSINESS_RISK).notes
+    assert both.inputs.risk_flags == frozenset(
+        {RiskFlag.CYCLICAL_INDUSTRY, RiskFlag.MAJOR_CUSTOMER_DEPENDENCY}
+    )
+    # RAER の語彙でない code が superseded でも注記しない
+    other = _assemble(
+        _facts(
+            margin_adjustment_codes=("cyclical_industry", "industry_model_not_applied"),
+            margin_superseded_codes=("industry_model_not_applied",),
+        )
+    )
+    assert other.provenance.entry(PI.BUSINESS_RISK).notes == ()
+    assert _assemble().provenance.entry(PI.BUSINESS_RISK).notes == ()
+
+
+def test_the_borrowed_coverage_minimum_is_noted_on_every_derived_quality_input() -> None:
+    entry = _assemble().provenance.entry(PI.COMPANY_QUALITY)
+    assert ProvenanceNote.COVERAGE_MINIMUM_BORROWED_FROM_HOLDING_SIDE in entry.notes
+    # 下限に満たない(軸 2 が COVERAGE_BELOW_MINIMUM になる)入力にも付く = 率を数えられる
+    low = _assemble(_facts(common_quality=_common_quality(coverage_ratio=0.1)))
+    assert ProvenanceNote.COVERAGE_MINIMUM_BORROWED_FROM_HOLDING_SIDE in (
+        low.provenance.entry(PI.COMPANY_QUALITY).notes
+    )
+    # 導けなかったときは付かない(借用していない)
+    missing = _assemble(_facts(common_quality=None)).provenance.entry(PI.COMPANY_QUALITY)
+    assert missing.notes == ()
+
+
+# ---- 旧版の記録(field が無い / None / 旧いキー名)の組合せ -------------------------------------
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"fair_value_neutral": None},
+        {"fair_value_overall_confidence": None},
+        {"fair_value_usable_for_trading_judgment": None},
+        {"fair_value_unusable_reason_code": None, "fair_value_usable_for_trading_judgment": False},
+        {"dividend_yield_pct_at_recommendation": None, "total_yield_pct_at_recommendation": None},
+        {"shareholder_benefit_yield_pct_at_recommendation": None},
+        {"total_yield_pct_at_recommendation": None},
+        {"required_margin_of_safety_entry": None},
+        {"margin_adjustments": ()},
+        {"buy_score_input_facts": None},
+        {"buy_score_input_facts": {}},
+        {"buy_score_input_facts": {"common_quality_shadow": None}},
+        {"buy_score_input_facts": {"old_name_quality": {"score": 30.0}}},
+        {"earnings_trend_metrics": {}},
+        {"earnings_trend_metrics": {"old_state": "EVALUATED"}},
+    ],
+    ids=lambda o: ",".join(sorted(o)) + "=" + repr(list(o.values())),
+)
+def test_an_older_or_partial_recommendation_never_raises_and_never_fills_a_missing_value(
+    overrides: dict[str, Any],
+) -> None:
+    rec = _recommendation(**overrides)
+    assembled = _assemble(facts_from_recommendation(rec))
+    assert len(assembled.provenance.entries) == len(ProvenanceItem)
+    for entry in assembled.provenance.entries:
+        assert entry.derived or entry.reason is not None
+    if not assembled.provenance.entry(PI.UPSIDE).derived:
+        assert assembled.inputs.expected_return.upside.value is None
+    if not assembled.provenance.entry(PI.INCOME).derived:
+        assert assembled.inputs.expected_return.income.value is None
+
+
+def test_the_assembler_adds_no_field_to_the_recommendation_entity() -> None:
+    # Recommendation は extra="forbid"(新しい field を足すと旧版へ戻せない)。読み取り専用で済ませる
+    names = set(Recommendation.model_fields)
+    assert not [n for n in names if "raer" in n or "risk_flag" in n]
+    tree = ast.parse(_MODULE_PATH.read_text("utf-8"))
+    # 推奨への書き込み(属性への代入)が無い
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign | ast.AugAssign | ast.AnnAssign):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                assert not (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "rec"
+                )
+
+
+def test_only_the_extraction_function_references_the_recommendation_fields() -> None:
+    tree = ast.parse(_MODULE_PATH.read_text("utf-8"))
+    for function in [n for n in tree.body if isinstance(n, ast.FunctionDef)]:
+        uses = [
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "rec"
+        ]
+        if function.name != "facts_from_recommendation":
+            assert uses == [], function.name
+
+
+def test_the_provenance_carries_no_value_code_amount_or_holding_identifier() -> None:
+    # 記録の語彙は固定の語だけ(出所のフィールド名・理由・注記)。
+    # 値・数字・銘柄・保有の識別子を持たない
+    assembled = _assemble(
+        facts_from_recommendation(
+            _recommendation(stock_code="1234", price_at_recommendation=D("2345.5"))
+        )
+    )
+    for entry in assembled.provenance.entries:
+        text = f"{entry.item} {entry.source} {entry.reason} {entry.notes}"
+        assert not any(ch.isdigit() for ch in text), text
+        assert "1234" not in text
 
 
 def test_the_facts_keep_a_code_the_buy_decision_marked_as_superseded() -> None:

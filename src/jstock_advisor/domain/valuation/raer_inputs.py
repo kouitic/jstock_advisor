@@ -32,7 +32,7 @@ USER 承認: #122 issuecomment-6138622792【3】(RAER 入力の供給元を最�
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
@@ -44,9 +44,11 @@ from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.valuation import FairValueUnusableReasonCode
 from jstock_advisor.domain.price_freshness import PriceFreshnessVerdict
 from jstock_advisor.domain.valuation.expected_return import (
+    ComponentResult,
     ExpectedReturnResult,
     FairValueInput,
     IncomeInput,
+    ReasonCode,
     compute_expected_return,
 )
 from jstock_advisor.domain.valuation.raer import (
@@ -74,6 +76,8 @@ from jstock_advisor.domain.valuation.yield_calc import BenefitProgramState
 #: 全 4 軸(軸 4 = DATA_QUALITY は未実装)が適用されたときの比較の鍵。literal で書かない。
 #: 配分の方針の comparison_key(allocation_policy.yaml。PR-G2 で設定)と一致することを
 #: 契約テストで固定する。
+#: ★ この鍵は『軸 4 が未実装であること』に依存する。軸 4 を実装すると適用軸の集合が変わり、
+#: 鍵も変わる(旧い記録と比較できなくなる)。軸 4 の追加はモデル版の更新として扱うこと。
 RAER_FULL_COMPARISON_KEY: Final = make_comparison_key(
     COMBINED_MODEL_VERSION,
     (
@@ -113,7 +117,7 @@ class ProvenanceReason(StrEnum):
     INVALID_VALUE = "INVALID_VALUE"  # 値が契約の範囲外・型の誤り・未知の語(補正せず軸を使わない)
     MARGIN_NOT_COMPUTED = "MARGIN_NOT_COMPUTED"  # 安全余裕率が算出されず、リスクを観測していない
     FV_USABILITY_UNKNOWN = "FV_USABILITY_UNKNOWN"  # Fair Value が使えるか不明(旧い記録)
-    INCONSISTENT_YIELD_RECORD = "INCONSISTENT_YIELD_RECORD"  # 利回りの永続値が互いに矛盾する
+    TOTAL_YIELD_MISMATCH = "TOTAL_YIELD_MISMATCH"  # 再計算した総合利回りが永続値と一致しない
 
 
 class ProvenanceNote(StrEnum):
@@ -121,6 +125,12 @@ class ProvenanceNote(StrEnum):
 
     BENEFIT_STATE_DERIVED_FROM_YIELDS = "BENEFIT_STATE_DERIVED_FROM_YIELDS"
     BENEFIT_STATE_NOT_DERIVABLE = "BENEFIT_STATE_NOT_DERIVABLE"
+    # 買い側の安全余裕率の category dedupe で superseded になった code(RAER は別の除外規則を持つ
+    # ので、検出された全部を渡す)を含めた。景気業種 + 大口顧客依存は RAER では両方数える(承認済み)
+    SUPERSEDED_CODES_INCLUDED = "SUPERSEDED_CODES_INCLUDED"
+    # 軸 2 の充足度の下限は、買い側が意図的に保留している(shadow calibration で決める)ため、
+    # 保有側の既存の値(coverage_thresholds.company_quality_minimum)を借用している
+    COVERAGE_MINIMUM_BORROWED_FROM_HOLDING_SIDE = "COVERAGE_MINIMUM_BORROWED_FROM_HOLDING_SIDE"
 
 
 @dataclass(frozen=True)
@@ -179,6 +189,7 @@ class CandidateRaerFacts:
     total_yield_pct: float | None
     margin_computed: bool
     margin_adjustment_codes: tuple[str, ...]
+    margin_superseded_codes: tuple[str, ...]
     common_quality: Mapping[str, object] | None
     earnings_trend_metrics: Mapping[str, object] | None
 
@@ -227,6 +238,11 @@ def facts_from_recommendation(rec: Recommendation) -> CandidateRaerFacts:
         total_yield_pct=rec.total_yield_pct_at_recommendation,
         margin_computed=rec.required_margin_of_safety_entry is not None,
         margin_adjustment_codes=tuple(adjustment.code for adjustment in rec.margin_adjustments),
+        margin_superseded_codes=tuple(
+            adjustment.code
+            for adjustment in rec.margin_adjustments
+            if adjustment.superseded_by is not None
+        ),
         common_quality=common_quality if isinstance(common_quality, Mapping) else None,
         earnings_trend_metrics=trend if trend else None,
     )
@@ -237,36 +253,42 @@ def facts_from_recommendation(rec: Recommendation) -> CandidateRaerFacts:
 
 def _derive_benefit_state(
     dividend: float | None, benefit: float | None, total: float | None
-) -> tuple[BenefitProgramState, float | None, tuple[ProvenanceNote, ...], ProvenanceReason | None]:
-    """永続済みの 3 つの利回りから、#55 の真理値表を逆に読んで優待の状態を導く。
+) -> tuple[BenefitProgramState, tuple[ProvenanceNote, ...]]:
+    """永続済みの 3 つの利回りから、#55 の真理値表を逆に読んで優待の状態を『出力同値』で導く。
 
-    `benefit_state` は永続されていない。総合利回りは `compute_total_yield_pct` の結果なので、
+    ★ これは優待の真の状態の復元ではない。`benefit_state` は永続されていないため、INCOME の出力
+    (値と理由コード)が同じになる状態のうち 1 つを選ぶだけである。特に UNVALUABLE と
+    『VALUED だが優待利回りが欠測』は同じ ComponentResult を返す(契約テストで固定。将来この 2 つの
+    扱いが分かれたら、テストが落ちて逆算の見直しに気づける)。
+
       優待利回りあり                          → VALUED
       優待利回りなし かつ 総合利回りあり       → NO_PROGRAM(A / G: 総合 = 配当のみ)
-      優待利回りなし かつ 総合なし かつ 配当あり → UNVALUABLE(C)
+      優待利回りなし かつ 総合なし かつ 配当あり → UNVALUABLE(C。VALUED + 欠測と出力同値)
       3 つとも無し                            → 導けない(配当が不明で I は値を持たない。結果は同じ)
-    総合があるのに配当が無い記録は矛盾(総合が決まるには配当が要る)。配当を不明として扱い、理由を残す。
+
+    逆算した状態は、必ず永続された総合利回りと突き合わせる(`_check_total_yield`)。
     """
     derived = (ProvenanceNote.BENEFIT_STATE_DERIVED_FROM_YIELDS,)
     if benefit is not None:
-        return BenefitProgramState.VALUED, dividend, derived, None
+        return BenefitProgramState.VALUED, derived
     if total is not None:
-        if dividend is None:
-            return (
-                BenefitProgramState.NO_PROGRAM,
-                None,
-                derived,
-                ProvenanceReason.INCONSISTENT_YIELD_RECORD,
-            )
-        return BenefitProgramState.NO_PROGRAM, dividend, derived, None
+        return BenefitProgramState.NO_PROGRAM, derived
     if dividend is not None:
-        return BenefitProgramState.UNVALUABLE, dividend, derived, None
-    return (
-        BenefitProgramState.NO_PROGRAM,
-        None,
-        (ProvenanceNote.BENEFIT_STATE_NOT_DERIVABLE,),
-        None,
-    )
+        return BenefitProgramState.UNVALUABLE, derived
+    return BenefitProgramState.NO_PROGRAM, (ProvenanceNote.BENEFIT_STATE_NOT_DERIVABLE,)
+
+
+#: 再計算した総合利回りと永続値を突き合わせる許容(絶対値・% ポイント)。1 か所だけ。
+#: 永続値は float で、同じ関数・同じ入力から作られるため通常は完全一致する。この値は
+#: float の表現の揺れを吸収するだけで、投資判断の閾値ではない。
+YIELD_RECORD_TOLERANCE: Final = 1e-9
+
+
+def _total_yield_matches(recomputed: float | None, persisted: float | None) -> bool:
+    """再計算した総合利回りが永続値と一致するか。『値が無い』どうしは一致、片方だけ無いのは不一致。"""
+    if recomputed is None or persisted is None:
+        return recomputed is None and persisted is None
+    return abs(recomputed - persisted) <= YIELD_RECORD_TOLERANCE
 
 
 def _fair_value_input(facts: CandidateRaerFacts) -> tuple[FairValueInput, ProvenanceReason | None]:
@@ -301,7 +323,7 @@ def _expected_return(
     facts: CandidateRaerFacts, evaluation_date: date, price_freshness: PriceFreshnessVerdict
 ) -> tuple[ExpectedReturnResult, tuple[ProvenanceEntry, ...]]:
     fair_value, fv_reason = _fair_value_input(facts)
-    state, dividend, notes, yield_reason = _derive_benefit_state(
+    state, notes = _derive_benefit_state(
         facts.dividend_yield_pct, facts.benefit_yield_pct, facts.total_yield_pct
     )
     result = compute_expected_return(
@@ -310,11 +332,22 @@ def _expected_return(
         price_freshness=price_freshness,
         fair_value=fair_value,
         income=IncomeInput(
-            dividend_yield_pct=dividend,
+            dividend_yield_pct=facts.dividend_yield_pct,
             benefit_yield_pct=facts.benefit_yield_pct,
             benefit_state=state,
         ),
     )
+    # ★ 常に突き合わせる(分岐に限らない): 逆算した状態で再計算した INCOME が永続された総合利回りと
+    # 一致しなければ、値を作らない(優待が総合に入っていたのに優待利回りが永続されていない記録で、
+    # 黙って過小な INCOME が RAER の土台に入る経路を断つ)
+    mismatch = not _total_yield_matches(result.income.value, facts.total_yield_pct)
+    if mismatch:
+        result = replace(
+            result,
+            income=ComponentResult(
+                reasons=(ReasonCode.DIVIDEND_UNKNOWN,), detail="yield_record_mismatch"
+            ),
+        )
     upside = result.upside.is_determined
     income = result.income.is_determined
     entries = (
@@ -329,7 +362,15 @@ def _expected_return(
             "dividend_yield_pct_at_recommendation / shareholder_benefit_yield_pct_at_recommendation"
             " / total_yield_pct_at_recommendation",
             derived=income,
-            reason=None if income else (yield_reason or ProvenanceReason.SOURCE_MISSING),
+            reason=(
+                None
+                if income
+                else (
+                    ProvenanceReason.TOTAL_YIELD_MISMATCH
+                    if mismatch
+                    else ProvenanceReason.SOURCE_MISSING
+                )
+            ),
             notes=notes,
         ),
         ProvenanceEntry(
@@ -387,7 +428,12 @@ def _quality(
             derived=False,
             reason=ProvenanceReason.INVALID_VALUE,
         )
-    return quality, ProvenanceEntry(ProvenanceItem.COMPANY_QUALITY, _QUALITY_SOURCE, derived=True)
+    return quality, ProvenanceEntry(
+        ProvenanceItem.COMPANY_QUALITY,
+        _QUALITY_SOURCE,
+        derived=True,
+        notes=(ProvenanceNote.COVERAGE_MINIMUM_BORROWED_FROM_HOLDING_SIDE,),
+    )
 
 
 # --- 軸 3 事業・業種リスク ------------------------------------------------------------------------
@@ -408,7 +454,13 @@ def _risk_flags(
     flags = frozenset(
         RiskFlag(code) for code in facts.margin_adjustment_codes if code in _RISK_FLAG_VALUES
     )
-    return flags, ProvenanceEntry(ProvenanceItem.BUSINESS_RISK, _RISK_SOURCE, derived=True)
+    superseded_included = any(code in _RISK_FLAG_VALUES for code in facts.margin_superseded_codes)
+    return flags, ProvenanceEntry(
+        ProvenanceItem.BUSINESS_RISK,
+        _RISK_SOURCE,
+        derived=True,
+        notes=(ProvenanceNote.SUPERSEDED_CODES_INCLUDED,) if superseded_included else (),
+    )
 
 
 # --- 軸 5 営業トレンド ----------------------------------------------------------------------------

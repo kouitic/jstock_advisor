@@ -58,6 +58,7 @@ from jstock_advisor.domain.valuation.fair_value_revision import (
     RevisionPoint,
     RevisionReason,
     evaluate_fair_value_revision,
+    validate_revision_history,
 )
 from jstock_advisor.domain.valuation.yield_calc import BenefitProgramState
 
@@ -66,8 +67,8 @@ from jstock_advisor.domain.valuation.yield_calc import BenefitProgramState
 # ---------------------------------------------------------------------------
 
 
-def test_expected_return_revision_is_still_not_implemented() -> None:
-    """PR-2 は ExpectedReturnResult.revision に接続しない: revision は常に未実装の理由のまま。"""
+def test_expected_return_revision_is_still_not_implemented_when_none_is_passed() -> None:
+    """revision を渡さない呼び出しは、PR-2c の接続の後も従来どおり REVISION_NOT_IMPLEMENTED。"""
     result = compute_expected_return(
         evaluation_date=date(2026, 10, 9),
         current_price=Decimal("100"),
@@ -82,8 +83,11 @@ def test_expected_return_revision_is_still_not_implemented() -> None:
     assert result.revision == ComponentResult(reasons=(ReasonCode.REVISION_NOT_IMPLEMENTED,))
 
 
-def test_expected_return_reason_code_set_is_unchanged() -> None:
-    """ReasonCode に Revision 用の理由を足さない(接続は別 PR。PR-1b の adapter を壊さない)。"""
+def test_expected_return_reason_code_set_is_pinned() -> None:
+    """PR-2c(接続)で、Revision の理由を RevisionReason と 1 対 1 の 7 語で追加した。
+
+    既存の 9 語は変えない。増減したら adapter の写像(expected_return_adapter.py)も同じ PR で決める。
+    """
     assert {code.value for code in ReasonCode} == {
         "CURRENT_PRICE_UNAVAILABLE",
         "CURRENT_PRICE_STALE",
@@ -94,6 +98,13 @@ def test_expected_return_reason_code_set_is_unchanged() -> None:
         "REVISION_NOT_IMPLEMENTED",
         "COMPOSITION_RULE_NOT_DECIDED",
         "HORIZON_NOT_ESTIMATED",
+        "REVISION_UNCONFIRMED",
+        "REVISION_PARAMETERS_NOT_DECIDED",
+        "REVISION_NO_HISTORY",
+        "REVISION_ONLY_UNUSABLE_POINTS",
+        "REVISION_INSUFFICIENT_HISTORY",
+        "REVISION_STALE_HISTORY",
+        "REVISION_METHOD_SET_CHANGED",
     }
 
 
@@ -892,10 +903,85 @@ def test_the_threshold_comparison_does_not_divide() -> None:
     ]
 
 
-def test_the_module_is_dormant_nothing_in_src_imports_it() -> None:
+def test_the_module_is_dormant_only_expected_return_imports_it() -> None:
+    """PR-2c(接続)で、Expected Return の module だけが結果の型を import する。
+
+    Expected Return は #606 §37 の契約が『どこからも到達されない』と固定している module のため、
+    本 module も Production から到達されない(配線は別の USER 承認)。
+    """
     importers = [
         path.name
         for path in _SRC.rglob("*.py")
         if path != _MODULE_PATH and "fair_value_revision" in path.read_text(encoding="utf-8")
     ]
-    assert importers == []
+    assert importers == ["expected_return.py"]
+
+
+# ---------------------------------------------------------------------------
+# PR-2c: #921 の SHOULD-1(同日重複の検査の位置)。挙動を変えず、順序を契約として固定する
+# ---------------------------------------------------------------------------
+
+
+def _duplicated_history() -> list[RevisionPoint]:
+    return [_point(0, 100), _point(1, 100), _point(1, 90)]  # 1 日目が 2 件
+
+
+def test_undecided_parameters_come_before_the_same_day_duplicate_check() -> None:
+    """承認済みの『未決の間は常に UNDETERMINED』(#122 …6110016281)が検査より先。挙動は不変。"""
+    result = evaluate_fair_value_revision(
+        _duplicated_history(), evaluation_date=_at(1), parameters=None
+    )
+    assert result.direction is D.UNDETERMINED
+    assert result.reason is R.REVISION_PARAMETERS_NOT_DECIDED
+
+
+def test_decided_parameters_still_reject_a_same_day_duplicate() -> None:
+    with pytest.raises(ValueError):
+        evaluate_fair_value_revision(
+            _duplicated_history(), evaluation_date=_at(1), parameters=_params()
+        )
+
+
+def test_the_order_is_documented_in_the_docstring() -> None:
+    doc = inspect.getdoc(evaluate_fair_value_revision) or ""
+    assert "REVISION_PARAMETERS_NOT_DECIDED" in doc and "validate_revision_history" in doc
+
+
+def test_validate_revision_history_detects_the_duplicate_without_any_parameter() -> None:
+    with pytest.raises(ValueError):
+        validate_revision_history(_duplicated_history())
+    with pytest.raises(ValueError):
+        validate_revision_history(_duplicated_history(), evaluation_date=_at(1))
+
+
+def test_validate_revision_history_accepts_a_clean_history_in_any_order() -> None:
+    history = [_point(2, 100), _point(0, 100), _point(1, 100)]
+    assert validate_revision_history(history) is None
+    assert validate_revision_history(history, evaluation_date=_at(2)) is None
+    assert validate_revision_history([]) is None
+
+
+def test_validate_revision_history_ignores_points_after_the_evaluation_date() -> None:
+    """evaluate と同じ: 評価日より後の点は知り得ないため、重複の検査の対象にしない。"""
+    history = [_point(0, 100), _point(5, 100), _point(5, 90)]
+    assert validate_revision_history(history, evaluation_date=_at(1)) is None
+    with pytest.raises(ValueError):
+        validate_revision_history(history, evaluation_date=_at(5))
+
+
+@pytest.mark.parametrize("bad", [[object()], [_point(0, 100), "x"], [None]])
+def test_validate_revision_history_rejects_a_non_point(bad: list[object]) -> None:
+    with pytest.raises(ValueError):
+        validate_revision_history(bad)  # type: ignore[arg-type]
+
+
+def test_validate_revision_history_rejects_a_datetime_evaluation_date() -> None:
+    with pytest.raises(ValueError):
+        validate_revision_history([], evaluation_date=datetime(2026, 9, 1))  # type: ignore[arg-type]
+
+
+def test_validate_revision_history_does_not_change_what_evaluate_returns() -> None:
+    history = _series([100, 100, 100, 100, 80, 80])
+    before = _run([100, 100, 100, 100, 80, 80])
+    validate_revision_history(history)
+    assert _run([100, 100, 100, 100, 80, 80]) == before
