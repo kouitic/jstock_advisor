@@ -93,6 +93,14 @@ def test_expected_return_reason_codes_are_pinned() -> None:
         "REVISION_NOT_IMPLEMENTED",
         "COMPOSITION_RULE_NOT_DECIDED",
         "HORIZON_NOT_ESTIMATED",
+        # PR-2c: Fair Value Revision の結果(RevisionReason と 1 対 1 の 7 語)
+        "REVISION_UNCONFIRMED",
+        "REVISION_PARAMETERS_NOT_DECIDED",
+        "REVISION_NO_HISTORY",
+        "REVISION_ONLY_UNUSABLE_POINTS",
+        "REVISION_INSUFFICIENT_HISTORY",
+        "REVISION_STALE_HISTORY",
+        "REVISION_METHOD_SET_CHANGED",
     }
 
 
@@ -288,6 +296,14 @@ _EXPECTED_MAPPING = {
     ReasonCode.CURRENT_PRICE_STALE: UndeterminedReason.RELIABILITY_UNUSABLE,
     ReasonCode.FAIR_VALUE_NOT_USABLE: UndeterminedReason.RELIABILITY_UNUSABLE,
     ReasonCode.REVISION_NOT_IMPLEMENTED: UndeterminedReason.COMPONENT_NOT_IMPLEMENTED,
+    # PR-2c(設計レビューの決定 #601 …6137578159): 『無い / 信頼できない / 足りない』の 3 分類
+    ReasonCode.REVISION_NO_HISTORY: UndeterminedReason.INPUT_MISSING,
+    ReasonCode.REVISION_INSUFFICIENT_HISTORY: UndeterminedReason.COVERAGE_INSUFFICIENT,
+    ReasonCode.REVISION_ONLY_UNUSABLE_POINTS: UndeterminedReason.RELIABILITY_UNUSABLE,
+    ReasonCode.REVISION_STALE_HISTORY: UndeterminedReason.RELIABILITY_UNUSABLE,
+    ReasonCode.REVISION_METHOD_SET_CHANGED: UndeterminedReason.RELIABILITY_UNUSABLE,
+    ReasonCode.REVISION_UNCONFIRMED: UndeterminedReason.RELIABILITY_UNUSABLE,
+    ReasonCode.REVISION_PARAMETERS_NOT_DECIDED: UndeterminedReason.COMPONENT_NOT_IMPLEMENTED,
 }
 _NOT_COMPONENT_REASONS = {ReasonCode.COMPOSITION_RULE_NOT_DECIDED, ReasonCode.HORIZON_NOT_ESTIMATED}
 
@@ -497,3 +513,125 @@ def test_the_c0_allowlist_gives_the_adapter_exactly_one_external_module() -> Non
         "jstock_advisor.domain.entities.holding_decision",
     )
     assert sorted(allowed) == ["expected_return_adapter.py", "thesis_adapter.py"]
+
+
+# --- (PR-2c) Fair Value Revision の結果を載せた Expected Return の写像 ---
+
+
+def _revision_result(
+    direction: str, *, reason: str | None = None, pct: float | None = None, disagree: bool = False
+):  # type: ignore[no-untyped-def]
+    from jstock_advisor.domain.valuation.fair_value_revision import (
+        FairValueRevisionResult,
+        RevisionDirection,
+        RevisionReason,
+    )
+
+    return FairValueRevisionResult(
+        model_version="fv-revision-v1-params-undecided",
+        evaluation_date=_DATE,
+        direction=RevisionDirection(direction),
+        revision_pct=pct,
+        reason=None if reason is None else RevisionReason(reason),
+        n_points=3,
+        latest_points_disagree=disagree,
+    )
+
+
+def _er_with_revision(result):  # type: ignore[no-untyped-def]
+    from jstock_advisor.domain.valuation.expected_return import _revision_component
+
+    return _er(revision=_revision_component(result, _DATE))
+
+
+@pytest.mark.parametrize(("direction", "pct"), [("UP", 12.5), ("STABLE", 0.5), ("DOWN", -12.5)])
+def test_a_confirmed_revision_value_reaches_the_verdict_unchanged(
+    direction: str, pct: float
+) -> None:
+    revision = _by_component(_verdict_of(_er_with_revision(_revision_result(direction, pct=pct))))[
+        ExpectedReturnComponent.REVISION
+    ]
+    assert revision.is_determined and revision.value == pct
+
+
+@pytest.mark.parametrize(
+    ("revision_reason", "expected"),
+    [
+        ("REVISION_PARAMETERS_NOT_DECIDED", UndeterminedReason.COMPONENT_NOT_IMPLEMENTED),
+        ("NO_HISTORY", UndeterminedReason.INPUT_MISSING),
+        ("INSUFFICIENT_HISTORY", UndeterminedReason.COVERAGE_INSUFFICIENT),
+        ("ONLY_UNUSABLE_POINTS", UndeterminedReason.RELIABILITY_UNUSABLE),
+        ("STALE_HISTORY", UndeterminedReason.RELIABILITY_UNUSABLE),
+        ("METHOD_SET_CHANGED", UndeterminedReason.RELIABILITY_UNUSABLE),
+    ],
+)
+def test_each_undetermined_revision_reason_lands_on_its_undetermined_reason(
+    revision_reason: str, expected: UndeterminedReason
+) -> None:
+    result = _revision_result("UNDETERMINED", reason=revision_reason)
+    revision = _by_component(_verdict_of(_er_with_revision(result)))[
+        ExpectedReturnComponent.REVISION
+    ]
+    assert not revision.is_determined and revision.reason is expected
+    code_name = {
+        "REVISION_PARAMETERS_NOT_DECIDED": "REVISION_PARAMETERS_NOT_DECIDED",
+        "NO_HISTORY": "REVISION_NO_HISTORY",
+        "INSUFFICIENT_HISTORY": "REVISION_INSUFFICIENT_HISTORY",
+        "ONLY_UNUSABLE_POINTS": "REVISION_ONLY_UNUSABLE_POINTS",
+        "STALE_HISTORY": "REVISION_STALE_HISTORY",
+        "METHOD_SET_CHANGED": "REVISION_METHOD_SET_CHANGED",
+    }[revision_reason]
+    assert f"er_reasons={code_name}" in revision.detail
+
+
+@pytest.mark.parametrize(
+    ("direction", "pct"), [("UP_UNCONFIRMED", 20.0), ("DOWN_UNCONFIRMED", -20.0)]
+)
+def test_an_unconfirmed_revision_is_not_a_value_and_is_unusable(direction: str, pct: float) -> None:
+    result = _revision_result(direction, reason="REVISION_UNCONFIRMED", pct=pct, disagree=True)
+    revision = _by_component(_verdict_of(_er_with_revision(result)))[
+        ExpectedReturnComponent.REVISION
+    ]
+    assert not revision.is_determined
+    assert revision.reason is UndeterminedReason.RELIABILITY_UNUSABLE
+    assert "er_reasons=REVISION_UNCONFIRMED" in revision.detail
+    assert (
+        f"direction={direction}" in revision.detail
+        and "latest_points_disagree=True" in revision.detail
+    )
+
+
+def test_the_revision_details_carry_codes_never_numbers() -> None:
+    for direction, reason, pct in (
+        ("UP_UNCONFIRMED", "REVISION_UNCONFIRMED", 20.0),
+        ("UNDETERMINED", "STALE_HISTORY", None),
+        ("UNDETERMINED", "REVISION_PARAMETERS_NOT_DECIDED", None),
+    ):
+        result = _revision_result(direction, reason=reason, pct=pct)
+        revision = _by_component(_verdict_of(_er_with_revision(result)))[
+            ExpectedReturnComponent.REVISION
+        ]
+        assert not any(ch.isdigit() for ch in revision.detail), revision.detail
+
+
+def test_the_adapter_documents_the_three_way_rule_for_new_reason_codes() -> None:
+    text = (_SRC / "domain" / "exit_architecture" / "expected_return_adapter.py").read_text(
+        encoding="utf-8"
+    )
+    assert "『無い』" in text and "RELIABILITY_UNUSABLE" in text and "COVERAGE_INSUFFICIENT" in text
+    assert "同じ PR" in text
+
+
+def test_every_mapped_undetermined_reason_can_be_chosen_as_the_representative() -> None:
+    """写す先がすべて代表の選択順に含まれる(含まれないと StopIteration になる)。"""
+    mapped = {reason for reason in adapter._REASON_TO_UNDETERMINED.values() if reason is not None}
+    assert mapped <= set(adapter._PRIORITY)
+
+
+def test_the_representative_priority_order_is_fixed() -> None:
+    assert adapter._PRIORITY == (
+        UndeterminedReason.INPUT_MISSING,
+        UndeterminedReason.COVERAGE_INSUFFICIENT,
+        UndeterminedReason.RELIABILITY_UNUSABLE,
+        UndeterminedReason.COMPONENT_NOT_IMPLEMENTED,
+    )
