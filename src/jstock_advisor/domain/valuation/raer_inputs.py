@@ -39,7 +39,11 @@ from enum import StrEnum
 from typing import Final
 
 from jstock_advisor.config.models import EarningsTrendRulesConfig
-from jstock_advisor.domain.entities.enums import ConfidenceLevel, EarningsTrendEvaluationState
+from jstock_advisor.domain.entities.enums import (
+    BuyIndustrySector,
+    ConfidenceLevel,
+    EarningsTrendEvaluationState,
+)
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.entities.valuation import FairValueUnusableReasonCode
 from jstock_advisor.domain.price_freshness import PriceFreshnessVerdict
@@ -195,6 +199,8 @@ class CandidateRaerFacts:
     """
 
     price: Decimal | None
+    price_as_of_date: date | None
+    buy_industry_sector: BuyIndustrySector | None
     fair_value_neutral: Decimal | None
     fair_value_confidence: ConfidenceLevel | None
     fair_value_usable: bool | None
@@ -246,6 +252,8 @@ def facts_from_recommendation(rec: Recommendation) -> CandidateRaerFacts:
     trend = rec.earnings_trend_metrics
     return CandidateRaerFacts(
         price=rec.price_at_recommendation,
+        price_as_of_date=rec.price_as_of_date,
+        buy_industry_sector=rec.buy_industry_sector,
         fair_value_neutral=rec.fair_value_neutral,
         fair_value_confidence=rec.fair_value_overall_confidence,
         fair_value_usable=rec.fair_value_usable_for_trading_judgment,
@@ -554,6 +562,35 @@ def risk_flag_view_from_recommendation(rec: Recommendation) -> RiskFlagView:
     return risk_flag_view(facts_from_recommendation(rec))
 
 
+@dataclass(frozen=True)
+class HoldingMarketView:
+    """保有銘柄の市場の事実(評価額の算出に使う価格・価格時点・業種)。推奨から読むだけ。
+
+    ★ 株数・取得単価・損益・保有 ID は持たない(推奨は銘柄単位の事実。株数は owner 別の
+    保有から取る)。
+    値が取れないときは None のまま(0・前回値・推定値で補わない)。価格が正でない(0 以下)ものは
+    使えない価格として None にする。価格の鮮度の判定は、呼び出し側(殻)が既存の保有用の関数で行う。
+    """
+
+    price: Decimal | None
+    price_as_of_date: date | None
+    buy_industry_sector: BuyIndustrySector | None
+
+
+def holding_market_view(facts: CandidateRaerFacts) -> HoldingMarketView:
+    price = facts.price if facts.price is not None and facts.price > 0 else None
+    return HoldingMarketView(
+        price=price,
+        price_as_of_date=facts.price_as_of_date,
+        buy_industry_sector=facts.buy_industry_sector,
+    )
+
+
+def holding_market_view_from_recommendation(rec: Recommendation) -> HoldingMarketView:
+    """永続済みの推奨から、保有銘柄の価格・価格時点・業種を読む(#603 PR-F1 / F2 へ渡す)。"""
+    return holding_market_view(facts_from_recommendation(rec))
+
+
 def _risk_flags(
     facts: CandidateRaerFacts,
 ) -> tuple[frozenset[RiskFlag] | None, ProvenanceEntry]:
@@ -701,15 +738,23 @@ def raer_result_for_candidate(
 
 __all__ = [
     "RAER_FULL_COMPARISON_KEY",
+    "RISK_DETECTION_FACTS_KEY",
     "AssembledRaerInputs",
     "AssemblerPolicy",
     "CandidateRaerFacts",
+    "HoldingMarketView",
     "InputProvenance",
     "ProvenanceEntry",
     "ProvenanceItem",
     "ProvenanceNote",
     "ProvenanceReason",
+    "RiskFlagSource",
+    "RiskFlagView",
     "assemble_raer_inputs",
     "facts_from_recommendation",
+    "holding_market_view",
+    "holding_market_view_from_recommendation",
     "raer_result_for_candidate",
+    "risk_flag_view",
+    "risk_flag_view_from_recommendation",
 ]
