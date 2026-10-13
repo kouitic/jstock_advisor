@@ -1,19 +1,34 @@
-"""出荷 config の issue_creation_enabled = true の固定(Issue #837。#508 の activation)。
+"""出荷 config の issue_creation_enabled の固定(Issue #837。#508 の activation)。
+
+## 出荷値は false(10/12 のリリースでは有効化しない)
+
+#876 で出荷値を true にしたが、新規 Issue の作成に occurrence 単位の gate・日あたりの上限が無く、
+既存の Issue が closed の間は同じ障害の signal ごとに新規 Issue が立つ(独立確認: #188
+issuecomment-6114701122)。USER 判断(#122 issuecomment-6114810773 の【1】)により、10/12 の
+リリースでは自動起票を有効化せず、出荷値を false に戻す。抑止機構の実装後に、次回のリリースで
+true にする(その切替は別の USER 承認)。
 
 ## 何を検証するか
 
-`config/incident_notification.yaml` の `issue_creation_enabled` を false から true にする変更が、
-**その 1 値だけ** で、かつ次の性質を壊さないことを固定する。
-
-    (a) 出荷 config は true で、YAML の真偽値として読める(`"true"` `yes` のような文字列ではない)。
-        他の値(dedup_window_minutes など)・キーの集合・label は変えていない
-    (b) 出荷 config のまま(テスト側で config を上書きしない)、infra の配線(環境変数)が
-        あれば GitHub Issue を 1 件作成し、出荷 config の label を付ける
-    (c) 出荷 config が true でも、配線(環境変数)が無ければ GitHub を一切呼ばず、LINE も送られる
+    (a) 出荷 config は false で、YAML の真偽値として読める(引用符つきの文字列ではない。
+        `"false"` などは不可。YAML の `no` / `off` は bool の False として読まれ、値も型も同じ)。
+        他の値(dedup_window_minutes など)・キーの集合・label は #876 の前後で変えていない
+    (b) 出荷 config のまま(テスト側で config を上書きしない)なら、配線(環境変数)が揃っていても
+        GitHub を一切呼ばない。LINE は送られ、状態は SENT のまま(これが今回の Production の状態)
+    (b') 有効の config(テスト側で明示的に true にする)と配線があれば、GitHub Issue を 1 件作成し、
+        出荷 config の label を付ける(有効化したときの経路が壊れていないことの固定)。
+        ★ Issue #926 以降は、新規起票の上限値(config/incident_issue_limits.yaml)が決定済みで
+        あることが条件になる。出荷値は全項目 null(未決定)のため、このテストは上限値を
+        決定済みの値へ差し替える
+    (b2) 有効の config(テスト側で明示的に true にする)と配線が揃っていても、上限値が未決定のまま
+        (出荷値)なら、新規 Issue を作らない(GitHub を一切呼ばない)。LINE は送られ、状態に
+        抑止の理由(LIMITS_UNDECIDED)を残す。(b)(出荷 flag = false)と合わせて、有効化の前提が
+        『flag を true にする』と『上限値を決める』の 2 つであることを固定する
+    (c) 有効の config でも、配線が無ければ GitHub を一切呼ばず、LINE も送られる
         (配線されていない環境では、状態に CONFIGURATION_ERROR を記録するだけで安全にスキップする)
     (d) LINE の通知(送った文面・件数・handler の戻り値・状態の SENT)は、flag が false のときと
         true のときで同一(GitHub の起票は LINE を変えない)
-    (e) 無効の config(false)では GitHub を一切呼ばない(出荷が true になっても、無効の挙動は残る)
+    (e) 無効の config(false)では GitHub を一切呼ばない
     (f) 既存 Issue の検索に使う label(_SEARCH_LABEL)が、起票時に付ける label に含まれる
         (ずれると、再発のたびに重複して起票する)
 
@@ -21,8 +36,7 @@
 
 GitHub 側の失敗が LINE に影響しないこと・公開本文の allowlist・fingerprint の dedup は、
 既存の `test_issue_508_*` が固定している(それらは config を上書きして flag を true にしているため、
-出荷値の変更には影響されない)。本ファイルは「出荷値が true であること」と、
-その状態での LINE 不変・配線なしの安全なスキップを固定する。
+出荷値には影響されない)。
 """
 
 from __future__ import annotations
@@ -40,9 +54,11 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 from moto import mock_aws
 
 from jstock_advisor.config.loader import load_config
+from jstock_advisor.domain.notification.incident_issue_limits import IncidentIssueLimits
 from jstock_advisor.infrastructure.aws import incident_state_tracker as tracker
 from jstock_advisor.infrastructure.github import client as github_client_module
 from jstock_advisor.lambda_handlers import incident_notifier_handler as handler_module
+from jstock_advisor.services import incident_github_issue_service
 
 _REGION = "ap-northeast-1"
 _SECRET_NAME = "github-app-incident-activation"
@@ -53,19 +69,19 @@ _NOW = dt.datetime(2026, 9, 25, 0, 0, tzinfo=dt.UTC)
 # --- (a) 出荷 config -----------------------------------------------------------------------
 
 
-def test_shipped_config_enables_issue_creation_as_a_real_boolean() -> None:
+def test_shipped_config_keeps_issue_creation_disabled_as_a_real_boolean() -> None:
     raw = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8"))
-    assert raw["issue_creation_enabled"] is True  # 文字列の "true" / "yes" ではない
-    assert load_config().incident_notification.issue_creation_enabled is True
+    assert raw["issue_creation_enabled"] is False  # 引用符つきの文字列("false" など)ではない
+    assert load_config().incident_notification.issue_creation_enabled is False
 
 
-def test_shipped_config_changes_only_the_one_value() -> None:
+def test_shipped_config_has_the_known_keys_and_only_the_flag_is_off() -> None:
     raw = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8"))
     assert raw == {
         "version": 1,
         "dedup_window_minutes": 30,
         "claim_stale_minutes": 5,
-        "issue_creation_enabled": True,
+        "issue_creation_enabled": False,
         "github_issue_claim_timeout_minutes": 10,
         "issue_labels": ["production-incident", "auto-generated"],
     }
@@ -205,17 +221,69 @@ _TOKEN = {"token": "ghs_dummy", "expires_at": "2026-09-25T01:00:00Z"}
 _ISSUE = {"number": 7, "html_url": "https://github.com/owner/repo/issues/7", "state": "open"}
 
 
-# --- (b) 出荷 config のまま、配線があれば起票する -------------------------------------------------
+def _enabled_config() -> Any:
+    """出荷 config の issue_creation_enabled だけを true にした config(有効化後の経路の検証用)。"""
+    config = load_config()
+    return config.model_copy(
+        update={
+            "incident_notification": config.incident_notification.model_copy(
+                update={"issue_creation_enabled": True}
+            )
+        }
+    )
 
 
-def test_with_shipped_config_and_wiring_one_github_issue_is_created(
+def _decide_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """上限値(Issue #926)を、起票を妨げない決定済みの値にする(出荷値は全項目 null)。"""
+    monkeypatch.setattr(
+        incident_github_issue_service,
+        "load_incident_issue_limits",
+        lambda: IncidentIssueLimits(
+            new_issue_min_interval_minutes=1,
+            new_issue_limit_per_fingerprint=99,
+            new_issue_limit_global=99,
+            auto_stop_denied_threshold=99,
+        ),
+    )
+
+
+# --- (b) 出荷 config のまま: 配線が揃っていても GitHub を呼ばない(今回の Production の状態) ------
+
+
+def test_with_shipped_config_and_full_wiring_github_is_never_called(
     monkeypatch: pytest.MonkeyPatch, line: _RecordingLineClient, secret_arn: str
 ) -> None:
     _wire(monkeypatch, secret_arn)
+    fake = _install_urlopen(monkeypatch, [])
+    message = _alarm_message()
+
+    # handler の load_config を上書きしない = 出荷 config がそのまま使われる。
+    # 同じ signal を 3 回届けても(再配信・再試行を想定)、GitHub は一度も呼ばれない
+    for _ in range(3):
+        result = handler_module.handler(_sns_event(message), None)
+        assert result == {"processed": 1}
+
+    assert fake.requests == []  # installation token の取得も Issue の作成もない
+    assert len(line.sent) == 1  # LINE は 1 通(2 回目以降は LINE 側の dedup で抑止される)
+    state = tracker.get_incident_state(_fingerprint_of(message))
+    assert state["status"] == "SENT"
+    assert "github_issue_create_status" not in state  # 無効の間は状態も書かない
+    assert "github_issue_number" not in state
+
+
+# --- (b') 有効の config と配線があれば、起票する(有効化後の経路) --------------------------------
+
+
+def test_with_an_enabled_config_and_wiring_one_github_issue_is_created(
+    monkeypatch: pytest.MonkeyPatch, line: _RecordingLineClient, secret_arn: str
+) -> None:
+    enabled = _enabled_config()
+    monkeypatch.setattr(handler_module, "load_config", lambda: enabled)
+    _wire(monkeypatch, secret_arn)
+    _decide_limits(monkeypatch)
     fake = _install_urlopen(monkeypatch, [_TOKEN, _ISSUE])
     message = _alarm_message()
 
-    # handler の load_config を上書きしない = 出荷 config がそのまま使われる
     result = handler_module.handler(_sns_event(message), None)
 
     assert result == {"processed": 1}
@@ -227,16 +295,42 @@ def test_with_shipped_config_and_wiring_one_github_issue_is_created(
     assert state["github_issue_number"] == 7
 
 
-# --- (c) 出荷 config が true でも、配線が無ければ GitHub を呼ばない ------------------------------
+# --- (b2) 有効の config でも、出荷の上限値が未決定のままなら新規 Issue は作らない(Issue #926)
+
+
+def test_with_an_enabled_config_and_undecided_limits_no_issue_is_created_and_line_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch, line: _RecordingLineClient, secret_arn: str
+) -> None:
+    enabled = _enabled_config()
+    monkeypatch.setattr(handler_module, "load_config", lambda: enabled)
+    _wire(monkeypatch, secret_arn)
+    fake = _install_urlopen(monkeypatch, [])
+    message = _alarm_message()
+
+    # limits を差し替えない = 出荷の専用 YAML(全項目 null = 未決定)がそのまま使われる
+    result = handler_module.handler(_sns_event(message), None)
+
+    assert result == {"processed": 1}
+    assert fake.requests == []  # GitHub を一切呼ばない
+    assert len(line.sent) == 1  # LINE は通常どおり
+    state = tracker.get_incident_state(_fingerprint_of(message))
+    assert state["status"] == "SENT"
+    assert "github_issue_number" not in state
+    assert state["github_issue_last_denied_reason"] == "LIMITS_UNDECIDED"
+
+
+# --- (c) 有効の config でも、配線が無ければ GitHub を呼ばない ------------------------------
 
 
 @pytest.mark.parametrize("missing", ["both", "secret_arn", "repository"])
-def test_with_shipped_config_but_no_wiring_github_is_never_called(
+def test_with_an_enabled_config_but_no_wiring_github_is_never_called(
     monkeypatch: pytest.MonkeyPatch,
     line: _RecordingLineClient,
     secret_arn: str,
     missing: str,
 ) -> None:
+    enabled = _enabled_config()
+    monkeypatch.setattr(handler_module, "load_config", lambda: enabled)
     _wire(monkeypatch, secret_arn)
     if missing in ("both", "secret_arn"):
         monkeypatch.delenv("GITHUB_APP_SECRET_ARN")
@@ -303,7 +397,7 @@ def test_line_output_is_identical_whether_issue_creation_is_enabled_or_not(
     assert status == "SENT"
 
 
-# --- (e) 無効の config では GitHub を呼ばない(出荷が true でも、無効の挙動は残る) ----------------
+# --- (e) 無効の config では GitHub を呼ばない(配線ありでも) ----------------
 
 
 def test_with_a_disabled_config_github_is_never_called_even_when_wired(

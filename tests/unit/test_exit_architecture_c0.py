@@ -832,8 +832,11 @@ def test_no_existing_source_file_imports_the_package() -> None:
             continue
         if any(m == _PACKAGE_NAME or m.startswith(_PACKAGE_NAME + ".") for m in _imports(path)):
             importers.append(path.relative_to(_SRC).as_posix())
-    # 現行のエンジンへ配線しない(配線は後続の承認された PR)
-    assert importers == []
+    # 現行のエンジンへ配線しない(配線は後続の承認された PR)。許可は明示の 1 件だけ:
+    # capital_rotation(#603 PR-D。dormant)は、提案の分類の語彙 ExitClass.CAPITAL_ROTATION を
+    # 読むだけで、既存の SELL / 利確 / 下落保護 / Arbiter の判定には触れない(逆向きの依存がない
+    # ことは test_capital_rotation_contract.py が固定する)
+    assert importers == ["domain/signals/capital_rotation.py"]
 
 
 _ALLOWED_IMPORT_ROOTS = {
@@ -851,11 +854,16 @@ _ALLOWED_IMPORT_ROOTS = {
 # thesis_adapter(#882 PR-1)が、既存の保有判断スコアの結果の型を引数で受け取るために使う。
 # これらの module は entities 同士・pydantic・標準 library だけを import している(services /
 # infrastructure / lambda_handlers / providers / cli / config を import しない。#882 の着手時に実測)
+# expected_return_adapter(#601 PR-1b)は、Expected Return の結果の型(`ExpectedReturnResult` 等)を
+# 引数で受け取るために `domain/valuation/expected_return.py` の 1 件だけを使う。この module は
+# 標準 library と entities・price_freshness・yield_calc の純粋な domain だけを import する
+# (exit_architecture を import しない = 逆向きの依存なし。#910 の契約テストが固定)。
 _ALLOWED_EXTERNAL_TYPE_MODULES = {
     "thesis_adapter.py": (
         "jstock_advisor.domain.entities.enums",
         "jstock_advisor.domain.entities.holding_decision",
     ),
+    "expected_return_adapter.py": ("jstock_advisor.domain.valuation.expected_return",),
 }
 
 

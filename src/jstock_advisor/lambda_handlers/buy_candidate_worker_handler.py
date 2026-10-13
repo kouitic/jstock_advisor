@@ -20,6 +20,8 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+from collections.abc import Callable
+from contextvars import ContextVar
 from decimal import Decimal
 from typing import Any
 
@@ -51,8 +53,21 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
+# Issue #603 (Q'): Lambdaの残り時間(購入側Shadowの時間ガード用)を、`_process_one`の引数を変えずに
+# 渡すための値。handler()が設定し、無ければNone(Shadowは実行しない側へ倒れる)。
+_remaining_time_ms_var: ContextVar[Callable[[], int] | None] = ContextVar(
+    "buy_candidate_worker_remaining_time_ms", default=None
+)
+
+
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
-    processed = [_process_one(json.loads(record["body"])) for record in event.get("Records", [])]
+    token = _remaining_time_ms_var.set(getattr(context, "get_remaining_time_in_millis", None))
+    try:
+        processed = [
+            _process_one(json.loads(record["body"])) for record in event.get("Records", [])
+        ]
+    finally:
+        _remaining_time_ms_var.reset(token)
     return {"processed": len(processed)}
 
 
@@ -111,6 +126,7 @@ def _process_one(body: dict[str, Any]) -> dict[str, Any]:
         execution_context,
         evaluation_record_repo,
         latest_batch_pointer_repo,
+        _remaining_time_ms_var.get(),
     )
     logger.info(
         "buy_candidate_worker_handler single candidate done stock_code=%s "

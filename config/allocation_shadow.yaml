@@ -1,0 +1,26 @@
+# 購入側 Shadow(Portfolio Allocation。Q')の設定(Issue #603)。
+# 買い候補バッチの finalize が完了した後に、配分を観測だけする『枠』。判定・通知・保存・完了処理を
+# 一切変えない。
+#
+# mode:
+# ★ 値は必ず引用符で囲むこと("OFF")。引用符なしのOFFはYAML 1.1で真偽値Falseと解釈され、検証に失敗して
+#   設定ファイル全体が読まれなくなる(いわゆるNorway problem。読まれなければOFFへ縮退するが、意図を明示する)。
+#   OFF     shadow処理を一切実行しない(I/O・AuditLog・AvailableCash・計算のいずれにも入らない)。既定。
+#   SHADOW  観測のみ行う。★ 有効化は別のUSER承認 + IAM(AvailableCashTableのGetItem)の反映が前提。
+#           IAM未反映でSHADOWにしてはならない(本流は壊れないが、IAM_MISSINGが記録されるだけで目的を果たさない)。
+#
+# ★ 現在の出荷値はOFF(Issue #603 / USER決定: 10/12はOFFのまま。有効化は次回以降の別承認)。
+#   rollback: modeを"OFF"へ戻して再deployする(Lambda Layerの静的設定のため、config変更 + 再deployが要る)。
+#
+# 時間のパラメータ(USER承認の設計値。#128 …6100461428):
+#   min_remaining_seconds  実行前に必要なLambdaの残り時間(未満ならスキップして記録)
+#   time_limit_seconds     Shadow処理そのものの協調的な期限(強制停止ではない)
+#   io_timeout_seconds     外部I/O 1回あたりの待ち時間の上限(超えたら打ち切る)
+#
+# このファイルが無い・読めない・不正な場合は、mode=OFFとして扱う(shadowを実行しない側へ倒す)。
+# 本流の起動を落とさない。
+version: 1
+mode: "OFF"
+min_remaining_seconds: 120
+time_limit_seconds: 30
+io_timeout_seconds: 5

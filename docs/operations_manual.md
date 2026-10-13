@@ -1163,6 +1163,13 @@ jstock holding-decision set-mode active --changed-by <あなたの名前> \
 (`services/hd_renotification_provisional_policy.py`)です。**`mode=active`にする承認の前に、各項目を
 確定してください**(併せて #888・#889 の是正、通知件数の見込みも前提です)。
 
+**運用制約(2026-10-11追記、10/12のProduction反映に伴う)**: 次回のProduction反映(前回fbd08cbe以降の変更を含む)の後も、
+**`mode=active`にしないでください**。反映後のコードは`mode=active`を受け入れる状態になっており、`mode=active`にすると上の再通知の
+条件(暫定の値)が実際の通知を決めます。次のすべてが満たされるまで`mode=shadow`(または`legacy`)のままにします:
+#888・#889の是正(新方式のハードゲートの確認の扱い)と、その独立評価・承認 / 再通知の方針の各項目の確定(上記) /
+確認に至らない重大リスクの通知設計(#901)の判断 / USERによる`mode=active`切替の明示的な承認。
+`mode=shadow`の間は、保有判断の通知を作る処理も再通知の判断も実行されません(従来方式の通知のみ)。
+
 ロールバックは`set-mode legacy`の1コマンドで即座に行えます(再デプロイ不要)。
 
 ```bash
@@ -1253,6 +1260,24 @@ jstock holding-decision init-runtime-config --changed-by <あなたの名前> \
 
 ### 10.6 compare実行方法(Shadow比較レポート)
 
+> **暫定制約(2026-10-11追記、Issue #886 の是正が完了するまで)**: `jstock holding-decision compare` と
+> `jstock holding-decision backtest`(`--start-date`を付けないliveモード)は、環境変数`AWS_LAMBDA_FUNCTION_NAME`が
+> 空でない値で設定されたシェルでは**実行しないでください**。保存先は同変数の有無だけで決まり(`collection_store.py`の
+> `running_on_lambda`)、設定されていてAWS資格情報が有効だと、ProductionのDynamoDBへ監査記録・投資ストーリー・baselineを
+> 書き込みます(拒否のguardがありません)。非保有銘柄を`--stock-code`に指定しても書き込まれ、後日の購入時の初回評価の扱いが
+> 変わりうります。実行前に`echo $AWS_LAMBDA_FUNCTION_NAME`(PowerShell: `$env:AWS_LAMBDA_FUNCTION_NAME`)が空であることを
+> 確認し、`shareholder-benefit import-csv`など「環境変数を設定して実行」と案内される手順の後のシェルは使い回さず、
+> 新しいシェルで実行する(またはその変数をunsetする)。Productionデータの確認が必要な場合は、読取専用の観測用profileを
+> 使う別の手段で行い、本コマンドでは行わない。`--target aws`はruntime-config系の4コマンド専用で、本制約の対象外
+> (意図したProduction操作)。
+>
+> **変数が空であることは、Productionへ安全であることの保証ではありません**。上の確認は、この2コマンドの保存先が
+> ローカルになるための条件の1つにすぎません。実行の前に、次も確認してください: `AWS_PROFILE`・`AWS_ACCESS_KEY_ID`などの
+> 資格情報の設定、接続先(リージョン・エンドポイント・`DYNAMODB_TABLE_PREFIX`)が意図したものか。Productionの状態を調べる
+> ときは、許可された読取専用の経路(観測用profile)を使い、書込みが起こりうるコマンドで調べないでください。
+>
+> 本制約は#886の拒否guardがmerge・反映された時点で解除または書き換える。
+
 Shadow運用中に新旧の判定差分を確認するためのコマンドです。指定銘柄
 (または全保有銘柄)を現在のデータで両エンジンにかけ、判定・score・
 通知差分に加えて、coverage・ハードゲート・主な加点/減点理由を表示します。
@@ -1284,6 +1309,10 @@ jstock holding-decision compare --csv compare_result.csv
 推奨します)。
 
 ### 10.7 バックテスト手順
+
+> **暫定制約(2026-10-11追記、Issue #886 の是正まで)**: 10.6節の暫定制約(変数の確認、およびその注意書きにある
+> 資格情報・接続先の確認を含む)を、本節の`backtest`にも適用する(liveモードは上記の環境で実行しない)。replayモード(`--start-date`指定)と`jstock rules backtest`は読取りのみだが、
+> 上記の環境変数が設定されたシェルではProductionを読むため、同様に避ける。
 
 過去に実際に保存された判定結果を再生する`backtest`コマンドです。**このシステムは
 財務・配当・優待データを現在値としてのみ保持しており、過去の任意時点の
@@ -5549,3 +5578,115 @@ API側のsemantic制約」とは別の関心事(build/deploy入力側のprovenan
 (E1)を定める。手順書のmerge単独では、Productionも既存のartifactも変わらない。ただし、今後のreleaseで
 buildの方式や入力のバイト列が前回と異なる場合、artifactのhashが前回と異なりうる。それは期待差分として、
 36.5.1の事前申告の対象になる。
+
+## 37. #128 の機能の Production 接続 gate(Shadow → Backtest → Human Review → USER Approval。Issue #606、#128 Child 6b、2026-10-11追加)
+
+Expected Return(#601)・RAER(#602)・Portfolio Allocation(#603)・Capital Rotation(#604)・利用者向けの出力(#605)を、
+Production の BUY / SELL / 保有判断・通知へ接続する**前に経る運用手順**である。
+
+**本節は、新しい gate 機構も、新しい有効化経路も作らない。** 既存の Human Gate
+(§28 の「各段が別の Human Gate」・§10.2〜10.4 の Shadow → Active・§5.1 の「自動検出 → 人間レビュー → 人間承認」)を、
+#128 の各機能へ適用するときの**順序と記録**を明確にするだけである。
+運用の恒久規則の制定・変更は `POLICY_AUTHORITY = HUMAN_ONLY`(CLAUDE.md §2。正本は
+docs/user_manager_collaboration_protocol.md §8)であり、本節はそれを変更しない。
+
+```
+規則の正本(本節は複製しない。矛盾したら正本が優先する)
+  USER 決定  #122 issuecomment-6100082651(#128 の各機能と案 Y の必須条件)/ #122 issuecomment-6054586019(Exit 側:
+             shadow -> replay / backtest -> human review -> explicit approval を経ずに Production へ接続しない)
+  設計       #846(Unified Holding / Exit Decision Architecture)/ #128 本文(Shadow / backtest gate)/ #606
+```
+
+### 37.1 対象と、現況の確認方法
+
+| 機能 | 親 Issue | 接続の入口になりうるもの |
+|---|---|---|
+| Expected Return | #601 | 純粋な型と計算。Production の判定・通知からは呼ばれない |
+| RAER と Shadow の器 | #602 | `ExpectedReturnRuntimeConfig` / `ExpectedReturnExecutionPlan`(mode = legacy / shadow / active。`allow_allocation_use` が True になるのは active のときだけ) |
+| Portfolio Allocation | #603 | 購入側 Shadow の枠(`config/allocation_shadow.yaml`。mode は OFF / SHADOW のみ)・購入可能株数の純粋関数 |
+| Capital Rotation | #604 | 実装前 |
+| 利用者向けの出力 | #605 | 表示モデルと renderer(LINE 等の送信経路への接続は UI/UX の USER 判断の後) |
+
+**現況(merge 済みか・どの mode か・何が接続されているか)は、本節に固定しない。** 各 Issue の最新の
+`ISSUE_STATE_SNAPSHOT` と origin/main を fresh に読んで確認する(静的な文書を現況の根拠にしない)。
+Exit 側(#846)の class 単位 flag は本節の範囲外(37.6)。
+
+### 37.2 段(順序を入れ替えない。各段が別の Human Gate)
+
+```
+段 A Shadow
+  入口  実装 PR が merge 済みで、出荷値が OFF / legacy のまま Production に載っていること。その上で、設定を shadow にする
+        (USER の別承認。購入側 Shadow は、AvailableCashTable の GetItem の IAM を先に反映する。IAM の反映前に SHADOW にしない)。
+        設定は Lambda Layer の静的設定のため、変更は config の変更 + 再 deploy(ChangeSet の CREATE と EXECUTE は各別の Human Gate。CLAUDE.md §4)
+  出口  観測期間の終了と、shadow の集計の報告(期間は shadow 運用の後に USER が決める。37.6)
+  記録  AuditLog / DecisionSnapshot の shadow 記録(実行回数・スキップの理由・所要時間・IAM 未反映の有無)。shadow は観測専用で、
+        判定・通知・保存される業務結果には接続しない
+  停止条件  shadow が本流(判定・通知・完了処理)に影響した / IAM 未反映の記録が出た / スキップが想定を超えて多い / 記録に実名・金額・株数が
+            混入した -> 直ちに mode を OFF / legacy へ戻す(37.4)
+
+段 B Backtest / Replay
+  入口  段 A の集計を USER が確認し、backtest の持ち主と合格基準案を決めたこと(37.6。決まっていなければ段 B は始めない)
+  出口  backtest の結果の報告。入力の範囲と限界を併記する(このシステムは過去の任意時点の財務スナップショットを保存していないため、
+        真の過去時点シミュレーションではない。§10.7)
+  記録  結果・使った入力の範囲・限界を Issue に残す
+  停止条件  入力の限界のため結論できないときは『証拠不足(INSUFFICIENT_EVIDENCE)』とする。推測で合格にしない
+
+段 C Human Review
+  入口  段 B の結果
+  出口  review の結論(PASS / PASS_WITH_CONDITIONS / 証拠不足 / 差し戻し)。PASS_WITH_CONDITIONS は Human Gate の通過を意味しない
+  記録  結論と根拠を Issue に残す。#602 の案 X / 案 Y の再評価の結果を含める(USER の必須条件)
+  停止条件  条件未達・証拠不足 -> 段 B(または段 A)へ戻す
+
+段 D USER Approval
+  入口  段 C の結論
+  出口  USER の明示的な承認。backtest の結果の承認と mode の切替の承認は別々に取得する(§28.2)。承認の記録に、承認の対象
+        (機能・mode・リリース)を明記する(新しい制約ではなく、既存の正本に基づく: コードの deploy と機能の有効化は別 = #122、
+        リリースの特定は §36 の exact-SHA)。承認は、記録された対象に対してのみ有効
+  記録  承認の原文を Issue に転記する。承認後も、設定の変更と deploy は ChangeSet の CREATE と EXECUTE が各別の Human Gate
+  停止条件  承認が無い / 対象が違う -> 切り替えない
+```
+
+### 37.3 やってはいけないこと
+
+```
+・段を飛ばさない・順序を入れ替えない(各段が別の Human Gate)
+・shadow の結果、特に案 Y の暫定 RAER を、投資判断に使わない(案 Y は shadow 評価の実施のためで、投資判断への利用の承認ではない)
+・適用軸の異なる RAER の結果をそのまま比較しない(比較不能は UNAVAILABLE とし、推奨数量を算出しない)
+・IAM の反映前に購入側 Shadow を SHADOW にしない
+・mode を active にできる新しい有効化の経路(書込・CLI・handler・環境変数・template の Parameter)を作らない。契約テスト(37.5)が検知する
+・shadow の出力を、LINE 等の送信経路へ渡さない
+・merge を、Production 有効化の承認と読まない(merge は有効化の承認ではない。有効化は段 D の USER の明示的な承認)
+```
+
+### 37.4 戻し方
+
+```
+mode を OFF / legacy へ戻す(設定の変更 + 再 deploy。ChangeSet の CREATE と EXECUTE は各別の Human Gate)。
+shadow の記録は追記のみで削除しない。表・IAM は、既存の戻し方(§28.4 / §10.4)に倣い削除しない(購入側 Shadow の IAM は残してよい)。
+```
+
+### 37.5 契約テストとの対応
+
+`tests/unit/test_issue_606_production_connection_gate.py` が、次をコード上で固定する(PR のたびに全走査):
+
+```
+・有効化の経路の集合が増えていない: #128 の設定型・実行計画を作る/読む src は定義するモジュールの外に無い / src が読む環境変数の名前
+  (literal・module 定数・dict・helper の引数を解決した全件)と、template の Parameter・Lambda の環境変数の名前が、既知の一覧から増えていない
+  (新しい名前が現れたらテストが落ちて、人が確認する。名前の語には頼らない)/ config に #128 の機能の入口が無い / 出荷 config は OFF /
+  購入側 Shadow の mode に ACTIVE が無い。★名前を解決できない読取や、分類できない `os.environ` の使い方が現れた場合も落ちる★
+・Production(Lambda handler・CLI を根とする import 連鎖の推移閉包)から、Expected Return・RAER・配分・入替・#605 の表示・Exit 統合の module に
+  到達しない(到達できるのは、出荷 OFF の購入側 Shadow の枠だけ)
+・本節が存在し、各段の入口・出口・記録・停止条件、USER の明示的な承認、戻し方、決めていないことを含み、閾値・期間の数値を書かないこと
+```
+
+接続を許す変更は、契約テストの許可リストの変更を伴い、USER の承認の記録(Issue 番号)を要する。
+
+### 37.6 この節が決めていないこと
+
+```
+・backtest の合格基準・最低期待リターン改善幅・観測期間の数値(shadow 運用の後に USER が決める。#128 本文)
+・backtest を実施する持ち主の Issue(未定。USER の判断)
+・Exit 側(#846)の class 単位 flag を本 gate の範囲に含めるか(#846 の論点。範囲が決まるまで、Exit 側は #846 の gate に従う)
+・各機能を ACTIVE にする可否・時期(USER の判断)
+・運用の恒久規則の制定・変更(HUMAN_ONLY)
+```

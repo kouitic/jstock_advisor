@@ -60,6 +60,7 @@ import logging
 import os
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
@@ -153,6 +154,7 @@ from jstock_advisor.lambda_handlers._market_holiday import (
     should_skip_for_market_closed,
 )
 from jstock_advisor.lambda_handlers._scheduling import derive_scheduled_batch_id
+from jstock_advisor.services.allocation_shadow_service import observe_allocation_shadow
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER, BuySignalService
 from jstock_advisor.services.decision_snapshot_service import save_decision_snapshot_safely
@@ -756,6 +758,7 @@ def _process_single_candidate(
     execution_context: ExecutionContext = _DEFAULT_EXECUTION_CONTEXT,
     evaluation_record_repo: BuyCandidateEvaluationRecordRepository | None = None,
     latest_batch_pointer_repo: LatestBuyCandidateBatchPointerRepository | None = None,
+    remaining_time_ms: Callable[[], int] | None = None,
 ) -> dict[str, Any]:
     service = BuySignalService(
         providers=providers,
@@ -1245,7 +1248,38 @@ def _process_single_candidate(
                     _mark_finalize_failure_safely(batch_id, finalize_token, now, exc)
                     raise
                 mark_completion_finalize_completed(batch_id, finalize_token, now)
+                # Issue #603 (Q'): 購入側 Shadow の『枠』。finalize の完了記録の**後**に、
+                # 実行権を取得した 1 起動だけが呼ぶ。設定 OFF(既定)なら最初の判定で戻り、
+                # 例外は送出しない。
+                _observe_allocation_shadow_safely(
+                    batch_id=batch_id,
+                    now=now,
+                    execution_context=execution_context,
+                    audit_service=audit_service,
+                    remaining_time_ms=remaining_time_ms,
+                )
     return result
+
+
+def _observe_allocation_shadow_safely(
+    *,
+    batch_id: str,
+    now: dt.datetime,
+    execution_context: ExecutionContext,
+    audit_service: AuditService,
+    remaining_time_ms: Callable[[], int] | None,
+) -> None:
+    """Q' の入口を呼ぶ。入口自体が例外を送出しない契約だが、本流を守るため二重に握る。"""
+    try:
+        observe_allocation_shadow(
+            batch_id=batch_id,
+            now=now,
+            execution_context=execution_context,
+            audit_service=audit_service,
+            remaining_time_ms=remaining_time_ms,
+        )
+    except Exception as exc:  # noqa: BLE001 - 購入判定・通知・完了処理へ波及させない
+        logger.warning("allocation shadow entry raised and was isolated (%s)", type(exc).__name__)
 
 
 def _run_finalize_only_recovery(
@@ -2659,6 +2693,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             execution_context,
             evaluation_record_repo,
             latest_batch_pointer_repo,
+            getattr(context, "get_remaining_time_in_millis", None),
         )
         # Issue #309 同型 sweep: ここは現時点では stock_code と真偽値しか持たないが、
         # dict を丸ごと出す形そのものが、後からキーが 1 つ増えただけで漏れる。

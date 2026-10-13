@@ -32,6 +32,7 @@ from jstock_advisor.domain.entities.owner import (
 )
 from jstock_advisor.domain.jst import evaluation_date_jst
 from jstock_advisor.infrastructure.aws.baseline_pointer import BaselinePointerConflictError
+from jstock_advisor.infrastructure.collection_store import running_on_lambda
 from jstock_advisor.infrastructure.external_value_parser import ExternalValueParser
 from jstock_advisor.infrastructure.local_repository import (
     holding_decision_runtime_config_repository as runtime_config_repo,
@@ -91,6 +92,35 @@ def _target_backend(target: str) -> Iterator[None]:
 
 def _cache_ttl_seconds() -> int:
     return load_config().holding_decision.runtime_config_cache_ttl_seconds
+
+
+def _reject_when_aws_env_is_set(command: str) -> None:
+    """compare / backtest を、AWS_LAMBDA_FUNCTION_NAME が設定された環境で実行させない(Issue #886)。
+
+    保存先は `running_on_lambda()`(この環境変数が空でない値で設定されているか)だけで決まり、
+    設定されていて AWS 資格情報が有効だと、これらのコマンドが呼ぶ
+    `HoldingDecisionService.evaluate()` が Production の DynamoDB へ thesis・baseline・
+    AuditLog を書き込む。`--target aws` は runtime-config 系のコマンド専用で、compare /
+    backtest には無い。そのため『ローカルのつもりで Production に触れる』経路を入口で断つ。
+    weekly-aggregate(`cli/weekly_aggregate.py`。#833)の拒否と同じ型で、環境変数からは
+    何も選ばず、設定されていたら拒否する方向にだけ使う。
+
+    **各コマンドの最初に呼ぶこと**。銘柄の解決(保有の読取 = ストアの構築)・設定の読込・
+    provider の構築・各 service の呼出の前に拒否する(読取・書込・ネットワークの呼出を
+    0 件にするため)。backtest は live / replay のどちらも拒否する(replay は読取のみだが、
+    環境変数の設定で暗黙に Production を読むことを避ける)。Production のデータで比較したい
+    場合は、明示的な読取専用の経路を別途用意する(この CLI では行わない)。
+    空文字は未設定として扱う(`running_on_lambda()` と同じ定義)。
+    """
+    if running_on_lambda():
+        raise typer.BadParameter(
+            f"環境変数 {_AWS_OVERRIDE_ENV_VAR} が設定されているため、{command} は拒否します"
+            "(この設定のもとでは、ローカルのつもりでも Production の DynamoDB に"
+            "監査記録・投資ストーリー・baseline を書き込む可能性があります)。"
+            "ローカルで実行するなら、この環境変数を外してください。"
+            "Production のデータの確認は、この CLI ではなく、読取専用の経路で行ってください",
+            param_hint=_AWS_OVERRIDE_ENV_VAR,
+        )
 
 
 @app.command("init-runtime-config")
@@ -362,7 +392,11 @@ def backtest(
     非保有銘柄はliveモードで新方式のみ評価され、旧方式は評価されない
     (架空の取得単価による誤評価を防ぐため)。--purchase-price/--purchase-date/
     --sharesをすべて指定した場合に限り、単一銘柄指定時だけ旧方式も評価する。
+
+    環境変数 AWS_LAMBDA_FUNCTION_NAME が設定された環境では、live / replay のどちらも
+    実行しない(Issue #886。Production の DynamoDB へ書き込みうるため)。
     """
+    _reject_when_aws_env_is_set("backtest")
     stock_codes = resolve_target_stock_codes(stock_code, owner)
     if not stock_codes:
         typer.echo(
@@ -483,7 +517,11 @@ def compare(
     score・通知差分に加えて、coverage・ハードゲート・主な加点/減点理由を
     1銘柄ごとに表示する。mode=shadowで運用しているときに、本稼働へ切り替えて
     よいかを判断する材料として使う。
+
+    環境変数 AWS_LAMBDA_FUNCTION_NAME が設定された環境では実行しない
+    (Issue #886。Production の DynamoDB へ書き込みうるため)。
     """
+    _reject_when_aws_env_is_set("compare")
     stock_codes = resolve_target_stock_codes(stock_code, owner)
     if not stock_codes:
         typer.echo(

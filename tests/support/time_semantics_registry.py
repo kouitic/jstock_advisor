@@ -270,6 +270,54 @@ _REGISTRY: tuple[_Entry, ...] = (
         cohort="SOLO:hd_renotification_wiring",
         wall_clock_policy=_FORBIDDEN,
     ),
+    # Issue #603(Q'。購入側 Shadow の『枠』): Lambda の残り時間のガード(120 秒。119.9 / 120.0 /
+    # 120.1 秒の境界)と、協調的な期限(30 秒。29.9 / 30.0 秒の境界)。T4 = 注入した clock
+    # (_Clock)と remaining_time_ms、literal の期待値を新規に導入した(T1〜T3 は該当なし:
+    # 暦日・営業日・時刻の業務分岐を持たない)。wall clock・freezegun は使わない。可変の
+    # module-level state を持たないため、cohort の相手はいない(SOLO。先例 #373 / #890)。
+    _Entry(
+        module="tests/unit/test_allocation_shadow_service.py",
+        triggers=("T4",),
+        cohort="SOLO:allocation_shadow_service",
+        wall_clock_policy=_FORBIDDEN,
+    ),
+    # 同上。handler 側の配線(残り時間の受け渡しと、残り 119.9 秒でスキップが記録されること)。
+    _Entry(
+        module="tests/unit/test_allocation_shadow_wiring.py",
+        triggers=("T4",),
+        cohort="SOLO:allocation_shadow_wiring",
+        wall_clock_policy=_FORBIDDEN,
+    ),
+    # Issue #926(incident の GitHub Issue 起票の抑止): 前回作成からの最小間隔の境界(ちょうど /
+    # 1 分前)と、上限の窓 = JST の日付の切替(UTC と JST で日付が違う時刻・翌日で予算が戻る)。
+    # T3 = 時刻由来の値(now)で業務分岐する consumer(本 PR の guard・tracker・service)。
+    # T4 = 固定の日時(_NOW / 境界の時刻)と literal の期待値を新規に導入した(PR #928 の独立 review で
+    # T4 該当と指摘された)。wall clock・freezegun は使わない(now は呼び出し元から注入)。可変の
+    # module-level state を持たないため、cohort の相手はいない(SOLO。先例 #603 / #890 / #373)。
+    _Entry(
+        module="tests/unit/test_issue_926_incident_issue_guard.py",
+        triggers=("T3", "T4"),
+        cohort="SOLO:incident_issue_guard",
+        wall_clock_policy=_FORBIDDEN,
+    ),
+    _Entry(
+        module="tests/unit/test_issue_926_incident_state_tracker_guard.py",
+        triggers=("T3", "T4"),
+        cohort="SOLO:incident_state_tracker_guard",
+        wall_clock_policy=_FORBIDDEN,
+    ),
+    _Entry(
+        module="tests/unit/test_issue_926_incident_github_issue_guard_service.py",
+        triggers=("T3", "T4"),
+        cohort="SOLO:incident_github_issue_guard_service",
+        wall_clock_policy=_FORBIDDEN,
+    ),
+    _Entry(
+        module="tests/unit/test_issue_926_incident_notifier_handler_guard.py",
+        triggers=("T3", "T4"),
+        cohort="SOLO:incident_notifier_handler_guard",
+        wall_clock_policy=_FORBIDDEN,
+    ),
 )
 
 # V8: registry から静かに削除して guard を無効化する経路を塞ぐ。
