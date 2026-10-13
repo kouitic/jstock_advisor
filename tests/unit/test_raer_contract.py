@@ -744,16 +744,22 @@ def test_the_evaluation_keeps_the_expected_return_as_given() -> None:
 def test_enum_surfaces_are_pinned() -> None:
     assert [s.value for s in RaerState] == ["AVAILABLE", "PROVISIONAL", "UNAVAILABLE"]
     assert [s.value for s in AxisStatus] == ["APPLIED", "NOT_APPLIED", "UNAVAILABLE"]
+    # PR-B2(#602)で、組合せの値を作るために追加した語(意図した変更。B1 の語は 1 つも変えていない)
     assert sorted(r.value for r in AxisReasonCode) == [
         "AXIS_NOT_IMPLEMENTED",
         "AXIS_NOT_PROVIDED",
+        "COVERAGE_BELOW_MINIMUM",
         "INPUT_MISSING",
         "NOT_APPLICABLE_TO_STOCK",
         "RISK_FLAGS_NOT_OBSERVED",
     ]
     assert sorted(r.value for r in RaerReasonCode) == [
+        "AXES_BELOW_MINIMUM",
+        "BASE_UNDETERMINED",
         "COMPOSITION_RULE_NOT_DECIDED",
+        "EXPECTED_RETURN_INCOME_UNDETERMINED",
         "EXPECTED_RETURN_UPSIDE_UNDETERMINED",
+        "REQUIRED_AXIS_MISSING",
     ]
 
 
@@ -786,8 +792,10 @@ def test_module_reads_no_clock_and_has_no_arithmetic_formula() -> None:
     # 式を実装しない: 乗除・べき乗の演算が 1 つも無い(未決の合成式・単位・重みを持ち込まない)
     operators = {type(n.op) for n in ast.walk(tree) if isinstance(n, ast.BinOp | ast.AugAssign)}
     assert not operators & {ast.Mult, ast.Div, ast.FloorDiv, ast.Pow, ast.MatMult, ast.Mod}
-    # 値を作る手段を持たない: Decimal の生成・float への変換・丸めの呼出が無い
-    assert not called & {"Decimal", "float", "round", "quantize", "sum", "mean"}
+    # 値を作る手段を持たない: float への変換・丸め・平均の呼出が無い。PR-B2(#602)で、composition の
+    # 恒等式(土台 - Σ寄与度 = value)の検査のために Decimal の生成・sum を使う(加減算だけ。
+    # 乗除・べき乗の演算は上で引き続き禁止 = 式は raer_composition.py にあり、本 module に無い)
+    assert not called & {"float", "round", "quantize", "mean"}
 
 
 def test_module_has_no_forbidden_names() -> None:
@@ -925,6 +933,7 @@ _ALLOWED_IMPORTERS = {
     "domain/signals/portfolio_allocation_types.py",  # #603 PR-A
     "domain/signals/portfolio_allocation.py",  # #603 PR-C
     "domain/signals/capital_rotation.py",  # #603 PR-D(入替元の RaerResult)
+    "domain/valuation/raer_composition.py",  # #602 PR-B2(式。本 module のデータ型を使う)
 }
 
 
