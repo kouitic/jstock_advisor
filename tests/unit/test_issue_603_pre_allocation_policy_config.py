@@ -71,6 +71,19 @@ def _with(**changes: Any) -> dict[str, Any]:
     return data
 
 
+def _all_keys(value: Any) -> list[str]:
+    """入れ子を含む全てのキー(dict の中の dict・list の中の dict も辿る)。"""
+    keys: list[str] = []
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            keys.append(str(key))
+            keys.extend(_all_keys(inner))
+    elif isinstance(value, list):
+        for inner in value:
+            keys.extend(_all_keys(inner))
+    return keys
+
+
 def _is_fallback(bundle: AllocationPolicyBundle) -> bool:
     return (
         bundle.source == "FALLBACK"
@@ -397,6 +410,24 @@ def test_changing_any_value_changes_the_hash(tmp_path: Path, key: str, value: An
     assert _load(tmp_path, _with(**{key: value})).config_hash != baseline
 
 
+def test_the_config_version_is_part_of_the_hash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """将来 v2 を足したとき、旧版と新版の記録が同じ hash にならない(version は hash の入力)。"""
+    bundle = load_allocation_policy(_CONFIG_DIR, minimum_trading_unit=_UNIT)
+
+    def digest() -> str:
+        return module._hash(
+            policy_id=bundle.policy_id,
+            constraints=bundle.constraints,
+            policy=bundle.policy,
+            unknown_price_tier_as=bundle.unknown_price_tier_as,
+        )
+
+    assert digest() == bundle.config_hash
+    monkeypatch.setattr(module, "SUPPORTED_VERSION", 2)
+
+    assert digest() != bundle.config_hash
+
+
 def test_the_trading_unit_is_part_of_the_hash_and_the_constraints() -> None:
     a = load_allocation_policy(_CONFIG_DIR, minimum_trading_unit=100)
     b = load_allocation_policy(_CONFIG_DIR, minimum_trading_unit=1)
@@ -537,9 +568,13 @@ def test_only_the_yaml_reader_is_taken_from_the_app_config_loader() -> None:
 
 def test_the_policy_file_is_not_an_activation_switch() -> None:
     """出荷 YAML は mode / enabled の類のキーを持たない(閾値だけ)。有効化は shadow 側の別承認。"""
-    keys = {key.lower() for key in _shipped_data()}
+    keys = {key.lower() for key in _all_keys(_shipped_data())}
 
-    assert not keys & {"mode", "enabled", "enable", "active", "on", "off", "shadow", "dry_run"}
+    assert not keys & {"on", "off"}
+    assert not [
+        key for key in keys if any(word in key for word in ("mode", "enable", "active", "shadow"))
+    ]
+    assert not [key for key in keys if any(word in key for word in ("dry_run", "switch", "toggle"))]
     imported = _imported_modules(_tree(_MODULE_PATH))
     assert not [m for m in imported if "allocation_shadow" in m]
     assert "AllocationShadowMode" not in _MODULE_PATH.read_text(encoding="utf-8")

@@ -182,6 +182,11 @@ _UNCONNECTED_NAME_TOKENS = (
     "today_actions",
     "buy_affordability",
     "exit_architecture",
+    # allocation_policy: ★ 前向きの網 ★(#603 PR-E)。loader は dormant で、今この語を外しても
+    # 何も落ちない。実効の網は test_issue_603_pre_allocation_policy_config.py の
+    # test_nothing_in_src_imports_the_policy_loader(src の全走査)。handler・CLI から
+    # 到達させる変更が入ったとき、この語が test_no_handler_or_cli_reaches_an_unconnected_module
+    # を落とす
     "allocation_policy",
 )
 
@@ -720,6 +725,18 @@ def test_the_only_config_files_for_a_128_feature_are_the_off_shadow_and_the_poli
     assert by_content == []
 
 
+def _all_yaml_keys(value: object) -> list[str]:
+    keys: list[str] = []
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            keys.append(str(key))
+            keys.extend(_all_yaml_keys(inner))
+    elif isinstance(value, list):
+        for inner in value:
+            keys.extend(_all_yaml_keys(inner))
+    return keys
+
+
 def test_the_policy_values_file_is_not_an_entry_point_for_enabling_anything() -> None:
     """allocation_policy.yaml は閾値だけ。有効化の入口(mode / enabled の類)を持たない。
 
@@ -729,8 +746,14 @@ def test_the_policy_values_file_is_not_an_entry_point_for_enabling_anything() ->
     """
     assert _A_128_CONFIG_FILES["allocation_policy.yaml"] == "POLICY_VALUES_ONLY"
     data = yaml.safe_load((_SHIPPED_CONFIG_DIR / "allocation_policy.yaml").read_text("utf-8"))
-    activation_words = {"mode", "enabled", "enable", "active", "on", "off", "shadow", "dry_run"}
-    assert not {str(key).lower() for key in data} & activation_words
+    keys = {key.lower() for key in _all_yaml_keys(data)}
+    # 短い語は完全一致、長い語は部分一致(auto_enable・shadow_mode・入れ子のキーも拾う)
+    assert not keys & {"on", "off"}
+    assert not [
+        key
+        for key in keys
+        if any(word in key for word in ("mode", "enable", "active", "shadow", "dry_run", "switch"))
+    ]
     # 値が 'OFF' / 'SHADOW' / 'ACTIVE' の項目も無い(mode を別名で持たない)
     assert not {str(v).upper() for v in data.values() if isinstance(v, str)} & {
         "OFF",
