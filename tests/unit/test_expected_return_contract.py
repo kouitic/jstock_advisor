@@ -443,8 +443,8 @@ def test_only_the_allowed_modules_import_expected_return() -> None:
 
     例外は、dormant な module だけ: PR-1b の写像(exit_architecture 内)と、#602 PR-B1 の RAER の型
     (`domain/valuation/raer.py`。ExpectedReturnResult をそのまま保持する)と、#602 PR-B2 の
-    RAER の式(`domain/valuation/raer_composition.py`。ExpectedReturnResult から土台の値と Fair Value の
-    信頼度を読む)。handler・CLI から到達されないことは、各 module の契約テストと #606 §37 の
+    RAER の式(`domain/valuation/raer_composition.py`。ExpectedReturnResult から土台の値と
+    Fair Value の信頼度を読む)。handler・CLI から到達されないことは、各 module の契約テストと #606 §37 の
     契約テストが推移閉包で固定する。
     """
     allowed = {
