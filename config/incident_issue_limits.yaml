@@ -1,0 +1,24 @@
+# incident の GitHub Issue 自動起票の抑止の上限値(Issue #926。#876 の大量起票への構造的な対策)。
+#
+# ★ 出荷値はすべて null = 未決定。USER が値を決めるまで、新規 Issue は作らない(コメントと LINE 通知は
+# 従来どおり)。値を決めたら、この YAML を変更して再 deploy する(Lambda Layer の静的設定のため、
+# ChangeSet の CREATE / EXECUTE は各 USER の Human Gate)。
+# 暫定案と根拠は #926 の設計コメントを参照(最小間隔 360 / fingerprint あたり 2 / 全体 5 / 自動停止 10)。
+# 1 つでも null・不正な値(0 以下・文字列・真偽値)があれば、全項目を未決定として扱う(fail-closed)。
+#
+# 窓は JST の日付(固定)。停止中(kill switch)の手順は運用手順書を参照。
+
+version: 1
+
+# 同じ fingerprint の新規 Issue を、前回作成からこの分数以上空ける。
+new_issue_min_interval_minutes: null
+
+# JST の日付の窓あたり、1 fingerprint が作れる新規 Issue の数。
+new_issue_limit_per_fingerprint: null
+
+# JST の日付の窓あたり、全体で作れる新規 Issue の数。
+new_issue_limit_global: null
+
+# 全体の上限を超えた試行の数(窓あたり)がこの回数に達したら、GitHub への書込を自動停止にして
+# LINE へ 1 回通知する。再開は手動のみ。
+auto_stop_denied_threshold: null

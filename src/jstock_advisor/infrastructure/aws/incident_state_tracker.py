@@ -74,6 +74,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from jstock_advisor.domain.notification.incident_issue_guard import CONTROL_KEY, DenyReason
 from jstock_advisor.infrastructure.collection_store import resolve_table_name
 
 _TABLE_FILE_NAME = "incident_state.json"  # resolve_table_nameの命名規則に合わせる
@@ -104,6 +105,8 @@ class IncidentGithubIssueStatus(StrEnum):
     CREATED = "CREATED"
     CONFIGURATION_ERROR = "CONFIGURATION_ERROR"
     ISSUE_CREATION_FAILED = "ISSUE_CREATION_FAILED"
+    #: 起票の抑止(#926)で新規 Issue を作らなかった。claim は解放済みで、再試行できる
+    SUPPRESSED = "SUPPRESSED"
 
 
 def _table() -> Any:
@@ -361,7 +364,8 @@ def try_claim_new_github_issue_creation(
             Key={"fingerprint": fingerprint},
             UpdateExpression=(
                 "SET github_issue_create_status = :creating, "
-                "github_issue_claimed_at = :now, github_issue_claim_expires_at = :expires"
+                "github_issue_claimed_at = :now, github_issue_claim_expires_at = :expires "
+                "REMOVE github_issue_budget_window"
             ),
             ConditionExpression=(
                 "attribute_not_exists(github_issue_create_status) OR "
@@ -424,28 +428,39 @@ def mark_github_issue_created(
     issue_number: int,
     *,
     previous_issue_number: int | None = None,
+    created_at: dt.datetime | None = None,
+    occurrence_count: int | None = None,
 ) -> None:
     """新規Issue作成成功、stale reconciliationでの実在Issue復旧、またはClosed Issue
     検出後の再発Issue作成のいずれでも使う。`previous_issue_number`はClosed Issue
     検出後の再発Issue作成時のみ指定する。
+
+    `created_at` / `occurrence_count`(Issue #926)は、新規作成の抑止(前回作成からの最小間隔・同じ
+    occurrenceでの重複の防止)の入力として、作成した時刻と、その時点のoccurrenceを残す。復旧の
+    経路(元の作成の時刻・occurrenceが分からない)では指定しない。
     """
-    update_expression = (
-        "SET github_issue_create_status = :created, github_issue_number = :number "
-        "REMOVE github_issue_claimed_at, github_issue_claim_expires_at"
-    )
+    sets = ["github_issue_create_status = :created", "github_issue_number = :number"]
     values: dict[str, Any] = {
         ":created": IncidentGithubIssueStatus.CREATED.value,
         ":number": issue_number,
     }
     if previous_issue_number is not None:
-        update_expression = update_expression.replace(
-            "github_issue_number = :number ",
-            "github_issue_number = :number, previous_github_issue_number = :prev ",
-        )
+        sets.append("previous_github_issue_number = :prev")
         values[":prev"] = previous_issue_number
+    if created_at is not None:
+        sets.append("github_issue_last_created_at = :created_at")
+        values[":created_at"] = created_at.isoformat()
+    if occurrence_count is not None:
+        sets.append("github_issue_last_created_occurrence = :created_occ")
+        values[":created_occ"] = occurrence_count
     _table().update_item(
         Key={"fingerprint": fingerprint},
-        UpdateExpression=update_expression,
+        UpdateExpression=(
+            "SET "
+            + ", ".join(sets)
+            + " REMOVE github_issue_claimed_at, github_issue_claim_expires_at,"
+            + " github_issue_budget_window"
+        ),
         ExpressionAttributeValues=values,
     )
 
@@ -458,12 +473,48 @@ def mark_github_issue_creation_failed(fingerprint: str) -> None:
         Key={"fingerprint": fingerprint},
         UpdateExpression=(
             "SET github_issue_create_status = :failed "
-            "REMOVE github_issue_claimed_at, github_issue_claim_expires_at"
+            "REMOVE github_issue_claimed_at, github_issue_claim_expires_at, "
+            "github_issue_budget_window"
         ),
         ExpressionAttributeValues={
             ":failed": IncidentGithubIssueStatus.ISSUE_CREATION_FAILED.value
         },
     )
+
+
+def mark_github_issue_budget_consumed(fingerprint: str, window: str) -> None:
+    """この claim の作成のために、`window` の予算(fingerprint 単位と全体)を消費したことを行に残す。
+
+    stale 復旧(別の起動が claim を引き継ぐ)は、この印が現在の窓と一致するときだけ『消費済み』と
+    みなして再消費しない。印が無い(claim と消費の間で落ちた)・窓が違うときは、復旧も事前確認と
+    消費を通す(Issue #926: 上限を超えて起票しない)。CREATING の claim が無ければ何もしない。
+    """
+    try:
+        _table().update_item(
+            Key={"fingerprint": fingerprint},
+            UpdateExpression="SET github_issue_budget_window = :w",
+            ConditionExpression="github_issue_create_status = :creating",
+            ExpressionAttributeValues={
+                ":w": window,
+                ":creating": IncidentGithubIssueStatus.CREATING.value,
+            },
+        )
+    except ClientError as e:
+        if not _is_condition_failure(e):
+            raise
+
+
+def clear_github_issue_budget_window(fingerprint: str) -> None:
+    """『予算を消費した』印を消す(予算を返す前に呼ぶ。印が残ったまま返すと、復旧が消費せずに起票する)。"""
+    try:
+        _table().update_item(
+            Key={"fingerprint": fingerprint},
+            UpdateExpression="REMOVE github_issue_budget_window",
+            ConditionExpression="attribute_exists(fingerprint)",
+        )
+    except ClientError as e:
+        if not _is_condition_failure(e):
+            raise
 
 
 def mark_github_issue_configuration_error(fingerprint: str) -> None:
@@ -475,7 +526,8 @@ def mark_github_issue_configuration_error(fingerprint: str) -> None:
         Key={"fingerprint": fingerprint},
         UpdateExpression=(
             "SET github_issue_create_status = :error "
-            "REMOVE github_issue_claimed_at, github_issue_claim_expires_at"
+            "REMOVE github_issue_claimed_at, github_issue_claim_expires_at, "
+            "github_issue_budget_window"
         ),
         ExpressionAttributeValues={":error": IncidentGithubIssueStatus.CONFIGURATION_ERROR.value},
     )
@@ -559,3 +611,256 @@ def mark_github_comment_posted(fingerprint: str, occurrence_count: int) -> None:
         ),
         ExpressionAttributeValues={":occ": occurrence_count},
     )
+
+
+# --- 起票の抑止(Issue #926。#876 の大量起票への構造的な対策)-----------------------------
+#
+# 純粋な判定は `domain/notification/incident_issue_guard.py`、組み立ては
+# `services/incident_github_issue_service.py`。ここは DynamoDB の条件つき更新だけを持つ。
+#
+# ・予算の消費は条件つき UpdateItem(『同じ窓かつ count < limit なら ADD 1』を試し、失敗したら
+#   『窓が違えば SET 新しい窓・count = 1』を試す。両方失敗 = 超過)。read-modify-write にしない
+# ・fingerprint の行を扱う関数は、行が無いときに部分的な行を作らない
+#   (`attribute_exists(fingerprint)`)。
+#   LINE の初回 claim(`_put_new`)は『行が無い』ことを条件にするため、status の無い行を作ると
+#   以降の LINE 通知が永久に失敗する(#508 の注記)
+# ・制御用の項目(`CONTROL_KEY`)は fingerprint(SHA-256 の 16 進)と衝突しない key の 1 行。
+#   この表に TTL は無い(制御項目が勝手に削除されない)。表を Scan / Query する経路は無い
+
+
+def _is_condition_failure(error: ClientError) -> bool:
+    return bool(error.response["Error"]["Code"] in _CONDITION_FAILURE_CODES)
+
+
+def read_github_issue_control() -> dict[str, Any] | None:
+    """制御用の項目を読む(ConsistentRead)。無ければ None(= 停止していない通常の状態)。
+    失敗は例外のまま
+    (呼び出し側が fail-closed にする)。"""
+    return get_incident_state(CONTROL_KEY)
+
+
+def is_kill_switch_on(control: dict[str, Any] | None) -> bool:
+    """停止しているか。真偽値の true のときだけ True(文字列の "true" や 1 では止めない)。"""
+    return bool(control) and (control or {}).get("github_issue_kill_switch") is True
+
+
+def _consume_budget(
+    key: str,
+    window_attr: str,
+    count_attr: str,
+    window: str,
+    limit: int,
+    *,
+    require_row: bool,
+) -> bool:
+    row = " AND attribute_exists(fingerprint)" if require_row else ""
+    names = {"#w": window_attr, "#c": count_attr}
+    # 窓の切替の競合(別の実行が先に新しい窓を始めた)に備え、1 回だけ再試行する。上限そのものでの
+    # 拒否(窓が同じで件数が上限)は再試行しても結果が変わらず、行が無いときも同じ(False)。
+    for attempt in range(2):
+        try:
+            _table().update_item(
+                Key={"fingerprint": key},
+                UpdateExpression="ADD #c :one",
+                ConditionExpression=f"#w = :w AND #c < :limit{row}",
+                ExpressionAttributeNames=names,
+                ExpressionAttributeValues={":w": window, ":limit": limit, ":one": 1},
+            )
+            return True
+        except ClientError as e:
+            if not _is_condition_failure(e):
+                raise
+        if attempt == 1:
+            return False  # 窓を切り替える SET に競合で負けた後の加算でも通らない = 上限
+        try:
+            _table().update_item(
+                Key={"fingerprint": key},
+                UpdateExpression="SET #w = :w, #c = :one",
+                ConditionExpression=f"(attribute_not_exists(#w) OR #w <> :w){row}",
+                ExpressionAttributeNames=names,
+                ExpressionAttributeValues={":w": window, ":one": 1},
+            )
+            return True
+        except ClientError as e:
+            if not _is_condition_failure(e):
+                raise
+    return False
+
+
+def _refund_budget(key: str, window_attr: str, count_attr: str, window: str) -> None:
+    try:
+        _table().update_item(
+            Key={"fingerprint": key},
+            UpdateExpression="ADD #c :minus",
+            ConditionExpression="#w = :w AND #c > :zero",
+            ExpressionAttributeNames={"#w": window_attr, "#c": count_attr},
+            ExpressionAttributeValues={":w": window, ":minus": -1, ":zero": 0},
+        )
+    except ClientError as e:
+        if not _is_condition_failure(e):
+            raise
+
+
+def try_consume_fingerprint_budget(fingerprint: str, window: str, limit: int) -> bool:
+    """fingerprint あたりの窓の予算を 1 つ消費する。超過なら False。行が無ければ False。"""
+    return _consume_budget(
+        fingerprint,
+        "github_issue_window_id",
+        "github_issue_window_created_count",
+        window,
+        limit,
+        require_row=True,
+    )
+
+
+def refund_fingerprint_budget(fingerprint: str, window: str) -> None:
+    """消費した予算を 1 つ返す(作成の失敗・全体の上限での不成立)。
+    0 未満にならず、別の窓は返さない。"""
+    _refund_budget(
+        fingerprint, "github_issue_window_id", "github_issue_window_created_count", window
+    )
+
+
+def try_consume_global_budget(window: str, limit: int) -> bool:
+    """全体の窓の予算を 1 つ消費する(制御項目)。超過なら False。"""
+    return _consume_budget(
+        CONTROL_KEY, "global_window_id", "global_created_count", window, limit, require_row=False
+    )
+
+
+def refund_global_budget(window: str) -> None:
+    _refund_budget(CONTROL_KEY, "global_window_id", "global_created_count", window)
+
+
+def record_global_denied(window: str) -> int:
+    """全体の上限を超えた試行を 1 回数える(自動停止の入力)。窓が替わると 1 から数え直す。"""
+    table = _table()
+    for _ in range(2):  # 窓の切替の競合に備え、1 回だけ再試行する
+        try:
+            response = table.update_item(
+                Key={"fingerprint": CONTROL_KEY},
+                UpdateExpression="ADD global_denied_count :one",
+                ConditionExpression="global_denied_window_id = :w",
+                ExpressionAttributeValues={":w": window, ":one": 1},
+                ReturnValues="UPDATED_NEW",
+            )
+            return int(response["Attributes"]["global_denied_count"])
+        except ClientError as e:
+            if not _is_condition_failure(e):
+                raise
+        try:
+            table.update_item(
+                Key={"fingerprint": CONTROL_KEY},
+                UpdateExpression="SET global_denied_window_id = :w, global_denied_count = :one",
+                ConditionExpression=(
+                    "attribute_not_exists(global_denied_window_id) OR global_denied_window_id <> :w"
+                ),
+                ExpressionAttributeValues={":w": window, ":one": 1},
+            )
+            return 1
+        except ClientError as e:
+            if not _is_condition_failure(e):
+                raise
+    return 1
+
+
+def try_trip_kill_switch(now: dt.datetime, reason: str) -> bool:
+    """GitHub 書込の kill switch を停止にする。まだ停止していないときだけ成立(1 回だけ)。
+    新しい停止は、古い通知済みの印を消す。"""
+    try:
+        _table().update_item(
+            Key={"fingerprint": CONTROL_KEY},
+            UpdateExpression=(
+                "SET github_issue_kill_switch = :on, kill_switch_reason = :reason, "
+                "kill_switch_set_at = :now REMOVE kill_switch_notified_at"
+            ),
+            ConditionExpression=(
+                "attribute_not_exists(github_issue_kill_switch) OR github_issue_kill_switch = :off"
+            ),
+            ExpressionAttributeValues={
+                ":on": True,
+                ":off": False,
+                ":reason": reason,
+                ":now": now.isoformat(),
+            },
+        )
+        return True
+    except ClientError as e:
+        if _is_condition_failure(e):
+            return False
+        raise
+
+
+def try_claim_kill_switch_notification(now: dt.datetime) -> bool:
+    """自動停止の LINE 通知を 1 回だけ送る権利を確保する。停止中で未通知のときだけ成立。"""
+    try:
+        _table().update_item(
+            Key={"fingerprint": CONTROL_KEY},
+            UpdateExpression="SET kill_switch_notified_at = :now",
+            ConditionExpression=(
+                "github_issue_kill_switch = :on AND attribute_not_exists(kill_switch_notified_at)"
+            ),
+            ExpressionAttributeValues={":on": True, ":now": now.isoformat()},
+        )
+        return True
+    except ClientError as e:
+        if _is_condition_failure(e):
+            return False
+        raise
+
+
+def release_kill_switch_notification() -> None:
+    """確保した通知の権利を戻す(LINE の push に失敗したとき。次の signal で再試行できる)。"""
+    try:
+        _table().update_item(
+            Key={"fingerprint": CONTROL_KEY},
+            UpdateExpression="REMOVE kill_switch_notified_at",
+            ConditionExpression="attribute_exists(fingerprint)",
+        )
+    except ClientError as e:
+        if not _is_condition_failure(e):
+            raise
+
+
+def record_github_issue_suppressed(fingerprint: str, reason: DenyReason, now: dt.datetime) -> None:
+    """claim の前に新規作成を見送った(事前確認で作らない)ことを数える。claim の状態は変えない。
+    行が無ければ何もしない。"""
+    try:
+        _table().update_item(
+            Key={"fingerprint": fingerprint},
+            UpdateExpression=(
+                "SET github_issue_last_denied_reason = :reason, github_issue_last_denied_at = :now "
+                "ADD github_issue_suppressed_count :one"
+            ),
+            ConditionExpression="attribute_exists(fingerprint)",
+            ExpressionAttributeValues={":reason": reason.value, ":now": now.isoformat(), ":one": 1},
+        )
+    except ClientError as e:
+        if not _is_condition_failure(e):
+            raise
+
+
+def mark_github_issue_suppressed(fingerprint: str, reason: DenyReason, now: dt.datetime) -> None:
+    """claim の後に新規作成を見送った(上限の超過)。claim を解放して SUPPRESSED にする。
+    `github_issue_number`(閉じた Issue の番号)は残す。行が無ければ何もしない。"""
+    try:
+        _table().update_item(
+            Key={"fingerprint": fingerprint},
+            UpdateExpression=(
+                "SET github_issue_create_status = :suppressed, "
+                "github_issue_last_denied_reason = :reason, github_issue_last_denied_at = :now "
+                "REMOVE github_issue_claimed_at, github_issue_claim_expires_at, "
+                "github_issue_budget_window "
+                "ADD github_issue_suppressed_count :one"
+            ),
+            ConditionExpression="attribute_exists(fingerprint)",
+            ExpressionAttributeValues={
+                ":suppressed": IncidentGithubIssueStatus.SUPPRESSED.value,
+                ":reason": reason.value,
+                ":now": now.isoformat(),
+                ":one": 1,
+            },
+        )
+    except ClientError as e:
+        if not _is_condition_failure(e):
+            raise
