@@ -913,6 +913,9 @@ def test_the_module_does_not_import_the_optimizer_or_anything_that_computes() ->
 _ALLOWED_IMPORTERS = {
     "domain/signals/portfolio_allocation.py",  # #603 PR-C(optimize_allocation)
     "domain/signals/capital_rotation.py",  # #603 PR-D(AllocationResult を入力に持つ)
+    "domain/signals/allocation_policy_config.py",  # #603 PR-E(方針値を型へ入れて渡す loader)
+    "domain/signals/allocation_inputs.py",  # #603 PR-F1(入力の組み立て)
+    "domain/signals/allocation_shadow_record.py",  # #603 PR-F2-1(記録の組み立て・replay)
 }
 
 

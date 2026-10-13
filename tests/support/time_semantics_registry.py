@@ -318,6 +318,16 @@ _REGISTRY: tuple[_Entry, ...] = (
         cohort="SOLO:incident_notifier_handler_guard",
         wall_clock_policy=_FORBIDDEN,
     ),
+    # Issue #603 PR-F1(購入側 Shadow の入力の組み立て): 最終棚卸しからの日数 = JST の暦日の差。
+    # JST 23:59 / 00:00 と、UTC では同じ日付になる時刻の境界。T3 = 時刻由来の値(now)で結果が変わる
+    # 純粋関数。T4 = 固定の日時と literal の期待値を新規に導入。wall clock・freezegun は使わない
+    # (now は引数)。可変の module-level state を持たないため cohort の相手はいない(SOLO)。
+    _Entry(
+        module="tests/unit/test_allocation_inputs_contract.py",
+        triggers=("T3", "T4"),
+        cohort="SOLO:allocation_inputs",
+        wall_clock_policy=_FORBIDDEN,
+    ),
 )
 
 # V8: registry から静かに削除して guard を無効化する経路を塞ぐ。

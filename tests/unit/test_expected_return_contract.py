@@ -45,6 +45,11 @@ from jstock_advisor.domain.valuation.expected_return import (
     compute_income,
     compute_upside,
 )
+from jstock_advisor.domain.valuation.fair_value_revision import (
+    FairValueRevisionResult,
+    RevisionDirection,
+    RevisionReason,
+)
 from jstock_advisor.domain.valuation.yield_calc import BenefitProgramState, compute_total_yield_pct
 
 # --- (0) 先行: INCOME が使う既存の真理値表は変更しない(#55) -----------------------------------
@@ -442,12 +447,16 @@ def test_only_the_allowed_modules_import_expected_return() -> None:
     """dormant: 現行のエンジンのどこからも import されない。
 
     例外は、dormant な module だけ: PR-1b の写像(exit_architecture 内)と、#602 PR-B1 の RAER の型
-    (`domain/valuation/raer.py`。ExpectedReturnResult をそのまま保持する。handler・CLI から
-    到達されないことは、その契約テストが推移閉包で固定する)。
+    (`domain/valuation/raer.py`。ExpectedReturnResult をそのまま保持する)と、#602 PR-B2 の
+    RAER の式(`domain/valuation/raer_composition.py`。ExpectedReturnResult から土台の値と
+    Fair Value の信頼度を読む)。handler・CLI から到達されないことは、各 module の契約テストと
+    #606 §37 の契約テストが推移閉包で固定する。
     """
     allowed = {
         "domain/exit_architecture/expected_return_adapter.py",
         "domain/valuation/raer.py",
+        "domain/valuation/raer_composition.py",
+        "domain/valuation/raer_inputs.py",  # #602 PR-G1(compute_expected_return を呼ぶ)
     }
     importers = set()
     for path in sorted((_SRC / "jstock_advisor").rglob("*.py")):
@@ -517,3 +526,157 @@ def test_the_model_version_is_pinned_to_a_literal_that_marks_components_only() -
         income=IncomeInput(2.0, None, _NO),
     )
     assert result.model_version == "er-components-v1"
+
+
+# --- (PR-2c) Fair Value Revision の結果を revision へ載せる(接続)-----------------------------
+
+_REVISION_DATE = date(2026, 1, 5)
+
+
+def _kwargs() -> dict[str, object]:
+    return {
+        "evaluation_date": _REVISION_DATE,
+        "current_price": Decimal("100"),
+        "price_freshness": PriceFreshnessVerdict.WARNING,
+        "fair_value": FairValueInput(
+            neutral=Decimal("150"), usable_for_trading_judgment=True, confidence=ConfidenceLevel.LOW
+        ),
+        "income": IncomeInput(2.0, None, BenefitProgramState.NO_PROGRAM),
+    }
+
+
+def _revision(
+    direction: RevisionDirection,
+    *,
+    pct: float | None = None,
+    reason: RevisionReason | None = None,
+    disagree: bool = False,
+    evaluation_date: date = _REVISION_DATE,
+) -> FairValueRevisionResult:
+    return FairValueRevisionResult(
+        model_version="fv-revision-v1-params-undecided",
+        evaluation_date=evaluation_date,
+        direction=direction,
+        revision_pct=pct,
+        reason=reason,
+        n_points=4,
+        reference_date=None,
+        latest_date=None,
+        latest_points_disagree=disagree,
+    )
+
+
+def test_without_a_revision_the_result_is_identical_in_every_field_to_the_previous_behaviour() -> (
+    None
+):
+    """characterization: revision を渡さない(None を渡す)結果は、全 field で従来と同一。"""
+    omitted = compute_expected_return(**_kwargs())  # type: ignore[arg-type]
+    explicit_none = compute_expected_return(**_kwargs(), revision=None)  # type: ignore[arg-type]
+    assert omitted == explicit_none and repr(omitted) == repr(explicit_none)
+    assert omitted.model_version == er.MODEL_VERSION == "er-components-v1"
+    assert omitted.upside == ComponentResult(value=50.0)
+    assert omitted.income == ComponentResult(value=2.0)
+    assert omitted.revision == ComponentResult(reasons=(ReasonCode.REVISION_NOT_IMPLEMENTED,))
+    assert omitted.composite == ComponentResult(reasons=(ReasonCode.COMPOSITION_RULE_NOT_DECIDED,))
+    assert omitted.annualized == ComponentResult(reasons=(ReasonCode.HORIZON_NOT_ESTIMATED,))
+    assert omitted.notes == (Note.PRICE_FRESHNESS_WARNING, Note.BENEFIT_NO_PROGRAM_OR_UNREGISTERED)
+    assert omitted.fair_value_confidence is ConfidenceLevel.LOW
+    assert omitted.unavailable_reasons == ()
+
+
+@pytest.mark.parametrize(
+    ("direction", "pct"),
+    [
+        (RevisionDirection.UP, 12.5),
+        (RevisionDirection.STABLE, -0.5),
+        (RevisionDirection.DOWN, -12.5),
+    ],
+)
+def test_a_confirmed_revision_carries_its_value_and_direction(
+    direction: RevisionDirection, pct: float
+) -> None:
+    revision = _revision(direction, pct=pct)
+    result = compute_expected_return(**_kwargs(), revision=revision)  # type: ignore[arg-type]
+    assert result.revision.value == revision.confirmed_revision_pct == pct
+    assert result.revision.reasons == ()
+    assert f"direction={direction.value}" in result.revision.detail
+
+
+@pytest.mark.parametrize(
+    "direction", [RevisionDirection.UP_UNCONFIRMED, RevisionDirection.DOWN_UNCONFIRMED]
+)
+def test_an_unconfirmed_revision_never_carries_its_reference_value(
+    direction: RevisionDirection,
+) -> None:
+    revision = _revision(
+        direction, pct=20.0, reason=RevisionReason.REVISION_UNCONFIRMED, disagree=True
+    )
+    result = compute_expected_return(**_kwargs(), revision=revision)  # type: ignore[arg-type]
+    assert result.revision.value is None  # 参考値を算入しない
+    assert result.revision.reasons == (ReasonCode.REVISION_UNCONFIRMED,)
+    assert "latest_points_disagree=True" in result.revision.detail
+    assert "20" not in result.revision.detail  # 参考値を載せない
+
+
+_UNDETERMINED_CODES = {
+    RevisionReason.REVISION_PARAMETERS_NOT_DECIDED: ReasonCode.REVISION_PARAMETERS_NOT_DECIDED,
+    RevisionReason.NO_HISTORY: ReasonCode.REVISION_NO_HISTORY,
+    RevisionReason.ONLY_UNUSABLE_POINTS: ReasonCode.REVISION_ONLY_UNUSABLE_POINTS,
+    RevisionReason.INSUFFICIENT_HISTORY: ReasonCode.REVISION_INSUFFICIENT_HISTORY,
+    RevisionReason.STALE_HISTORY: ReasonCode.REVISION_STALE_HISTORY,
+    RevisionReason.METHOD_SET_CHANGED: ReasonCode.REVISION_METHOD_SET_CHANGED,
+}
+
+
+@pytest.mark.parametrize(("reason", "code"), list(_UNDETERMINED_CODES.items()))
+def test_an_undetermined_revision_is_a_reason_not_a_value_and_maps_one_to_one(
+    reason: RevisionReason, code: ReasonCode
+) -> None:
+    revision = _revision(RevisionDirection.UNDETERMINED, reason=reason)
+    result = compute_expected_return(**_kwargs(), revision=revision)  # type: ignore[arg-type]
+    assert result.revision.value is None  # 0 で埋めない
+    assert result.revision.reasons == (code,)
+
+
+def test_every_revision_reason_is_mapped_to_a_reason_code_exactly_once() -> None:
+    assert set(er._REVISION_REASON_TO_CODE) == set(RevisionReason)
+    codes = list(er._REVISION_REASON_TO_CODE.values())
+    assert len(set(codes)) == len(codes)  # 1 対 1
+    assert {c for c in ReasonCode if c.value.startswith("REVISION_")} == set(codes) | {
+        ReasonCode.REVISION_NOT_IMPLEMENTED
+    }
+
+
+def test_a_revision_never_changes_any_other_component() -> None:
+    plain = compute_expected_return(**_kwargs())  # type: ignore[arg-type]
+    for revision in (
+        _revision(RevisionDirection.UP, pct=40.0),
+        _revision(RevisionDirection.DOWN, pct=-40.0),
+        _revision(RevisionDirection.UNDETERMINED, reason=RevisionReason.NO_HISTORY),
+    ):
+        result = compute_expected_return(**_kwargs(), revision=revision)  # type: ignore[arg-type]
+        assert result.upside == plain.upside and result.income == plain.income
+        assert (
+            result.composite
+            == plain.composite
+            == ComponentResult(reasons=(ReasonCode.COMPOSITION_RULE_NOT_DECIDED,))
+        )  # revision を composite に足さない
+        assert result.annualized == plain.annualized
+        assert result.notes == plain.notes
+        assert result.fair_value_confidence == plain.fair_value_confidence
+        assert result.model_version == plain.model_version
+        assert result.unavailable_reasons == plain.unavailable_reasons  # 下流へ漏れない
+
+
+def test_a_revision_with_a_different_evaluation_date_is_rejected() -> None:
+    other = _revision(RevisionDirection.UP, pct=1.0, evaluation_date=date(2026, 1, 6))
+    with pytest.raises(ValueError):
+        compute_expected_return(**_kwargs(), revision=other)  # type: ignore[arg-type]
+
+
+def test_the_confirmed_value_comes_from_the_single_source_of_the_confirmation_rule() -> None:
+    """判定を 2 か所に持たない: 値の採否は confirmed_revision_pct だけが決める。"""
+    source = inspect.getsource(er._revision_component)
+    assert "confirmed_revision_pct" in source
+    assert "counts_toward_expected_return" not in source
+    assert "revision_pct" not in source.replace("confirmed_revision_pct", "")

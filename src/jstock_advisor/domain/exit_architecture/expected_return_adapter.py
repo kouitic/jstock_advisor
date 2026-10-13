@@ -49,6 +49,13 @@ from jstock_advisor.domain.valuation.expected_return import (
 #: `ReasonCode` -> verdict の UNDETERMINED の理由。None は『verdict の構成要素の理由ではない』
 #: (composite・年率換算は verdict に写さないため、これらの理由は構成要素に現れない)。
 #: 全メンバーを明示する(メンバーが増えたら契約テストが落ち、対応を決めさせる)。
+#:
+#: ★ 写し方の規則(3 分類。新しい ReasonCode が増えたときも同じ基準で写す)★
+#:   入力が『無い』 -> INPUT_MISSING / 入力はあるが『信頼して使えない』 -> RELIABILITY_UNUSABLE /
+#:   『足りない』(点数・網羅) -> COVERAGE_INSUFFICIENT /
+#:   未実装・未決の構成要素 -> COMPONENT_NOT_IMPLEMENTED
+#: ★ ReasonCode の追加と、この表の追加は必ず同じ PR に入れる ★(下の `_to_determination` は
+#:   直接の辞書引きで、写像の無い ReasonCode が来ると契約テストの前に KeyError になる)
 _REASON_TO_UNDETERMINED: dict[ReasonCode, UndeterminedReason | None] = {
     ReasonCode.CURRENT_PRICE_UNAVAILABLE: UndeterminedReason.INPUT_MISSING,
     ReasonCode.FAIR_VALUE_UNAVAILABLE: UndeterminedReason.INPUT_MISSING,
@@ -57,15 +64,25 @@ _REASON_TO_UNDETERMINED: dict[ReasonCode, UndeterminedReason | None] = {
     ReasonCode.CURRENT_PRICE_STALE: UndeterminedReason.RELIABILITY_UNUSABLE,
     ReasonCode.FAIR_VALUE_NOT_USABLE: UndeterminedReason.RELIABILITY_UNUSABLE,
     ReasonCode.REVISION_NOT_IMPLEMENTED: UndeterminedReason.COMPONENT_NOT_IMPLEMENTED,
+    # --- PR-2c: Fair Value Revision の結果(RevisionReason と 1 対 1)---
+    ReasonCode.REVISION_NO_HISTORY: UndeterminedReason.INPUT_MISSING,
+    ReasonCode.REVISION_INSUFFICIENT_HISTORY: UndeterminedReason.COVERAGE_INSUFFICIENT,
+    ReasonCode.REVISION_ONLY_UNUSABLE_POINTS: UndeterminedReason.RELIABILITY_UNUSABLE,
+    ReasonCode.REVISION_STALE_HISTORY: UndeterminedReason.RELIABILITY_UNUSABLE,
+    ReasonCode.REVISION_METHOD_SET_CHANGED: UndeterminedReason.RELIABILITY_UNUSABLE,
+    ReasonCode.REVISION_UNCONFIRMED: UndeterminedReason.RELIABILITY_UNUSABLE,
+    ReasonCode.REVISION_PARAMETERS_NOT_DECIDED: UndeterminedReason.COMPONENT_NOT_IMPLEMENTED,
     ReasonCode.COMPOSITION_RULE_NOT_DECIDED: None,
     ReasonCode.HORIZON_NOT_ESTIMATED: None,
 }
 
-#: 複数の理由があるときに代表として選ぶ順(入力が無いことが最も基本。次に信頼できない。
-#: 未実装は最後)。
-#: 全件は `detail` に残す。
+#: 複数の理由があるときに代表として選ぶ順(入力が無いことが最も基本。次に足りない〔PR-2c で追加〕、
+#: 次に信頼できない。未実装は最後)。
+#: 全件は `detail` に残す。★ `_REASON_TO_UNDETERMINED` が写す先の UndeterminedReason は、
+#: すべてここに含める(含めないと代表を選べず StopIteration になる。契約テストで固定)。
 _PRIORITY: tuple[UndeterminedReason, ...] = (
     UndeterminedReason.INPUT_MISSING,
+    UndeterminedReason.COVERAGE_INSUFFICIENT,
     UndeterminedReason.RELIABILITY_UNUSABLE,
     UndeterminedReason.COMPONENT_NOT_IMPLEMENTED,
 )
