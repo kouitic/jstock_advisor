@@ -34,6 +34,14 @@ SMALL_ENTRY = ENTRY。`buy_decision.py` の `_price_tier_action` と同じ対応
 覆うため、判断 B の (b)『段階が不明のときは ENTRY』を適用する場面は F1 には無い(契約テストが
 `BUY_FAMILY_ACTIONS` の全数を覆うことを固定し、BUY 系が増えたら落ちる)。
 
+## 売買単位・価格の鮮度
+
+* 候補が売買単位を持たない(`trading_unit` が None)ときは、方針の売買単位
+  (`constraints.minimum_trading_unit`。既存 config の既定値を呼び出し側が渡す)を適用し、
+  **適用した件数を `trading_unit_defaulted` に残す**(黙って補完しない。持っていて違う値なら除外)
+* 価格の鮮度は F1 では判定しない(`price_as_of` を持たない)。呼び出し側(PR-F2)が鮮度の済んだ
+  価格だけを渡し、鮮度未達で除外した件数は PR-F2 の記録に残す
+
 ## 個人情報
 
 owner は引数の文字列で、記録・ログ・例外のメッセージに出さない。保有の銘柄別の株数・取得単価・
@@ -221,6 +229,7 @@ class AssemblyReport:
     holdings_sector_unknown: int
     holdings_risk_unknown: int
     owner_holds_candidate: int
+    trading_unit_defaulted: int
     portfolio_value_basis: PortfolioValueBasis
     cash_age_days: int | None
     incomplete_reasons: tuple[IncompleteReason, ...]
@@ -410,6 +419,7 @@ def assemble_allocation_inputs(
 
     assembled: list[AllocationCandidate] = []
     owner_holds_candidate = 0
+    trading_unit_defaulted = 0
     for record in sorted(candidates, key=lambda c: c.stock_code):
         if code_counts[record.stock_code] > 1:
             exclude(CandidateExclusionReason.DUPLICATE_STOCK_CODE)
@@ -439,6 +449,8 @@ def assemble_allocation_inputs(
             continue
         if kind is CandidateKind.ADDITIONAL_BUY:
             owner_holds_candidate += 1
+        if record.trading_unit is None:
+            trading_unit_defaulted += 1
         assembled.append(
             AllocationCandidate(
                 stock_code=record.stock_code,
@@ -472,6 +484,7 @@ def assemble_allocation_inputs(
         holdings_sector_unknown=sector_unknown,
         holdings_risk_unknown=risk_unknown,
         owner_holds_candidate=owner_holds_candidate,
+        trading_unit_defaulted=trading_unit_defaulted,
         portfolio_value_basis=basis,
         cash_age_days=_cash_age_days(now, cash.last_reconciled_at),
         incomplete_reasons=tuple(r for r in _INCOMPLETE_ORDER if reasons[r]),

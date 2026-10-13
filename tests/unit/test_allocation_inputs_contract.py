@@ -244,6 +244,23 @@ def test_a_different_trading_unit_excludes_and_a_missing_unit_does_not() -> None
     assert result.report.exclusions == {CandidateExclusionReason.TRADING_UNIT_MISMATCH: 1}
 
 
+def test_a_candidate_without_a_trading_unit_gets_the_policy_unit_and_is_counted() -> None:
+    """売買単位が無い候補は方針の売買単位を適用する(黙って補完せず、適用した件数を残す)。"""
+    result = run(
+        [cand("0001"), cand("0002", trading_unit=UNIT), cand("0003"), cand("0004", trading_unit=1)]
+    )
+
+    assert [c.stock_code for c in result.candidates] == ["0001", "0002", "0003"]
+    assert result.report.trading_unit_defaulted == 2
+    assert result.report.exclusions == {CandidateExclusionReason.TRADING_UNIT_MISMATCH: 1}
+
+
+def test_an_excluded_candidate_is_not_counted_as_defaulted() -> None:
+    result = run([cand("0001", current_price=None), cand("0002", buy_action=None)])
+
+    assert result.report.trading_unit_defaulted == 0
+
+
 def test_a_duplicated_stock_code_excludes_every_record_of_it() -> None:
     result = run([cand("0001"), cand("0001", raer=raer("30")), cand("0002")])
 
