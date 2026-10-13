@@ -252,6 +252,36 @@ def _side(value: Decimal, reference: Decimal, theta_pct: Decimal) -> int:
     return 0
 
 
+def validate_revision_history(
+    history: Sequence[RevisionPoint], *, evaluation_date: date | None = None
+) -> None:
+    """履歴の入力の検査だけを行う(純粋関数。判定しない・数値パラメータを要しない)。
+
+    ★ 追加であり、`evaluate_fair_value_revision` の挙動は変えない ★ 同じ評価日の点が複数あれば
+    ValueError(評価日ごとに 1 件へ畳むのは履歴を取得する側の責務)。`evaluation_date` を渡すと、
+    評価日より後の点(その時点で知り得ない点)は検査の対象にしない(evaluate と同じ)。
+
+    なぜ別に公開するか: `evaluate_fair_value_revision` は数値パラメータが未決の間は入力の検査より
+    **先に** UNDETERMINED を返す(承認済みの『未決の間は常に UNDETERMINED』#122 …6110016281)。
+    そのため同日の重複は数値の決定まで表に出ない。履歴を組み立てる側(集計型ジョブ P・PR-F)は、
+    数値の決定前でも本関数で重複を検出できる。
+    """
+    if evaluation_date is not None:
+        _require_plain_date(evaluation_date, "evaluation_date")
+    for point in history:
+        if not isinstance(point, RevisionPoint):
+            raise ValueError("history は RevisionPoint の列でなければならない")
+    known = [
+        point
+        for point in history
+        if evaluation_date is None or point.evaluation_date <= evaluation_date
+    ]
+    if len({point.evaluation_date for point in known}) != len(known):
+        raise ValueError(
+            "同じ評価日の点が複数ある(取得する側が評価日ごとに 1 件へ畳んでから渡すこと)"
+        )
+
+
 def evaluate_fair_value_revision(
     history: Sequence[RevisionPoint],
     *,
@@ -265,6 +295,12 @@ def evaluate_fair_value_revision(
     順序の保証が無い)で勝者を決めると、同じ入力から異なる結果が出うる(非決定)ため、本関数は
     どれが勝つかを決めない。評価日より後の点は、その時点で知り得ないため除く(重複の検査の対象にも
     しない)。
+
+    ★ 処理の順序(承認済みの文言『未決の間は常に UNDETERMINED』が正本)★
+    数値パラメータが None(未決)のときは、入力の検査(同日の重複など)より**先に** UNDETERMINED
+    (REVISION_PARAMETERS_NOT_DECIDED)を返す。したがって未決の間は、同日の重複があっても例外に
+    ならない。入力の検査だけを数値の決定前に行いたい呼び出し側は
+    `validate_revision_history` を使う。
     """
     _require_plain_date(evaluation_date, "evaluation_date")
     if parameters is None:
