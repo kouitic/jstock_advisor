@@ -189,6 +189,7 @@ _UNCONNECTED_NAME_TOKENS = (
     # を落とす
     "allocation_policy",
     "allocation_inputs",  # #603 PR-F1(入力の組み立て。同じく前向きの網)
+    "allocation_shadow_record",  # #603 PR-F2-1(記録の組み立て。同じく前向きの網)
 )
 
 

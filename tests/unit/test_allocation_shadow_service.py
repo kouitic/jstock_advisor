@@ -22,7 +22,7 @@ import threading
 from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from botocore.exceptions import ClientError
@@ -34,7 +34,8 @@ from jstock_advisor.domain.entities.enums import (
     NotificationMode,
 )
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
-from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, log_ref
+from jstock_advisor.domain.entities.identifier_ref import owner_ref
+from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.domain.signals.allocation_shadow_config import (
     AllocationShadowConfig,
     AllocationShadowMode,
@@ -60,6 +61,19 @@ from jstock_advisor.services.allocation_shadow_service import (
 
 _NOW = dt.datetime(2026, 10, 12, 8, 0, tzinfo=dt.UTC)
 _BATCH = "buy-candidates-2026-10-12"
+
+
+@pytest.fixture
+def allow_any_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """予算・件数の挙動を複数 owner で試験するため、kv0 の owner の制限だけを外す(試験の中だけ)。
+
+    本番の制限(DEFAULT_OWNER 以外を kv0 で永続しない)は test_kv0_boundary で別に固定している。
+    """
+    from jstock_advisor.services import allocation_shadow_service as service_module
+
+    monkeypatch.setattr(service_module, "require_persistable", lambda owner: None)
+
+
 _NORMAL = ExecutionContext.normal()
 _SHADOW = AllocationShadowConfig(mode=AllocationShadowMode.SHADOW)
 _OFF = AllocationShadowConfig(mode=AllocationShadowMode.OFF)
@@ -243,15 +257,15 @@ def test_audit_ids_are_deterministic_separate_for_result_and_skip_and_hide_the_o
 
     [skip_record] = skipped.records
     [result_record] = computed.records
-    assert skip_record["audit_id"] == f"{SKIP_ID_PREFIX}:{_BATCH}:{log_ref(DEFAULT_OWNER)}"
-    assert result_record["audit_id"] == f"{DECISION_TYPE}:{_BATCH}:{log_ref(DEFAULT_OWNER)}"
+    assert skip_record["audit_id"] == f"{SKIP_ID_PREFIX}:{_BATCH}:{owner_ref(DEFAULT_OWNER)}"
+    assert result_record["audit_id"] == f"{DECISION_TYPE}:{_BATCH}:{owner_ref(DEFAULT_OWNER)}"
     assert skip_record["audit_id"] == skip_audit_id(_BATCH, DEFAULT_OWNER)
     assert result_record["audit_id"] == result_audit_id(_BATCH, DEFAULT_OWNER)
     assert skip_record["audit_id"] != result_record["audit_id"]  # 別の鍵(Q-B)
     assert skip_record["decision_type"] == result_record["decision_type"] == DECISION_TYPE
     for record in (skip_record, result_record):
         assert DEFAULT_OWNER not in repr(record)  # 実名はどこにも出ない
-        assert record["input_values"] == {"batch_id": _BATCH, "owner_ref": log_ref(DEFAULT_OWNER)}
+        assert record["input_values"] == {"batch_id": _BATCH, "owner_ref": owner_ref(DEFAULT_OWNER)}
 
 
 def test_a_skip_and_a_later_result_coexist_and_each_is_recorded_once() -> None:
@@ -291,6 +305,7 @@ def test_same_batch_and_owner_records_once() -> None:
     assert len(audit.records) == 1
 
 
+@pytest.mark.usefixtures("allow_any_owner")
 def test_one_record_per_owner_and_one_write_each() -> None:
     audit = _FakeAudit()
 
@@ -421,6 +436,7 @@ def test_entry_never_raises_even_when_everything_is_broken() -> None:
 # --- (4) 協調的な期限(30 秒)と I/O の打ち切り -------------------------------------------------
 
 
+@pytest.mark.usefixtures("allow_any_owner")
 def test_deadline_stops_the_remaining_owners(caplog: pytest.LogCaptureFixture) -> None:
     audit = _FakeAudit()
     clock = _Clock()
@@ -443,6 +459,7 @@ def test_deadline_stops_the_remaining_owners(caplog: pytest.LogCaptureFixture) -
     assert "2 owner(s) not recorded" in messages
 
 
+@pytest.mark.usefixtures("allow_any_owner")
 def test_total_budget_bounds_the_number_of_writes_across_owners() -> None:
     """Q-G: 30 秒は owner ごとでなく区間全体の総予算。各書込が 5 秒を消費する fake で、
     8 人の owner に対する書込が総予算で頭打ちになる(N x (5 + 5) 秒にならない)。"""
@@ -486,6 +503,7 @@ def test_each_write_waits_for_the_smaller_of_io_limit_and_remaining_budget(
     assert waits == [pytest.approx(3.0)]
 
 
+@pytest.mark.usefixtures("allow_any_owner")
 def test_remaining_time_is_read_for_every_owner_not_once() -> None:
     """Q-F: 1 人目は十分・2 人目は不足 -> 2 人目だけがスキップされる(使い回さない)。"""
     audit = _FakeAudit()
@@ -508,6 +526,7 @@ def test_remaining_time_is_read_for_every_owner_not_once() -> None:
     assert reasons == [None, "TIME_BUDGET"]
 
 
+@pytest.mark.usefixtures("allow_any_owner")
 def test_deadline_just_before_the_limit_still_runs_the_next_owner() -> None:
     audit = _FakeAudit()
     clock = _Clock()
@@ -702,12 +721,13 @@ def test_computed_facts_are_recorded_verbatim() -> None:
     }
 
 
+@pytest.mark.usefixtures("allow_any_owner")
 def test_one_failed_record_does_not_stop_the_other_owners() -> None:
     """記録の失敗は owner 単位で握る(1 人目の失敗で 2 人目以降の記録を失わない)。"""
 
     class _FirstFails(_FakeAudit):
         def record_if_absent(self, audit_id: str, decision_type: str, **kwargs: Any) -> Any:
-            if log_ref("owner-a") in audit_id:
+            if owner_ref("owner-a") in audit_id:
                 raise RuntimeError("down")
             return super().record_if_absent(audit_id, decision_type, **kwargs)
 
@@ -854,3 +874,99 @@ def test_worker_thread_is_written_so_that_returning_never_waits_for_it() -> None
         assert isinstance(daemon[0].value, ast.Constant) and daemon[0].value.value is True
     # 待ちを伴いうる with(スレッド・executor の context manager)を使わない
     assert not [w for w in with_calls if "Thread" in w or "Executor" in w or "Pool" in w]
+
+
+# --- kv0 の境界: 実在の owner を kv0(鍵なし)で永続化しない(USER 決定 #925 …6142405238 の 4)---
+
+
+def test_kv0_boundary_only_the_default_owner_is_recorded() -> None:
+    audit = _FakeAudit()
+    ran: list[str] = []
+
+    def compute(run: ShadowRun) -> ShadowResult:
+        ran.append(run.owner)
+        return ShadowResult(ShadowOutcome.COMPUTED)
+
+    _observe(audit, owners=[DEFAULT_OWNER, "owner-b", "owner-c"], compute=compute)
+
+    assert ran == [DEFAULT_OWNER]  # 実在の owner は計算にも進まない
+    assert len(audit.records) == 1
+    assert audit.records[0]["input_values"]["owner_ref"] == owner_ref(DEFAULT_OWNER)
+
+
+def test_kv0_boundary_a_non_default_owner_alone_writes_nothing() -> None:
+    audit = _FakeAudit()
+
+    recorded = _observe(audit, owners=["owner-b"])
+
+    assert recorded is False
+    assert audit.calls == 0 and audit.records == []
+
+
+def test_kv0_boundary_record_result_refuses_a_non_default_owner_by_itself() -> None:
+    """入口(observe)を通らずに直接呼んでも、書かない(境界は書込の関数にも持たせる)。"""
+    audit = _FakeAudit()
+
+    written = svc.record_result(
+        cast(Any, audit),
+        batch_id=_BATCH,
+        owner="owner-b",
+        result=ShadowResult(ShadowOutcome.COMPUTED),
+        now=_NOW,
+        io_timeout_seconds=1.0,
+    )
+
+    assert written is False
+    assert audit.calls == 0
+
+
+def test_kv0_boundary_the_refusal_is_logged_without_any_value(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING, logger=svc.logger.name)
+
+    _observe(_FakeAudit(), owners=["sentinel-owner-zz"])
+
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "keyed reference is required" in text
+    assert "sentinel-owner-zz" not in text
+
+
+def test_kv0_boundary_no_src_call_site_passes_owners_while_the_reference_is_unkeyed() -> None:
+    """実在の owner を渡す配線(PR-F2-2)は、鍵つき(kv1)の実装より前に merge できない。
+
+    kv1 が入って CURRENT_VERSION が替わるまで、observe_allocation_shadow を owners つきで呼ぶ src
+    が 1 件でもあれば落ちる(= 配線の PR は kv1 を前提にしないと通らない)。
+    """
+    import jstock_advisor.domain.entities.identifier_ref as identifier_ref
+
+    if identifier_ref.CURRENT_VERSION != "kv0":
+        return
+    package = _REPO_ROOT / "src" / "jstock_advisor"
+    offenders = []
+    for path in package.rglob("*.py"):
+        if path == _SERVICE_PATH:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (
+                isinstance(node, ast.Call)
+                and getattr(node.func, "id", getattr(node.func, "attr", ""))
+                == "observe_allocation_shadow"
+                and any(kw.arg == "owners" for kw in node.keywords)
+            ):
+                offenders.append(path.relative_to(package).as_posix())
+    assert offenders == []
+
+
+def test_kv0_boundary_the_handler_passes_no_owners_so_only_the_default_owner() -> None:
+    handler = (
+        _REPO_ROOT / "src" / "jstock_advisor" / "lambda_handlers" / "buy_candidates_handler.py"
+    )
+    calls = [
+        node
+        for node in ast.walk(ast.parse(handler.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "id", getattr(node.func, "attr", "")) == "observe_allocation_shadow"
+    ]
+    assert len(calls) == 1
+    assert all(kw.arg != "owners" for kw in calls[0].keywords)
