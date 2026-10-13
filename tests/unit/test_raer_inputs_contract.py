@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import datetime as dt
 import random
 from datetime import date
@@ -26,6 +27,7 @@ from jstock_advisor.config.models import EarningsTrendRulesConfig
 from jstock_advisor.domain.entities.common import MarginAdjustment
 from jstock_advisor.domain.entities.earnings_trend import EarningsTrendResult
 from jstock_advisor.domain.entities.enums import (
+    BuyIndustrySector,
     ConfidenceLevel,
     EarningsTrendEvaluationState,
     MarginRiskCategory,
@@ -61,6 +63,7 @@ from jstock_advisor.domain.valuation.raer_inputs import (
     RISK_DETECTION_FACTS_KEY,
     AssemblerPolicy,
     CandidateRaerFacts,
+    HoldingMarketView,
     ProvenanceItem,
     ProvenanceNote,
     ProvenanceReason,
@@ -68,6 +71,8 @@ from jstock_advisor.domain.valuation.raer_inputs import (
     RiskFlagView,
     assemble_raer_inputs,
     facts_from_recommendation,
+    holding_market_view,
+    holding_market_view_from_recommendation,
     raer_result_for_candidate,
     risk_flag_view,
     risk_flag_view_from_recommendation,
@@ -141,6 +146,8 @@ def _trend_metrics(**overrides: Any) -> dict[str, object]:
 def _facts(**overrides: Any) -> CandidateRaerFacts:
     values: dict[str, Any] = {
         "price": D("1000"),
+        "price_as_of_date": date(2026, 10, 13),
+        "buy_industry_sector": BuyIndustrySector.GENERAL,
         "fair_value_neutral": D("1059"),
         "fair_value_confidence": CL.MEDIUM,
         "fair_value_usable": True,
@@ -1225,6 +1232,51 @@ def test_the_view_is_the_same_function_for_a_candidate_and_a_held_stock() -> Non
     assert isinstance(view, RiskFlagView)
 
 
+# ---- 保有銘柄の市場の事実(価格・価格時点・業種)--------------------------------------------------
+
+
+def test_the_holding_market_view_is_read_from_the_recommendation_without_amounts_or_shares() -> (
+    None
+):
+    rec = _recommendation(
+        price_at_recommendation=D("2345.5"),
+        price_as_of_date=date(2026, 10, 13),
+        buy_industry_sector=BuyIndustrySector.AUTOMOTIVE_PARTS,
+    )
+    view = holding_market_view_from_recommendation(rec)
+    assert view == HoldingMarketView(
+        price=D("2345.5"),
+        price_as_of_date=date(2026, 10, 13),
+        buy_industry_sector=BuyIndustrySector.AUTOMOTIVE_PARTS,
+    )
+    assert {f.name for f in dataclasses.fields(view)} == {
+        "price",
+        "price_as_of_date",
+        "buy_industry_sector",
+    }  # 株数・取得単価・損益・保有 ID を持たない
+
+
+def test_a_missing_market_fact_stays_none_and_is_never_filled() -> None:
+    rec = _recommendation(price_as_of_date=None, buy_industry_sector=None)
+    view = holding_market_view_from_recommendation(rec)
+    assert view.price_as_of_date is None
+    assert view.buy_industry_sector is None
+    assert view.price == D("1000")
+
+
+@pytest.mark.parametrize("price", [D("0"), D("-1")])
+def test_a_non_positive_price_is_not_usable_and_becomes_none(price: Decimal) -> None:
+    assert holding_market_view(_facts(price=price)).price is None
+    assert holding_market_view(_facts(price=None)).price is None
+
+
+def test_the_market_view_uses_the_same_extraction_function_as_the_candidate() -> None:
+    rec = _recommendation()
+    assert holding_market_view_from_recommendation(rec) == holding_market_view(
+        facts_from_recommendation(rec)
+    )
+
+
 def test_the_view_rejects_a_flag_that_is_also_unobserved() -> None:
     with pytest.raises(ValueError):
         RiskFlagView(
@@ -1282,6 +1334,8 @@ def test_a_recommendation_round_trips_into_the_same_raer_as_the_hand_built_facts
 def test_every_recommendation_field_the_assembler_reads_exists_on_the_entity() -> None:
     read = {
         "price_at_recommendation",
+        "price_as_of_date",
+        "buy_industry_sector",
         "fair_value_neutral",
         "fair_value_overall_confidence",
         "fair_value_usable_for_trading_judgment",
