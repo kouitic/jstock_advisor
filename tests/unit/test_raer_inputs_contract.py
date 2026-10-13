@@ -907,8 +907,25 @@ def test_a_superseded_risk_code_that_is_counted_is_noted_in_the_provenance() -> 
             margin_superseded_codes=("industry_model_not_applied",),
         )
     )
-    assert other.provenance.entry(PI.BUSINESS_RISK).notes == ()
-    assert _assemble().provenance.entry(PI.BUSINESS_RISK).notes == ()
+    other_notes = other.provenance.entry(PI.BUSINESS_RISK).notes
+    assert ProvenanceNote.SUPERSEDED_CODES_INCLUDED not in other_notes
+    plain_notes = _assemble().provenance.entry(PI.BUSINESS_RISK).notes
+    assert ProvenanceNote.SUPERSEDED_CODES_INCLUDED not in plain_notes
+
+
+def test_the_candidate_side_always_records_that_unobserved_words_were_treated_as_not_flagged() -> (
+    None
+):
+    # 買い判定の『不明 → 該当しない』を引き継ぐ既知の限界(R1)。候補の『リスクなし』には、
+    # 観測できなかった語を該当なしとして扱ったものが含まれうる。
+    # その印を、導けたすべての記録に必ず残す(観測できる形)
+    note = ProvenanceNote.CANDIDATE_UNOBSERVED_TREATED_AS_NOT_FLAGGED
+    assert note in _assemble().provenance.entry(PI.BUSINESS_RISK).notes
+    with_codes = _assemble(_facts(margin_adjustment_codes=("cyclical_industry",)))
+    assert note in with_codes.provenance.entry(PI.BUSINESS_RISK).notes
+    # 観測そのものが無い(None)ときは『該当なしとして扱った』のではないので付けない
+    unobserved = _assemble(_facts(margin_computed=False)).provenance.entry(PI.BUSINESS_RISK)
+    assert note not in unobserved.notes
 
 
 def test_the_borrowed_coverage_minimum_is_noted_on_every_derived_quality_input() -> None:

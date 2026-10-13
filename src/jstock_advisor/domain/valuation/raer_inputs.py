@@ -128,6 +128,11 @@ class ProvenanceNote(StrEnum):
     # 買い側の安全余裕率の category dedupe で superseded になった code(RAER は別の除外規則を持つ
     # ので、検出された全部を渡す)を含めた。景気業種 + 大口顧客依存は RAER では両方数える(承認済み)
     SUPERSEDED_CODES_INCLUDED = "SUPERSEDED_CODES_INCLUDED"
+    # 買い側の検出は『不明 → 該当しない』(買い判定の既存の挙動)なので、候補の『リスクなし』には
+    # 『観測できなかった語を該当なしとして扱った』ものが含まれうる。R1 の既知の限界で、候補側の
+    # 未観測を区別するには買い判定の記録へ観測の有無を足す別の変更が要る(R2 以降)。
+    # 保有側(PR-G3)は未観測を区別する(非対称)。観測できる形で必ず残す
+    CANDIDATE_UNOBSERVED_TREATED_AS_NOT_FLAGGED = "CANDIDATE_UNOBSERVED_TREATED_AS_NOT_FLAGGED"
     # 軸 2 の充足度の下限は、買い側が意図的に保留している(shadow calibration で決める)ため、
     # 保有側の既存の値(coverage_thresholds.company_quality_minimum)を借用している
     COVERAGE_MINIMUM_BORROWED_FROM_HOLDING_SIDE = "COVERAGE_MINIMUM_BORROWED_FROM_HOLDING_SIDE"
@@ -459,7 +464,10 @@ def _risk_flags(
         ProvenanceItem.BUSINESS_RISK,
         _RISK_SOURCE,
         derived=True,
-        notes=(ProvenanceNote.SUPERSEDED_CODES_INCLUDED,) if superseded_included else (),
+        notes=(
+            (ProvenanceNote.CANDIDATE_UNOBSERVED_TREATED_AS_NOT_FLAGGED,)
+            + ((ProvenanceNote.SUPERSEDED_CODES_INCLUDED,) if superseded_included else ())
+        ),
     )
 
 
