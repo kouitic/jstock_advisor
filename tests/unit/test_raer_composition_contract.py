@@ -1374,7 +1374,10 @@ def test_nothing_in_src_imports_the_composition_module() -> None:
         if path != _MODULE_PATH
         and ("valuation.raer_composition" in path.read_text(encoding="utf-8"))
     ]
-    assert importers == []  # dormant。配線は #603 PR-F 系(別の USER 承認の後)
+    # dormant。例外は、同じく未配線の dormant な module だけ: #602 PR-G1(入力の組み立て)と
+    # #602 PR-E(係数の loader)。配線は #603 PR-F 系(別の USER 承認の後)
+    allowed = {"domain/valuation/raer_coefficients_config.py", "domain/valuation/raer_inputs.py"}
+    assert set(importers) <= allowed, importers
 
 
 def test_the_composition_module_is_one_of_the_names_the_connection_gate_treats_as_unconnected() -> (

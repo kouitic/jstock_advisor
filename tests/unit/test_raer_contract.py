@@ -933,10 +933,12 @@ _ALLOWED_IMPORTERS = {
     "domain/signals/portfolio_allocation_types.py",  # #603 PR-A
     "domain/signals/portfolio_allocation.py",  # #603 PR-C
     "domain/signals/capital_rotation.py",  # #603 PR-D(入替元の RaerResult)
+    "domain/valuation/raer_coefficients_config.py",  # #602 PR-E(係数の loader)
     "domain/valuation/raer_composition.py",  # #602 PR-B2(式。本 module のデータ型を使う)
     "domain/signals/allocation_policy_config.py",  # #603 PR-E(RiskFlag の語彙を検証)
     "domain/signals/allocation_inputs.py",  # #603 PR-F1(候補の RaerResult を受ける)
     "domain/signals/allocation_shadow_record.py",  # #603 PR-F2-1(RaerResult を記録へ写す)
+    "domain/valuation/raer_inputs.py",  # #602 PR-G1(入力の組み立て。RaerResult を作る)
 }
 
 
