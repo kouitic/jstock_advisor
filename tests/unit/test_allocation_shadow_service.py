@@ -609,6 +609,37 @@ def test_cash_read_available_and_zero_is_registered() -> None:
     assert result.as_skip_reason() is None
 
 
+def test_cash_read_carries_the_reconciliation_and_update_times_for_the_record() -> None:
+    """F2-2a: 項目つきの記録の買付余力(最終棚卸し・更新時刻)を、同じ 1 回の読取から得る。"""
+    reconciled = _NOW - dt.timedelta(days=3)
+
+    def get(owner: str) -> AvailableCash:
+        record = _cash("5000")
+        return record.model_copy(update={"last_reconciled_at": reconciled})
+
+    result = read_available_cash(DEFAULT_OWNER, timeout_seconds=1.0, get=get)
+
+    assert result.last_reconciled_at == reconciled
+    assert result.updated_at == _NOW
+    assert (
+        read_available_cash(DEFAULT_OWNER, timeout_seconds=1.0, get=lambda o: None).updated_at
+        is None
+    )
+
+
+def test_the_f22a_skip_reasons_are_codes_the_record_accepts() -> None:
+    import re
+
+    pattern = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+    for name in (
+        "HOLDINGS_READ_FAILED",
+        "RECOMMENDATIONS_READ_FAILED",
+        "INPUT_LIMIT_EXCEEDED",
+        "COEFFICIENTS_UNAVAILABLE",
+    ):
+        assert pattern.match(ShadowSkipReason[name].value)
+
+
 def test_cash_read_none_is_not_registered_not_zero() -> None:
     result = read_available_cash(DEFAULT_OWNER, timeout_seconds=1.0, get=lambda o: None)
 

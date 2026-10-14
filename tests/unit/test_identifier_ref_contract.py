@@ -95,7 +95,7 @@ def test_the_reference_does_not_contain_the_plaintext() -> None:
 
 def test_parse_ref_splits_the_implemented_version() -> None:
     assert parse_ref(owner_ref("owner-a")) == ("kv0", owner_ref("owner-a").split(":")[1])
-    assert {"kv0"} == KNOWN_VERSIONS
+    assert {"kv0", "kv1"} == KNOWN_VERSIONS
 
 
 @pytest.mark.parametrize(
@@ -107,7 +107,12 @@ def test_parse_ref_splits_the_implemented_version() -> None:
         "kv0:" + "a" * 25,
         "kv0:" + "A" * 24,
         "kv0:" + "g" * 24,
-        "kv1:" + "a" * 24,  # 作る側が無い版は受理しない(段階 2 で足す)
+        "kv1:" + "a" * 24,  # kv1 は鍵の版が要る
+        "kv1.0:" + "a" * 24,
+        "kv1.1000:" + "a" * 24,
+        "kv1.01:" + "a" * 24,
+        "kv0.1:" + "a" * 24,  # kv0 は鍵の版を持たない
+        "kv2.1:" + "a" * 24,
         "kv9:" + "a" * 24,
         "sha256:abcd1234",
         "xx0:" + "a" * 24,
@@ -155,6 +160,7 @@ def test_no_holding_reference_is_provided_until_a_record_needs_it() -> None:
 _NEW_RECORD_WRITERS = {
     "services/allocation_shadow_service.py",
     "domain/signals/allocation_shadow_record.py",
+    "services/allocation_shadow_compute.py",  # #603 PR-F2-2a(計算の組み立て)
 }
 
 
@@ -226,7 +232,10 @@ def test_the_module_is_pure() -> None:
     }
     assert imported <= {
         "__future__",
+        "dataclasses",
+        "enum",
         "hashlib",
+        "hmac",
         "re",
         "typing",
         "jstock_advisor.domain.entities.owner",
