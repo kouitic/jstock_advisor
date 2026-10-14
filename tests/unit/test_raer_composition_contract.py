@@ -1376,7 +1376,11 @@ def test_nothing_in_src_imports_the_composition_module() -> None:
     ]
     # dormant。例外は、同じく未配線の dormant な module だけ: #602 PR-G1(入力の組み立て)と
     # #602 PR-E(係数の loader)。配線は #603 PR-F 系(別の USER 承認の後)
-    allowed = {"domain/valuation/raer_coefficients_config.py", "domain/valuation/raer_inputs.py"}
+    allowed = {
+        "domain/valuation/raer_coefficients_config.py",
+        "domain/valuation/raer_inputs.py",
+        "services/allocation_shadow_compute.py",  # #603 PR-F2-2a(RAER の計算を呼ぶ。dormant)
+    }
     assert set(importers) <= allowed, importers
 
 

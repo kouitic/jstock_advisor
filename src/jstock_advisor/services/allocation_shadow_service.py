@@ -116,6 +116,11 @@ class ShadowSkipReason(StrEnum):
     INPUT_INCONSISTENT = "INPUT_INCONSISTENT"
     COMPUTE_NOT_IMPLEMENTED = "COMPUTE_NOT_IMPLEMENTED"  # 計算の差し込み先が無い
     COMPUTATION_FAILED = "COMPUTATION_FAILED"  # 計算が例外になった(型名のみ記録)
+    # --- PR-F2-2a(計算の組み立て)の入力の不足・読取の失敗 ---
+    HOLDINGS_READ_FAILED = "HOLDINGS_READ_FAILED"  # 保有の Scan が失敗した
+    RECOMMENDATIONS_READ_FAILED = "RECOMMENDATIONS_READ_FAILED"  # 推奨の一括取得が失敗した
+    INPUT_LIMIT_EXCEEDED = "INPUT_LIMIT_EXCEEDED"  # 候補 ∪ 保有の銘柄数が上限を超えた(読まない)
+    COEFFICIENTS_UNAVAILABLE = "COEFFICIENTS_UNAVAILABLE"  # RAER の係数が読めない(縮退)
 
 
 _Scalar = int | float | str | bool
@@ -200,6 +205,8 @@ class CashReadStatus(StrEnum):
 class CashRead:
     status: CashReadStatus
     amount: Decimal | None = None
+    last_reconciled_at: dt.datetime | None = None
+    updated_at: dt.datetime | None = None
 
     def as_skip_reason(self) -> ShadowSkipReason | None:
         """計算に進めない状態を、スキップの理由へ写す(AVAILABLE は None)。"""
@@ -241,7 +248,12 @@ def read_available_cash(
         return CashRead(CashReadStatus.ERROR)
     if record is None:
         return CashRead(CashReadStatus.NOT_REGISTERED)
-    return CashRead(CashReadStatus.AVAILABLE, record.available_cash)
+    return CashRead(
+        CashReadStatus.AVAILABLE,
+        record.available_cash,
+        last_reconciled_at=record.last_reconciled_at,
+        updated_at=record.updated_at,
+    )
 
 
 @dataclass(frozen=True)

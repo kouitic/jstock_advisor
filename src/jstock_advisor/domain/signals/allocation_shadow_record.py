@@ -106,6 +106,8 @@ _DATE: Final = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 _DATETIME: Final = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?[+-][0-9]{2}:[0-9]{2}$"
 )
+#: RAER の理由コード。全体の理由 `CODE` と、軸ごとの理由 `AXIS:CODE`(RaerResult.reason_codes の形)
+_REASON: Final = re.compile(r"^[A-Z][A-Z0-9_]{0,63}(:[A-Z][A-Z0-9_]{0,63})?$")
 _REF: Final = re.compile(r"^kv1\.[1-9][0-9]{0,2}:[0-9a-f]{24}$")  # 鍵つき(kv1)だけ。kv0 は拒否
 
 
@@ -148,11 +150,13 @@ _SCALARS: Final[dict[str, re.Pattern[str]]] = {
     "date": _DATE,
     "datetime": _DATETIME,
     "ref": _REF,
+    "reason": _REASON,
 }
 
 _DEC_MAP = _Map(_IDENT, "dec", 64)
 _WORD_LIST = _List("word", 16)
 _CODE_LIST = _List("code", 32)
+_REASON_LIST = _List("reason", 64)
 
 #: 候補ごとの RAER の入力(replay・説明用)。キーは固定(値は 10 進数の文字列・真偽・語彙のみ)
 RAER_IN_KEYS: Final = (
@@ -212,7 +216,7 @@ _RAER_OUT_SPEC = {
     "comparison_key": _opt("ident"),
     "applied_axes": _List("code", 8),
     "unapplied_axes": _List("code", 8),
-    "reason_codes": _CODE_LIST,
+    "reason_codes": _REASON_LIST,
     "extra": _RAER_EXTRA_SPEC,
 }
 

@@ -938,4 +938,7 @@ def test_nothing_in_src_imports_the_assembler() -> None:
         if path != _MODULE_PATH and "allocation_inputs" in path.read_text(encoding="utf-8")
     )
     # 許可は PR-F2-1 の記録の組み立て(入力の型を受ける。それ自体が dormant)の明示の 1 件だけ
-    assert importers == ["domain/signals/allocation_shadow_record.py"]
+    assert importers == [
+        "domain/signals/allocation_shadow_record.py",
+        "services/allocation_shadow_compute.py",
+    ]
