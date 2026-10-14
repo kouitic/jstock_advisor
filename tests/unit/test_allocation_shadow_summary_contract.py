@@ -514,7 +514,7 @@ def test_the_by_owner_table_appears_only_when_asked_and_uses_the_short_display_n
 
 
 def test_the_output_names_the_rule_that_counted_the_days() -> None:
-    """『数える日』の規則は暫定。規則が変わると『数えた日数 / 10』の意味が変わるため、出所を出力に残す。"""
+    """数える日の規則は暫定。規則が変わると日数の意味が変わるため、出所を出力に残す。"""
     summary, report = _canary_summary()
     payload = report_to_dict(report, summary)
     assert payload["counting_rule_source"] == report.rule_source == COUNTING_RULE_SOURCE
