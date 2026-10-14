@@ -14,7 +14,8 @@
 ・結果の型は矛盾した組合せを作れない: ALLOCATED <=> shares > 0 <=> reason = ALLOCATED /
   UNAVAILABLE のとき配分なし(方針不完全の日は『順位だけの shadow』= すべて NOT_ALLOCATED で、
   理由は POLICY_INCOMPLETE か RAER_UNAVAILABLE / RAER が比較できない日は『順位なしの診断行』=
-  理由は RAER_NOT_COMPARABLE か RAER_UNAVAILABLE で、rank を持たない)/ 順位は 1..k で連続し、並びは固定
+  理由は RAER_NOT_COMPARABLE か RAER_UNAVAILABLE で、rank を持たない)/
+  順位は 1..k で連続し、並びは固定
   (rank 昇順 → rank なしは後 → stock_code 昇順)/ 購入総額 = 配分した金額の合計
 ・入力の検証: stock_code は空でない / 現在価格 > 0 / 買い判定は BUY 系のみ
   (optimizer は適格性を覆さない)/ 評価額 >= 0 / 比率は (0, 1] / 売買単位 > 0 /
