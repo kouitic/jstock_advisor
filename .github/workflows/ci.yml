@@ -1,73 +1,28 @@
 name: CI
 
-# 運用ハードニング9節: lint/typecheck/testに加え、秘密情報スキャン(gitleaks)・
-# 依存関係の脆弱性スキャン(pip-audit)をCIへ追加する。testジョブは
-# requirements-lock.txt(運用ハードニング8節)からインストールし、
-# pyproject.tomlの範囲指定ではなく検証済みの固定バージョン集合で実行する。
-
-# Issue #230: feature branch(issue-**)へのpushでもCIを起動する。§4は全体回帰の
-# 正本をCIと定めており(LOCAL_FULL_PYTEST_DEFAULT = FORBIDDEN)、一方で運用は
-# 「push -> exact diff review -> PR」の順であるため、PRを作るまでレビュー担当も
-# 作業者も全体回帰の結果を見られなかった。job定義・required check名は変更しない。
+# ★ 試験用 branch(trial/xdist-967)の workflow。main へ merge しない。#967 の xdist の検証のためだけに、
+#   test job だけを残し、workflow_dispatch の入力で pytest の引数を変えて実行する。★
 on:
-  push:
-    branches: [main, "issue-**"]
-  pull_request:
   workflow_dispatch:
-
-# Issue #230: 同一branchへ続けてpushしたとき、古い実行を自動でキャンセルする。
-# pushとpull_requestでgroupが異なる点に注意(head_refはpull_requestでのみ設定され、
-# pushではrefが"refs/heads/<branch>"になる)。これは意図的であり、branchへのpushが
-# 同じbranchのPR実行(required checksの出所)をキャンセルしない状態を保つ。
-#
-# mainへのpushは対象外(連続mergeで先行runを落とさない)。mainのCI runは
-# development_workflow.md 2.6.6のlock解放条件(MAIN_CI_PASS / MAIN_HEAD_EXACT)の
-# 根拠であり、キャンセルされるとその merge commit に対する PASS の証拠が残らない。
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    inputs:
+      pytest_args:
+        description: "pytest へ足す引数(例: -n 4)"
+        required: false
+        default: ""
+      hashseed:
+        description: "PYTHONHASHSEED"
+        required: false
+        default: "0"
+      mutate:
+        description: "true なら tests/conftest.py の番号を定数 0 にする(重複を起こす変異)"
+        required: false
+        default: "false"
+      label:
+        description: "この run の目印"
+        required: false
+        default: ""
 
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -r requirements-lock.txt
-      - run: python -m ruff check src tests
-
-  typecheck:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -r requirements-lock.txt
-      - run: python -m mypy src
-      # Issue #646(サブちゃんレビューF1対応): tests/全体をmypy対象にすると
-      # 既存の大量errorに埋もれるため、tests/factories.pyのみを個別に
-      # 対象とする。この1行がFakeMarketDataProviderの
-      # MarketDataProvider Protocol準拠を実際にCIで検証する
-      # (`mypy src`だけではtests/配下は一切チェックされない)。
-      - run: python -m mypy tests/factories.py
-
-  # Issue #866: Markdownのみの変更では全体pytestを省略する。
-  #
-  # - test jobは存在し続け、成功する(required check `test` のcontextをPendingにしない。
-  #   Rulesetは変更しない)。workflow全体のpaths-ignoreやjob-levelのifは使わない。
-  # - 省略するのは「全体pytest」のstepだけ。代わりに、Markdownを実際に読むテスト
-  #   (tests/ci_markdown_subset.txt)だけを実行する(Markdownの変更で壊れうるテストを
-  #   PRで検出するため)。subsetの網羅はtests/support/markdown_read_audit.pyが
-  #   全体pytestの実行時に検査する。
-  # - 判定はscripts/ci_markdown_only.py(変更が全て*.mdで、かつsrc/ tests/ config/ infra/
-  #   scripts/ .github/ の外にあるときだけtrue。曖昧ならfalse)。classify stepが失敗しても
-  #   outputが無いので `!= 'true'` となり全体pytestが走る(fail-safe)。
-  # - 比較範囲: pull_request=base...head / issue-**のpush=origin/main...HEAD /
-  #   mainのpush・workflow_dispatch=常にfull(mainのCI runはrelease・lock解放の証跡)。
-  # - 比較にmerge-baseが要るため fetch-depth: 0。
   test:
     runs-on: ubuntu-latest
     steps:
@@ -77,109 +32,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - id: classify
-        continue-on-error: true
-        env:
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: python scripts/ci_markdown_only.py
+      - run: |
+          nproc
+          python -c "import os; print('cpu_count', os.cpu_count())"
+          head -n 2 /proc/meminfo
       - run: pip install -r requirements-lock.txt
-      - if: steps.classify.outputs.markdown_only != 'true'
-        run: python -m pytest tests -q
-      - if: steps.classify.outputs.markdown_only == 'true'
-        run: echo "Markdown-only change - full pytest skipped (running the Markdown-reading subset only)"
-      - if: steps.classify.outputs.markdown_only == 'true'
-        run: python -m pytest -q $(grep -v -E '^\s*(#|$)' tests/ci_markdown_subset.txt | tr -d '\015')
-
-  secret-scan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
+      - run: pip install pytest-xdist
+      - if: ${{ inputs.mutate == 'true' }}
+        run: |
+          sed -i 's/f"t{next(_store_dir_counter)}"/"t0"/' tests/conftest.py
+          git diff --stat
+      - run: python -m pytest -q ${{ inputs.pytest_args }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # 個人情報(実在人物の氏名・個人メール等)の再混入防止(CLAUDE.md恒久ルール、
-  # 2026-08-25追加)。gitleaksは秘密情報(APIキー等)用のためこの用途では
-  # 検知しない。denylist方式であり全PII検出を保証しない(CLAUDE.md参照)。
-  pii-scan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: python scripts/scan_for_pii.py
-
-  # commit messageのPII検査(Issue #131)。pii-scanはworking treeのファイル内容
-  # しか読まないためcommit messageが隙間になっていた。GitHub APIを使わないので
-  # API障害でPRが止まる経路を作らない。既存のpii-scanジョブは変更していない。
-  pii-scan-commit-messages:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Scan commit messages introduced by this PR
-        run: >-
-          python scripts/scan_commit_messages_pii.py
-          "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
-
-  dependency-audit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install pip-audit
-      - run: pip-audit -r requirements-lock.txt
-      # Issue #35: 本番Lambda Layerへ実際に入る依存(infra/layer/requirements.txt、
-      # 全推移的依存を完全pinした生成物)も監査対象にする。
-      - run: pip-audit -r infra/layer/requirements.txt
-
-  # Issue #35: Lambda Layer依存lockのdrift検知。infra/layer/requirements.in(人間が
-  # 編集するdirect依存の正本)から標準compileコマンドで再生成した結果が、Git管理
-  # されているinfra/layer/requirements.txt(SAM PythonPipBuilderが実際に使う完全pin
-  # 生成物)と一致しない場合はFAILさせる(.inだけ変更して再生成を忘れた状態をmainへ
-  # 入れないため)。uvバージョン・compile条件はinfra/layer/build-requirements.txtと
-  # このコマンド(infra/README.md「Layer dependency lock」に記載の標準コマンド)で
-  # ローカルと完全に揃えること。uvは既存出力のpinを範囲内で優先するため、PyPIに
-  # 新しいバージョンが出てもこのジョブが勝手に失敗することはない。
-  layer-lock-drift:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -r infra/layer/build-requirements.txt
-      - run: python -m uv pip compile infra/layer/requirements.in -o infra/layer/requirements.txt --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --no-annotate --custom-compile-command "python -m uv pip compile infra/layer/requirements.in -o infra/layer/requirements.txt --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --no-annotate"
-      - run: git diff --exit-code -- infra/layer/requirements.txt
-      # Issue #244(O-1): CI が使う requirements-lock.txt が、Layer の lock(infra/layer/requirements.txt)の
-      # 全 package を含むこと(名前のみ。版は見ない)を検査する。標準ライブラリのみの read-only script。
-      # 直前の step は「Layer の lock が .in と一致するか」で、本 step は別の観点(CI の lock が Layer を包含するか)。
-      # step 名で区別できる。job 名・required check の一覧は変えない。
-      - name: CI の lock が Layer の lock を包含している(Issue #244)
-        run: python scripts/check_lock_consistency.py
-
-  # Issue #481(#212 W2): docs/functional_domains.md の網羅性(M.5 C1〜C4 と C3-b / C3-c)を
-  # 検査する。scripts/check_catalog_coverage.py(#480)は read-only で、標準ライブラリのみを使う
-  # ため、依存のインストールは不要。
-  # ★ required check ではない(USER 決定済み: 未収載 0 件の段階まで昇格を見送る。ruleset は
-  #   変更しない〔変更は USER の操作〕)。失敗は赤で表示するが、既存の PR を止めない。
-  # ★ 既存の job の実行時間・結果には影響しない(独立した job)。
-  catalog-coverage:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: python scripts/check_catalog_coverage.py
+          PYTHONHASHSEED: ${{ inputs.hashseed }}
