@@ -39,7 +39,8 @@ srcを1行も変更しない。
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import itertools
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import pytest
@@ -52,9 +53,41 @@ from tests.support.time_semantics_registry import _REGISTRY, cohort_marker_name
 pytest_plugins = ["tests.support.markdown_read_audit"]
 
 
+#: 既定の store のパスを割り当てるときの、テストごとに一意な番号(Issue #967)
+_store_dir_counter = itertools.count()
+#: このセッション(worker)で割り当てた『`tmp_path` を使わない』既定の store のパス。
+#: セッションの終わりに重複が 0 件であることを検査する(一意性は 1 件のテストでは証明できない)
+_assigned_store_dirs: list[Path] = []
+
+
+def duplicated_store_dirs(paths: Sequence[Path]) -> list[Path]:
+    """重複して割り当てられたパス(あれば)。セッション終了時の検査と、その契約テストが使う。"""
+    seen: set[Path] = set()
+    duplicated: list[Path] = []
+    for path in paths:
+        if path in seen:
+            duplicated.append(path)
+        seen.add(path)
+    return duplicated
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """★ 一意性の検査(Issue #967)★。
+
+    同じセッションで同じ既定の store のパスを 2 つのテストが使っていたら失敗にする。
+    """
+    duplicated = duplicated_store_dirs(_assigned_store_dirs)
+    if duplicated:
+        session.exitstatus = int(pytest.ExitCode.TESTS_FAILED)
+        message = f"ERROR: default store dir assigned to more than one test: {len(duplicated)}"
+        print(message)  # noqa: T201 - セッション終了時の失敗の通知(テストの外)
+
+
 @pytest.fixture(autouse=True)
 def _isolated_default_store_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    request: pytest.FixtureRequest,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[Path]:
     """`json_store.DEFAULT_STORE_DIR` をテストごとの一時ディレクトリへ向ける。
 
@@ -70,8 +103,24 @@ def _isolated_default_store_dir(
     `DEFAULT_STORE_DIR` をmonkeypatchしているテスト(実測2ファイル)には
     影響しない。後者は各テスト内のmonkeypatchが本fixtureより後に効き、
     どちらも一時ディレクトリを向く。
+
+    ## Issue #967: `tmp_path` を要求するのは、テストが `tmp_path` を使うときだけ
+
+    この fixture が全テストで `tmp_path` を要求すると、`tmp_path` のディレクトリ作成が
+    全テストの固定費になる(実測: 1 件あたり約 7 ms。純粋関数だけのテストでは setup が時間の
+    約 95%)。`tmp_path` を使うテスト(fixture 経由を含む。実測 2,819 / 18,271 件)は、これまでどおり
+    `tmp_path / "local_store"` を既定にする(`store_dir` fixture = `tmp_path / "local_store"` と
+    同じ場所を指す偶然の一致が、従来どおり保たれる)。それ以外(実測 15,452 件)は、pytest の基底
+    ディレクトリの配下の『テストごとに一意なパス』を既定にする。★ どちらも作らない
+    (store が構築されるとき作られる)= 『初期状態は存在しない』を保つ ★。
     """
-    store_dir = tmp_path / "local_store"
+    if "tmp_path" in request.fixturenames:
+        store_dir = request.getfixturevalue("tmp_path") / "local_store"
+    else:
+        store_dir = (
+            tmp_path_factory.getbasetemp() / "default_store" / f"t{next(_store_dir_counter)}"
+        )
+        _assigned_store_dirs.append(store_dir)
     monkeypatch.setattr(json_store, "DEFAULT_STORE_DIR", store_dir)
     yield store_dir
 
