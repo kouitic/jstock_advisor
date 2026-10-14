@@ -3,7 +3,8 @@
 固定するもの:
   - 出荷値は USER が承認した判断 B(#122 …6114810773【3】)のとおり。変えるなら意図した変更として
     この表も一緒に更新する(= 閾値の変更は USER 判断)
-  - 出荷の `comparison_key` は未決定(null)のまま = 配分しない(POLICY_INCOMPLETE)
+  - 出荷の `comparison_key` は RAER 側の定数 RAER_FULL_COMPARISON_KEY(#602 PR-G2 で設定。
+    null にすると POLICY_INCOMPLETE = 配分しない)
   - fail-closed: 無い・壊れている・不正(値が 1 つでも)なら全項目を未決定へ縮退し、例外を送出せず、
     警告に値・path を出さない。項目だけの null は、その項目だけが未決定(0・既定値で補完しない)
   - 数値は float の誤差を持ち込まない / bool・文字列・NaN・±inf を拒否 / 比率は (0, 1]
@@ -42,6 +43,7 @@ from jstock_advisor.domain.signals.portfolio_allocation_types import (
     PriceTier,
 )
 from jstock_advisor.domain.valuation.raer import RiskFlag
+from jstock_advisor.domain.valuation.raer_inputs import RAER_FULL_COMPARISON_KEY
 
 _REPO = Path(__file__).resolve().parents[2]
 _CONFIG_DIR = _REPO / "config"
@@ -134,13 +136,30 @@ def test_shipped_values_are_the_approved_decision_b() -> None:
     assert bundle.constraints.minimum_trading_unit == _UNIT
 
 
-def test_shipped_comparison_key_is_undecided_so_nothing_is_allocated() -> None:
-    """RAER の比較条件は #602 の確定後に別の変更で決める。決まるまでは POLICY_INCOMPLETE。"""
+def test_shipped_comparison_key_is_the_raer_full_key_so_the_policy_is_complete() -> None:
+    """#602 PR-G2: 比較の鍵は RAER 側の定数(唯一の算出元)と一致する。ずれれば CI が落ちる。"""
     bundle = load_allocation_policy(_CONFIG_DIR, minimum_trading_unit=_UNIT)
+
+    assert bundle.policy.comparison_key == RAER_FULL_COMPARISON_KEY
+    assert bundle.missing() == ()
+    assert bundle.policy.is_complete(bundle.constraints) is True
+
+
+def test_a_null_comparison_key_still_means_nothing_is_allocated(tmp_path: Path) -> None:
+    """鍵を null にすると『未決定 = 配分しない』へ戻る(fail-closed は維持)。"""
+    bundle = _load(tmp_path, _with(comparison_key=None))
 
     assert bundle.policy.comparison_key is None
     assert bundle.missing() == ("comparison_key",)
     assert bundle.policy.is_complete(bundle.constraints) is False
+
+
+def test_the_raer_full_key_is_the_four_implemented_axes_and_depends_on_axis_four() -> None:
+    # 軸 4(DATA_QUALITY)は未実装。実装すると適用軸の集合が変わり、この鍵も変わる
+    assert RAER_FULL_COMPARISON_KEY.endswith(
+        "|BUSINESS_RISK,COMPANY_QUALITY,EARNINGS_TREND,FAIR_VALUE_CONFIDENCE"
+    )
+    assert "DATA_QUALITY" not in RAER_FULL_COMPARISON_KEY
 
 
 def test_the_shipped_file_loads_without_falling_back(caplog: pytest.LogCaptureFixture) -> None:
@@ -317,8 +336,8 @@ def test_a_single_null_item_is_undecided_and_the_rest_are_kept(tmp_path: Path, k
     bundle = _load(tmp_path, _with(**{key: None}))
 
     assert bundle.source == "FILE"
-    # 出荷の comparison_key は元から null(同じ値 = 同じ hash)。他は値が消えるので hash が変わる
-    assert (bundle.config_hash == shipped.config_hash) is (key == "comparison_key")
+    # 出荷の各項目は決定済み。どの項目を null にしても値が消えるので hash が変わる
+    assert bundle.config_hash != shipped.config_hash
     expected_missing = {
         "min_raer_to_allocate": "min_raer_to_allocate",
         "max_single_stock_amount": "max_single_stock_amount",

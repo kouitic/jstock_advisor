@@ -65,6 +65,15 @@ _SENSITIVE_SECRETSMANAGER_ACTIONS = {
 # 依存せず2つの層を直接突き合わせる。
 _EXPECTED_SECRETSMANAGER_PRINCIPALS = set(SECRETSMANAGER_RUNTIME_FUNCTIONS)
 
+# ★ Issue #925(kv1): 鍵の Secret の GetSecretValue だけを持つ 2 関数。github-app secret の
+# registry とは『別の Secret』であり、registry へは足さない
+# 付与の形(その Secret の ARN 1 つ・GetSecretValue だけ)は下の専用テストで固定する。
+# 鍵の Secret のリソースポリシー側の allow-list は test_infra_owner_ref_key_secret.py が固定する
+_KEY_SECRET_LOGICAL_ID = "AllocationShadowOwnerRefKeyV1"
+_KEY_SECRET_READERS = {"BuyCandidatesFunction", "BuyCandidateWorkerFunction"}
+# secretsmanager の sensitive action を持つ関数の全体(github-app の 2 関数 + 鍵の Secret の 2 関数)
+_EXPECTED_SENSITIVE_FUNCTIONS = _EXPECTED_SECRETSMANAGER_PRINCIPALS | _KEY_SECRET_READERS
+
 
 def _load_template() -> dict[str, Any]:
     class _Loader(yaml.SafeLoader):
@@ -180,10 +189,8 @@ def test_only_expected_functions_have_secretsmanager_sensitive_actions() -> None
     関数の集合が、既知の2関数からいっさい増減していないことを固定する。
     wildcard action(`secretsmanager:*`・`*`)による包含も対象に含む。
     """
-    actual = {
-        name for name in _lambda_function_logical_ids() if _secretsmanager_statements(name)
-    }
-    assert actual == _EXPECTED_SECRETSMANAGER_PRINCIPALS
+    actual = {name for name in _lambda_function_logical_ids() if _secretsmanager_statements(name)}
+    assert actual == _EXPECTED_SENSITIVE_FUNCTIONS
 
 
 def test_no_lambda_function_has_wildcard_resource_for_secretsmanager_actions() -> None:
@@ -212,3 +219,23 @@ def test_expected_secretsmanager_functions_are_scoped_to_the_shared_github_app_s
         assert statement["Effect"] == "Allow"
         assert statement["Resource"] == {"Fn::Ref": "GithubAppSecretArn"}
         assert _actions(statement) == {"secretsmanager:GetSecretValue"}
+
+
+def test_the_key_secret_readers_can_only_get_that_one_secret() -> None:
+    """#925 kv1: 鍵の Secret を読む 2 関数は、その Secret 1 つの GetSecretValue だけを持つ。
+
+    他の secret(github-app 等)・他の操作・ワイルドカードを同じ関数へ足せない。
+    """
+    for name in sorted(_KEY_SECRET_READERS):
+        statements = _secretsmanager_statements(name)
+        assert len(statements) == 1, f"{name}: {statements}"
+        (statement,) = statements
+        assert statement.get("Action") == ["secretsmanager:GetSecretValue"], name
+        assert statement.get("Resource") == [{"Fn::Ref": _KEY_SECRET_LOGICAL_ID}], name
+
+
+def test_the_github_app_secret_readers_are_not_widened_by_the_key_secret() -> None:
+    """github-app secret を読む 2 関数(registry)に、鍵の Secret を足していない。"""
+    for name in sorted(_EXPECTED_SECRETSMANAGER_PRINCIPALS):
+        for statement in _secretsmanager_statements(name):
+            assert _KEY_SECRET_LOGICAL_ID not in str(statement.get("Resource")), name

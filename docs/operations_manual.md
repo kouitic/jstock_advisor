@@ -5937,7 +5937,7 @@ C  上限を超えた試行の数を 0 に戻してから再開する(下。追�
 ```bash
 # 例外操作 C の 1 つ目: 上限を超えた試行の数の初期化(kill switch がまだ入っている間に行う)。
 # SET_AT は上の再開のコマンドと同じ値(38.3 で読んだ kill_switch_set_at)。
-WINDOW=$(TZ=JST-9 date +%F)   # 今日(JST)の窓の id(JST の日付)
+WINDOW=$(TZ=JST-9 date +%F)   # 今日(JST)の窓の id。TZ=Asia/Tokyo へ置き換えない(UTC へ落ちて時刻が 9 時間ずれる)
 [[ "$SET_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+[+-][0-9]{2}:[0-9]{2}$ ]] && [[ "$WINDOW" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] && preflight && aws dynamodb update-item --table-name "$TABLE" \
   --key '{"fingerprint": {"S": "__control__:github_issue"}}' \
   --update-expression "SET global_denied_count = :zero" \
@@ -5949,7 +5949,7 @@ WINDOW=$(TZ=JST-9 date +%F)   # 今日(JST)の窓の id(JST の日付)
 ・condition-expression が確かめるもの: 停止中である(github_issue_kill_switch = true)/ 停止の理由が自動(AUTO_GLOBAL_FLOOD)/ 確認した、その停止である
   (kill_switch_set_at が一致)/ 数えている窓が今日(JST)の窓である(global_denied_window_id = WINDOW)。どれかが違えば
   ConditionalCheckFailedException になる = 何も変わらない(停止していない・手動の停止・窓が古い・別の停止のときに、件数を書き換えない)
-・WINDOW は JST の日付(TZ=JST-9 の date)。日付が替わる直前・直後に実行すると窓が一致せず成立しない(その場合は通常の手順で再開する)
+・WINDOW は JST の日付(TZ=JST-9 の date)。★ TZ=JST-9 を TZ=Asia/Tokyo へ置き換えない ★(この環境の Git Bash では Asia/Tokyo が認識されず、静かに UTC へ落ちて時刻が 9 時間ずれ、JST 午前 0 時〜9 時前には日付が前日になる場合がある。前日の窓を指すと、窓が一致せず条件が成立しない)。日付が替わる直前・直後に実行すると窓が一致せず成立しない(その場合は通常の手順で再開する)
 ・全体の作成件数 global_created_count は戻さない(上限の意味を変えない)
 ・項目は DELETE しない。global_denied_window_id も変えない
 ・成立した後、続けて上の『通常の手順』の解除のコマンド(同じ SET_AT)を実行する(2 つ目)
@@ -6050,12 +6050,76 @@ auto_stop_denied_threshold        全体の上限を超えた試行がこの回�
 ・異常を知ったときの手順: 27節
 ```
 
-## 39. 資金配分 Shadow の結果を見る CLI(`jstock allocation today`)の使い方(Issue #605、2026-10-14追加)
+## 39. owner の符号の鍵(Secret)の運用(Issue #925。#128 R1 の kv1。2026-10-14追加)
+
+### 39.1 対象
+
+```
+対象    owner の符号(owner_ref)を HMAC で作る鍵の Secret `AllocationShadowOwnerRefKeyV1`(infra/template.yaml)
+        と、その観測(MetricFilter 2 本・Alarm 2 本)
+作られ方 ChangeSet の EXECUTE で作られる(merge では何も作られない)。値は GenerateSecretString が作り、人は見ない
+読む者  BuyCandidatesFunction / BuyCandidateWorkerFunction の実行 role(GetSecretValue をこの Secret 1 つにだけ付与)
+影響    鍵が取れない日は、その日の Shadow の記録が『日単位の skip』になるだけ。買い判定・通知・本番の配分には影響しない
+```
+
+### 39.2 やってはいけないこと
+
+```
+1 論理 ID `AllocationShadowOwnerRefKeyV1` と Name(<stack 名>/allocation-shadow-owner-ref-key-v1)を変えない
+    → 変えると『置換』になり、新しい鍵が静かに作られる。過去の符号と結べなくなる(実質的な鍵の紛失)
+2 stack を削除・再作成しない(Secret は Retain で残るため、同名の再作成は失敗する)
+3 Secret の値を手で書き換えない(PutSecretValue / コンソールでの編集)。書き換えると過去の符号と結べなくなる
+4 Secret を手で削除しない(削除予約でも、取り戻すまで Shadow の記録は skip になる)
+5 鍵の版を上げたいとき(回転・紛失)は、新しい論理 ID `...V2` を別に追加する。V1 は残す(R1 では実装しない)
+```
+
+### 39.3 ChangeSet(CREATE)で確認する点
+
+```
+・Add = Secret 1 / MetricFilter 2 / Alarm 2。ResourcePolicy は Condition=false の間は作られない
+・Modify = BuyCandidatesFunction・BuyCandidateWorkerFunction(環境変数 1 つ追加)と、その実行 role(Statement 1 つ追加)
+・Remove と Replacement=True が 1 件も無い(1 件でもあれば EXECUTE しない)
+・実行 role のインライン policy が 10,240 バイトの上限に収まる(超えると ChangeSet の EXECUTE が失敗する)
+・Secret の Name が <stack 名>/allocation-shadow-owner-ref-key-v1 である
+```
+
+### 39.4 観測(Alarm)と、BuyCandidateWorkerFunction の log group
+
+```
+設定の不備(1 時間に 1 件以上)  = 鍵の取得が未設定・権限なし・Secret なしで失敗した(デプロイ・権限・資源の不備)
+異常(1 日に 3 件以上)          = タイムアウト・形式不正・その他(一時的な障害・値の不正)
+理由コード → 系統の対応は、実装(殻)が持つ。template は固定の印(ALLOCATION_SHADOW_KEY_UNAVAILABLE_CONFIG /
+..._ANOMALY)を数えるだけ
+
+★ MetricFilter は BuyCandidatesFunction の log group だけに付けてある ★。BuyCandidateWorkerFunction の log group は、
+fan-out(BuyCandidateSqsDispatchEnabled=true)が無効の間は一度も動かないため存在せず、MetricFilter を付けると
+ChangeSet の EXECUTE が失敗する(2026-10-14 に describe-log-groups で確認)。
+fan-out を有効にする前に、Worker の log group へ同じ MetricFilter 2 本を足す変更を、別の PR・ChangeSet で入れること
+(足さないと、fan-out の有効化後は Worker 側で鍵が取れなかった日を Alarm が検知しない)
+```
+
+### 39.5 リソースポリシー(第二の防壁)
+
+```
+Condition `SecretResourcePolicyIsEnabled`(= SecretResourcePolicyEnabled=true)に相乗りする。既定では作られない。
+有効化は 35 節の前提(AdminPrincipalArn / DeployPrincipalArn の実値・事前確認)と、別の USER 承認を要する。
+許可する principal = Admin / Deploy / 上記の実行 role 2 本。観測用 profile・CLI・開発者の role は入らない
+```
+
+### 39.6 この節が決めていないこと
+
+```
+・鍵の回転・紛失時の運用(R1 では実装しない。V2 を別の論理 ID で足す方針のみ)
+・Alarm の通知先の変更(既存の IncidentNotificationTopic。通知の経路は 27 節)
+・Shadow の記録の読み方(CLI の節)
+```
+
+## 40. 資金配分 Shadow の結果を見る CLI(`jstock allocation today`)の使い方(Issue #605、2026-10-14追加)
 
 資金配分 Shadow(試験計算。出荷設定は無効)の記録を、**読むだけ**で表示するコマンド。本節の手順は、
 Shadow が有効化され(別の USER 承認)、記録が書かれた後にだけ意味を持つ。**投資判断には使わない。LINE へは送られない。**
 
-### 39.1 実行前に知っておくこと
+### 40.1 実行前に知っておくこと
 
 ```
 ・読取専用: GetItem だけ(索引 1 + 日単位の skip 1 + 索引が載せた所有者ごとに 1。最大 18 回)。書込・Scan・通知・再計算をしない
@@ -6065,7 +6129,7 @@ Shadow が有効化され(別の USER 承認)、記録が書かれた後にだ�
 ・Windows では Git Bash か WSL で実行する(PowerShell での実行は未確認)
 ```
 
-### 39.2 コマンド
+### 40.2 コマンド
 
 ```bash
 # 開発・試験(ローカルの記録)
@@ -6085,7 +6149,7 @@ jstock allocation today --backend dynamodb --aws-region ap-northeast-1 \
 終了コード   0 = すべて揃っている / 1 = 読取の失敗(固定の文言。値・表名を出さない)/ 2 = 指定の誤り / 3 = 読めたが不完全(下の状態)
 ```
 
-### 39.3 画面の『状況』の読み方(黙って 0 件にしない)
+### 40.3 画面の『状況』の読み方(黙って 0 件にしない)
 
 ```
 すべての所有者の記録があります                      正常(終了コード 0)
@@ -6096,7 +6160,7 @@ Shadow は動きましたが、記録は 0 件です              索引はあ�
 対応していない記録の版、または読めない索引です       schema_version を表示する。CLI の更新が要る可能性
 ```
 
-### 39.4 所有者の表示名(ローカルのラベル)
+### 40.4 所有者の表示名(ローカルのラベル)
 
 ```
 画面の所有者は『owner-』+ 符号の先頭 6 桁。見分けたいときは、利用者の端末にだけ表示名を持てる:
@@ -6107,7 +6171,7 @@ Shadow は動きましたが、記録は 0 件です              索引はあ�
 Windows のファイルの権限(ACL)は確認が難しいため、利用者のアカウントの home 配下に置くことを前提とする
 ```
 
-### 39.5 してはいけないこと
+### 40.5 してはいけないこと
 
 ```
 ・--backend dynamodb で、USER の許可と読取計画なしに本番の記録を読む
@@ -6116,7 +6180,7 @@ Windows のファイルの権限(ACL)は確認が難しいため、利用者の�
 ・本コマンドの出力を投資判断・LINE の通知に使う(試験運用)
 ```
 
-### 39.6 この節が確認していないこと(未確認)
+### 40.6 この節が確認していないこと(未確認)
 
 ```
 ・本番の AuditLog に、観測用の読取専用 profile が GetItem を許可されているか(AWS に接続していない)

@@ -1739,6 +1739,9 @@ Resources:
           # Issue #533(#319 Phase 2): 既定false(従来どおり非同期自己再帰呼び出し)。
           BUY_CANDIDATE_SQS_DISPATCH_ENABLED: !Ref BuyCandidateSqsDispatchEnabled
           BUY_CANDIDATE_QUEUE_URL: !Ref BuyCandidateQueue
+          # Issue #925(kv1): owner の符号を作る鍵の Secret の ARN。値は Secret への !Ref だけ
+          # (鍵の値・名前は template に現れない)。Shadow が動くときだけ読まれる
+          ALLOCATION_SHADOW_REF_KEY_SECRET_ARN: !Ref AllocationShadowOwnerRefKeyV1
       Policies:
         # Issue #318: EventInvokeConfigのOnFailure先へ送るために必要。
         - SQSSendMessagePolicy:
@@ -1897,6 +1900,15 @@ Resources:
                 - dynamodb:GetItem
               Resource:
                 - !GetAtt AvailableCashTable.Arn
+        # Issue #925(kv1): 鍵の Secret 1 つの GetSecretValue だけ(他の secret・他の操作・
+        # ワイルドカードを付けない)。Resource は Secret の ARN(Ref)で、名前の取り違えが起きない
+        - Statement:
+            - Sid: OwnerRefKeyReadOnly
+              Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource:
+                - !Ref AllocationShadowOwnerRefKeyV1
       # Issue #318: _fanout.dispatch_async(InvocationType="Event")による
       # 自己呼び出しと、Reconcilerからの完了リカバリ呼び出しが**非同期**である。
       # 既定は「2回再試行/最大6時間」で、行き先が無いため失敗は静かに消えていた。
@@ -1955,6 +1967,8 @@ Resources:
           # WatchlistBatchReconcilerFunction(#506)と同じ配線(Topic ARN + sns:Publish + Topic policy)。
           INCIDENT_NOTIFICATION_TOPIC_ARN: !Ref IncidentNotificationTopic
           CANDIDATE_UNIVERSE_CACHE_BUCKET: !Ref CandidateUniverseCacheBucket
+          # Issue #925(kv1): BuyCandidatesFunction と同じ(本関数もその処理を呼ぶ)
+          ALLOCATION_SHADOW_REF_KEY_SECRET_ARN: !Ref AllocationShadowOwnerRefKeyV1
       Policies:
         # BuyCandidatesFunctionのDynamoDbCrudAccess/DynamoDbReadOnlyAccessと同一
         # (_process_single_candidate()を直接importして呼ぶため、同じテーブル
@@ -2073,6 +2087,15 @@ Resources:
                 - dynamodb:GetItem
               Resource:
                 - !GetAtt AvailableCashTable.Arn
+        # Issue #925(kv1): 鍵の Secret 1 つの GetSecretValue だけ(他の secret・他の操作・
+        # ワイルドカードを付けない)。Resource は Secret の ARN(Ref)で、名前の取り違えが起きない
+        - Statement:
+            - Sid: OwnerRefKeyReadOnly
+              Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource:
+                - !Ref AllocationShadowOwnerRefKeyV1
       Events:
         BuyCandidateQueue:
           Type: SQS
@@ -4088,6 +4111,117 @@ Resources:
                 aws:PrincipalArn:
                   - !Ref AdminPrincipalArn
                   - !Ref DeployPrincipalArn
+
+  # --- Issue #925(kv1): owner の符号を作る鍵の Secret と、その観測 ---------------------------
+  # ★ 論理 ID `AllocationShadowOwnerRefKeyV1` と Name は変えない ★。変えると置換(= 新しい鍵が
+  # 静かに生成され、過去の符号と結べなくなる = 実質的な鍵の紛失)になる。Retain のため stack を
+  # 消しても Secret は残り、同名の再作成は失敗する(運用手順書 §37 付近の注記を参照)。
+  # 変更が要るときは新しい版(V2)を別の論理 ID で追加する。鍵の値は GenerateSecretString が作り、
+  # 人は見ない(英数字 64 文字 = 約 381 ビット)。template・ログ・環境変数に値は現れない。
+  AllocationShadowOwnerRefKeyV1:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub "${AWS::StackName}/allocation-shadow-owner-ref-key-v1"
+      Description: owner の符号(owner_ref)を HMAC で作る鍵(kv1)。Issue #925。変更・削除しない
+      GenerateSecretString:
+        SecretStringTemplate: '{"key_version": 1}'
+        GenerateStringKey: key
+        PasswordLength: 64
+        ExcludePunctuation: true
+
+  # 第二の防壁(リソースポリシー)。既存の Condition に相乗りし、既定(false)では作られない。
+  # 有効化は #680 の既存の Gate(AdminPrincipalArn / DeployPrincipalArn の実値・事前確認・
+  # USER の別承認)に合流する。許可する principal = Admin / Deploy / 実行 role 2 本。
+  AllocationShadowOwnerRefKeyResourcePolicy:
+    Type: AWS::SecretsManager::ResourcePolicy
+    Condition: SecretResourcePolicyIsEnabled
+    Properties:
+      SecretId: !Ref AllocationShadowOwnerRefKeyV1
+      ResourcePolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyUnlessIntendedPrincipal
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:PutSecretValue
+              - secretsmanager:DeleteSecret
+              - secretsmanager:UpdateSecret
+              - secretsmanager:RotateSecret
+              - secretsmanager:PutResourcePolicy
+              - secretsmanager:DeleteResourcePolicy
+            Resource: !Ref AllocationShadowOwnerRefKeyV1
+            Condition:
+              StringNotEquals:
+                aws:PrincipalArn:
+                  - !Ref AdminPrincipalArn
+                  - !Ref DeployPrincipalArn
+                  - !GetAtt BuyCandidatesFunctionRole.Arn
+                  - !GetAtt BuyCandidateWorkerFunctionRole.Arn
+
+  # 鍵が取れなかった日の観測(2 系統)。ログの固定の印を数えるだけで、ログの本文は読まない。
+  #   設定の不備 = デプロイ・権限・資源の不備(1 件で即時に気づくべき)
+  #   異常       = 一時的な障害・値の不正(件数で見る)
+  # ★ 対象のログ group は BuyCandidatesFunction だけ ★。BuyCandidateWorkerFunction の log group は
+  # (BuyCandidateSqsDispatchEnabled=false の間は一度も動かないため)まだ存在せず、MetricFilter を
+  # 付けると ChangeSet の EXECUTE が失敗する。fan-out を有効にする前に、運用手順書の手順で追加する。
+  AllocationShadowKeyConfigIssueFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${BuyCandidatesFunction}"
+      FilterPattern: '"ALLOCATION_SHADOW_KEY_UNAVAILABLE_CONFIG"'
+      MetricTransformations:
+        - MetricNamespace: !Sub "${AWS::StackName}/AllocationShadow"
+          MetricName: KeyConfigIssue
+          MetricValue: "1"
+
+  AllocationShadowKeyAnomalyFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${BuyCandidatesFunction}"
+      FilterPattern: '"ALLOCATION_SHADOW_KEY_UNAVAILABLE_ANOMALY"'
+      MetricTransformations:
+        - MetricNamespace: !Sub "${AWS::StackName}/AllocationShadow"
+          MetricName: KeyAnomaly
+          MetricValue: "1"
+
+  AllocationShadowKeyConfigIssueAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-allocation-shadow-key-config-issue"
+      AlarmDescription: >-
+        鍵の取得が設定の不備で失敗した(未設定・権限なし・Secret なし)。Issue #925参照。
+      Namespace: !Sub "${AWS::StackName}/AllocationShadow"
+      MetricName: KeyConfigIssue
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
+
+  AllocationShadowKeyAnomalyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-allocation-shadow-key-anomaly"
+      AlarmDescription: >-
+        鍵の取得が一時的な障害・値の不正で失敗した(タイムアウト・形式不正・その他)。
+        1 日に 3 件以上。Issue #925参照。
+      Namespace: !Sub "${AWS::StackName}/AllocationShadow"
+      MetricName: KeyAnomaly
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
 
 Outputs:
   WebhookUrl:
