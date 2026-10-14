@@ -19,12 +19,24 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Final, Protocol
 
 from botocore.exceptions import BotoCoreError, ClientError
+
+from jstock_advisor.domain.notification.allocation_shadow_cli_view import (
+    DayInput,
+    RecordInput,
+    RecordState,
+    day_skip_key,
+    index_key,
+    items_key,
+    refs_to_read,
+)
 
 ALLOWED_OPERATIONS: Final[frozenset[str]] = frozenset({"get_item"})
 _ACCESS_DENIED: Final = frozenset(
@@ -135,3 +147,43 @@ class DynamoRecordSource:
             raise ReadFailure(ReadFailureKind.ERROR) from None
         item = response.get("Item") if isinstance(response, dict) else None
         return decode_item(item if isinstance(item, dict) else None)
+
+
+def _input(read: RecordRead) -> RecordInput:
+    return RecordInput(RecordState(read.status.value), read.record)
+
+
+def read_day(source: RecordSource, business_date: dt.date) -> DayInput:
+    """索引 1 + skip 1 + 索引が載せた符号ごとの項目つきの記録(最大 16)を GetItem で読む。
+
+    ★ キーの順序(索引 → 日単位 skip → 項目つきの記録)の実装はここ 1 つだけ ★。
+    CLI(`jstock allocation today`)と集計(#934)の両方がこれを呼ぶ(読み方が 2 つに割れない)。
+    """
+    day = business_date.isoformat()
+    index = _input(source.get(index_key(day)))
+    skip = _input(source.get(day_skip_key(day)))
+    items = {ref: _input(source.get(items_key(day, ref))) for ref in refs_to_read(index)}
+    return DayInput(day, index, skip, items)
+
+
+@dataclass(frozen=True)
+class DayRead:
+    """1 日分の読取の結果。読めた日は `day`、読めなかった日は固定の種別 `failure`。"""
+
+    business_date: dt.date
+    day: DayInput | None = None
+    failure: ReadFailureKind | None = None
+
+
+def read_days(source: RecordSource, dates: Iterable[dt.date]) -> list[DayRead]:
+    """日付のループだけ(1 日分は `read_day`)。1 日の失敗は他の日の読取を止めない(日単位の隔離)。
+
+    失敗は固定の種別(`ReadFailureKind`)だけを残す(値・表名・例外の文面を持たない)。
+    """
+    results: list[DayRead] = []
+    for business_date in dates:
+        try:
+            results.append(DayRead(business_date, day=read_day(source, business_date)))
+        except ReadFailure as failure:
+            results.append(DayRead(business_date, failure=failure.kind))
+    return results
