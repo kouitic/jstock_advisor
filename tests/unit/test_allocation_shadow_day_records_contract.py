@@ -414,11 +414,13 @@ def test_the_audit_ids_are_deterministic_and_do_not_collide() -> None:
     owner = _ref("owner-a")
 
     assert index_audit_id(_DATE) == "allocation_shadow_index:2026-10-14"
-    assert day_skip_audit_id(_BATCH) == f"allocation_shadow_day_skip:{_BATCH}"
+    assert (
+        day_skip_audit_id(_DATE) == "allocation_shadow_day_skip:2026-10-14"
+    )  # 索引と対称(日付で引ける)
     assert items_audit_id(_DATE, owner) == f"allocation_shadow_items:2026-10-14:{owner}"
     # 既存の owner 単位の枠・skip の接頭辞(allocation_shadow_skip:{batch}:{ref})と衝突しない
-    assert not day_skip_audit_id(_BATCH).startswith("allocation_shadow_skip:")
-    ids = {index_audit_id(_DATE), day_skip_audit_id(_BATCH), items_audit_id(_DATE, owner)}
+    assert not day_skip_audit_id(_DATE).startswith("allocation_shadow_skip:")
+    ids = {index_audit_id(_DATE), day_skip_audit_id(_DATE), items_audit_id(_DATE, owner)}
     assert len(ids) == 3
     assert index_audit_id(_DATE) == index_audit_id(_DATE)
 
@@ -435,13 +437,33 @@ def test_the_audit_ids_require_a_date(value: object) -> None:
     with pytest.raises(RecordSchemaError):
         index_audit_id(value)  # type: ignore[arg-type]
     with pytest.raises(RecordSchemaError):
+        day_skip_audit_id(value)  # type: ignore[arg-type]
+    with pytest.raises(RecordSchemaError):
         items_audit_id(value, _ref("owner-a"))  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("batch_id", ["日本語", "has space", "", "x" * 201, "abc\n", None, 5])
-def test_the_day_skip_audit_id_requires_an_identifier(batch_id: object) -> None:
-    with pytest.raises(RecordSchemaError):
-        day_skip_audit_id(batch_id)  # type: ignore[arg-type]
+def test_the_day_skip_key_is_the_day_only_and_the_batch_id_stays_in_the_body() -> None:
+    """CLI は batch_id を知らない。日付だけで引け、同じ日の 2 つの batch は同じ key(先着)になる。"""
+    first = build_day_skip_record(
+        business_date=_DATE,
+        batch_id="batch-a",
+        shadow_mode="SHADOW",
+        reason=KeyUnavailableReason.TIMEOUT,
+        unrecorded_owner_count=1,
+    )
+    second = build_day_skip_record(
+        business_date=_DATE,
+        batch_id="batch-b",
+        shadow_mode="SHADOW",
+        reason=KeyUnavailableReason.TIMEOUT,
+        unrecorded_owner_count=1,
+    )
+
+    assert first["batch_id"] == "batch-a"  # batch_id は本文に残る(失われる情報はない)
+    assert day_skip_audit_id(dt.date(2026, 10, 14)) == day_skip_audit_id(dt.date(2026, 10, 14))
+    assert day_skip_audit_id(dt.date(2026, 10, 15)) != day_skip_audit_id(_DATE)
+    assert first["business_date"] == second["business_date"]
+    assert "batch" not in day_skip_audit_id(_DATE)
 
 
 # --- 部分で終わった日の整合(builder の不変条件)---------------------------------------------------
