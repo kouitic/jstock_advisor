@@ -8,6 +8,7 @@ import typer
 from dotenv import load_dotenv
 
 from jstock_advisor.cli import (
+    allocation,
     analyze,
     audit,
     available_cash,
@@ -61,6 +62,7 @@ app.add_typer(trading_pause.app, name="trading-pause")
 app.add_typer(judgment_safety_shadow.app, name="judgment-safety-shadow")
 app.add_typer(migrate.app, name="migrate")
 app.add_typer(weekly_aggregate.app, name="weekly-aggregate")
+app.add_typer(allocation.app, name="allocation")
 
 
 @app.callback()

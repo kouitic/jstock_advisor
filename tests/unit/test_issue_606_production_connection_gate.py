@@ -93,17 +93,28 @@ def _reachable(roots: set[str], known: dict[str, Path]) -> set[str]:
     return seen
 
 
+_HANDLER_ROOT_PREFIX = "jstock_advisor.lambda_handlers"
+_CLI_ROOT_PREFIX = "jstock_advisor.cli"
+
+
+def _roots_of(known: dict[str, Path], prefix: str) -> set[str]:
+    return {m for m in known if m == prefix or m.startswith(prefix + ".")}
+
+
 def _production_reachable() -> tuple[set[str], dict[str, Path]]:
     """Lambda handler と CLI の全 module を根として、import で到達する module の集合。"""
     known = _module_files()
-    roots = {
-        m
-        for m in known
-        if m.startswith(("jstock_advisor.lambda_handlers.", "jstock_advisor.cli."))
-        or m in {"jstock_advisor.lambda_handlers", "jstock_advisor.cli"}
-    }
+    roots = _roots_of(known, _HANDLER_ROOT_PREFIX) | _roots_of(known, _CLI_ROOT_PREFIX)
     assert len(roots) > 20  # handler と CLI を根にできている(空振りでない)
     return _reachable(roots, known), known
+
+
+def _reachable_from_root(prefix: str) -> set[str]:
+    """片方の根(handler だけ / CLI だけ)から import で到達する module の集合。"""
+    known = _module_files()
+    roots = _roots_of(known, prefix)
+    assert roots  # 根が空でない(空振りでない)
+    return _reachable(roots, known)
 
 
 # --- (0) 先行: 既存の仕組みは本 PR で変更しない ---
@@ -211,13 +222,49 @@ def test_no_handler_or_cli_reaches_an_unconnected_module() -> None:
     assert offenders == []
 
 
-def test_the_only_allocation_modules_reachable_from_production_are_the_off_shadow_frame() -> None:
-    """配分に関係する module で Production から到達できるのは、出荷 OFF の Shadow の枠(Q')だけ。"""
-    reached, _ = _production_reachable()
-    assert sorted(m for m in reached if "allocation" in m) == [
-        "jstock_advisor.domain.signals.allocation_shadow_config",
-        "jstock_advisor.services.allocation_shadow_service",
-    ]
+#: 配分系の module のうち、handler の根から到達してよいもの = 出荷 OFF の Shadow の枠(Q')だけ。
+#: ★ F2-2b(配線)で handler から `allocation_shadow_compute` へ到達させると、この集合は
+#: 2 → 8 件(6 行の追加)になり、★ 鳴る `_UNCONNECTED_NAME_TOKENS` が 6 語
+#: (allocation_inputs / allocation_policy / allocation_shadow_record / expected_return /
+#: portfolio_allocation / raer)★、さらに ★ `_UNCONNECTED_PREFIXES` の
+#: `domain.valuation.expected_return` にも到達する ★(独立レビューの実測。#605 …6160204670)。
+#: ★『行を足すだけ』では CI は通らない。prefix の除外は上の規則どおり『接続を許す変更 =
+#: USER の承認の記録(Issue 番号)』を要する ★。CLI の集合には触れない
+_ALLOCATION_MODULES_REACHABLE_FROM_HANDLERS = [
+    "jstock_advisor.domain.signals.allocation_shadow_config",
+    "jstock_advisor.services.allocation_shadow_service",
+]
+#: CLI の根から到達してよい配分系の module(#605 最小 CLI。読取専用。5 件の完全一致)。
+#: ★ 重い `allocation_shadow_record`(配分・RAER の module を推移的に import する)・
+#: `allocation_shadow_compute` は含めない = CLI は記録を辞書として読むだけ ★。
+#: handler の網(_UNCONNECTED_NAME_TOKENS)は外していない
+_ALLOCATION_MODULES_REACHABLE_FROM_CLI = [
+    "jstock_advisor.cli.allocation",
+    "jstock_advisor.cli.allocation_labels",
+    "jstock_advisor.domain.notification.allocation_shadow_cli_renderer",
+    "jstock_advisor.domain.notification.allocation_shadow_cli_view",
+    "jstock_advisor.infrastructure.aws.allocation_shadow_reader",
+]
+
+
+def test_the_only_allocation_modules_reachable_from_handlers_are_the_off_shadow_frame() -> None:
+    """handler の根から到達できる配分系 = 出荷 OFF の Shadow の枠(Q')だけ(完全一致)。"""
+    reached = _reachable_from_root(_HANDLER_ROOT_PREFIX)
+    assert sorted(m for m in reached if "allocation" in m) == (
+        _ALLOCATION_MODULES_REACHABLE_FROM_HANDLERS
+    )
+
+
+def test_the_only_allocation_modules_reachable_from_the_cli_are_the_read_only_ones() -> None:
+    """CLI の根から到達できる配分系 = 読取専用の CLI の 5 module だけ(完全一致)。"""
+    reached = _reachable_from_root(_CLI_ROOT_PREFIX)
+    assert sorted(m for m in reached if "allocation" in m) == _ALLOCATION_MODULES_REACHABLE_FROM_CLI
+
+
+def test_the_cli_does_not_reach_the_heavy_record_or_compute_modules() -> None:
+    """CLI は記録の組み立て・計算の組み立て(配分・RAER を推移的に import する)へ到達しない。"""
+    reached = _reachable_from_root(_CLI_ROOT_PREFIX)
+    assert not [m for m in reached if "allocation_shadow_record" in m or "shadow_compute" in m]
 
 
 # --- (1) 有効化の経路の集合は PR の前後で差分 0(全走査) ---

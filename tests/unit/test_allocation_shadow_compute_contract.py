@@ -610,6 +610,21 @@ def test_a_computed_owner_gives_a_valid_record_that_replays_and_leaks_nothing(
     assert set(computed.result.facts) == {"status", "candidates", "allocated"}
 
 
+def test_the_record_has_no_holding_identifier_or_holding_stock_name(tmp_path: Path) -> None:
+    """R1 の品質条件: 保有 ID(owner#銘柄)・保有の銘柄の名前・株数を記録に出さない。"""
+    reader = _standard_reader()
+    inputs = _ready(tmp_path, reader)
+
+    record = _owner(inputs, reader).record
+
+    assert record is not None
+    blob = json.dumps(record, ensure_ascii=False)
+    assert f"{_SENTINEL_OWNER}#" not in blob
+    assert "holding_id" not in blob
+    assert "9001" not in blob  # 保有の銘柄コードは記録に出ない(集計金額だけ)
+    assert "100000" not in blob.replace("100000000", "")  # 株数(100,000 株)は出ない
+
+
 def test_the_record_carries_the_candidate_rows_with_raer_inputs_and_provenance(
     tmp_path: Path,
 ) -> None:
