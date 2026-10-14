@@ -174,6 +174,20 @@ _SCENARIOS: list[tuple[str, Any, dict[str, Any] | None]] = [
     ("no-trading-value", _NIHON_SHINYAKU, {"avg_trading_value": None}),
     ("auto-parts-no-earnings-date", _TACHI_S, {"business_days_to_earnings": None}),
     ("auto-parts-no-trading-value", _TACHI_S, {"avg_trading_value": None}),
+    # 業種の文字列が取れず(セクターが UNKNOWN)、銘柄分類(景気型)だけで景気業種に該当する場面。
+    # 読み手の『観測できなかった語 − flags』が受ける経路の生産側を固定する(サブちゃんの SHOULD)
+    (
+        "unknown-sector-cyclical-by-stock-type",
+        _NIHON_SHINYAKU,
+        {
+            "financial": _build_snapshot(_NIHON_SHINYAKU).financial.model_copy(
+                update={"industry": None, "sector": None}
+            ),
+            "stock_type_classification": _build_snapshot(
+                _NIHON_SHINYAKU
+            ).stock_type_classification.model_copy(update={"types": [StockType.CYCLICAL]}),
+        },
+    ),
 ]
 
 
