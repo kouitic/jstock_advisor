@@ -513,6 +513,14 @@ def test_the_by_owner_table_appears_only_when_asked_and_uses_the_short_display_n
     assert "kv1" not in text
 
 
+def test_the_output_names_the_rule_that_counted_the_days() -> None:
+    """『数える日』の規則は暫定。規則が変わると『数えた日数 / 10』の意味が変わるため、出所を出力に残す。"""
+    summary, report = _canary_summary()
+    payload = report_to_dict(report, summary)
+    assert payload["counting_rule_source"] == report.rule_source == COUNTING_RULE_SOURCE
+    assert "6165459615" in payload["counting_rule_source"]
+
+
 def test_the_report_dict_is_json_serialisable_and_deterministic() -> None:
     summary, report = _canary_summary()
     first = json.dumps(report_to_dict(report, summary), ensure_ascii=False, sort_keys=True)
