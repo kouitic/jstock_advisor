@@ -1,20 +1,30 @@
 """出荷 config の issue_creation_enabled の固定(Issue #837。#508 の activation)。
 
-## 出荷値は false(10/12 のリリースでは有効化しない)
+## 出荷値は true(有効化の準備。★ USER の本番有効化の承認まで Draft・merge しない ★)
 
 #876 で出荷値を true にしたが、新規 Issue の作成に occurrence 単位の gate・日あたりの上限が無く、
 既存の Issue が closed の間は同じ障害の signal ごとに新規 Issue が立つ(独立確認: #188
 issuecomment-6114701122)。USER 判断(#122 issuecomment-6114810773 の【1】)により、10/12 の
-リリースでは自動起票を有効化せず、出荷値を false に戻す。抑止機構の実装後に、次回のリリースで
-true にする(その切替は別の USER 承認)。
+リリースでは自動起票を有効化せず、出荷値を false に戻した。その後、抑止機構(#926)が Production へ
+反映され、USER 決定(#122 issuecomment-6174293468 の 3・issuecomment-6175615095)で
+『有効化の準備を承認・起票上限値を承認(360 分 / 2 / 5 / 10)・Production での
+issue_creation_enabled = true の反映は未承認』となった。本 PR で出荷値を true にする。
+
+★ 出荷値 = true + 出荷の上限値(承認済み)= 本番に反映されれば実際に GitHub Issue が
+自動起票される構成 ★。
+ゆえに本 PR の安全の主張は『true でも立たない』ではなく『USER の個別承認(ChangeSet 確認後)まで
+本番に出さない』(Draft のまま merge しない・同梱の可否は SHA 固定の承認時に USER が判断)。
+有効化後の挙動(上限・最小間隔・自動停止)は
+test_issue_837_shipped_activation_behaviour.py が固定する。
 
 ## 何を検証するか
 
-    (a) 出荷 config は false で、YAML の真偽値として読める(引用符つきの文字列ではない。
-        `"false"` などは不可。YAML の `no` / `off` は bool の False として読まれ、値も型も同じ)。
-        他の値(dedup_window_minutes など)・キーの集合・label は #876 の前後で変えていない
-    (b) 出荷 config のまま(テスト側で config を上書きしない)なら、配線(環境変数)が揃っていても
-        GitHub を一切呼ばない。LINE は送られ、状態は SENT のまま(これが今回の Production の状態)
+    (a) 出荷 config は true で、YAML の真偽値として読める(引用符つきの文字列ではない。
+        `"true"` などは不可)。他の値(dedup_window_minutes など)・キーの集合・label は変えていない。
+        モデルの既定値は false のまま(key が消えても有効にならない = fail-closed)
+    (b) ★ 出荷 config のまま(テスト側で config を上書きしない)+ 配線 + 出荷の上限値(承認済み)で、
+        GitHub Issue を 1 件作成し、出荷 config の label を付ける ★。
+        LINE は 1 通・状態は SENT(= 本番に反映されれば実際に起票される構成の固定)
     (b') 有効の config(テスト側で明示的に true にする)と配線があれば、GitHub Issue を 1 件作成し、
         出荷 config の label を付ける(有効化したときの経路が壊れていないことの固定)。
         ★ Issue #926 以降は、新規起票の上限値(config/incident_issue_limits.yaml)が決定済みで
@@ -73,19 +83,19 @@ _NOW = dt.datetime(2026, 9, 25, 0, 0, tzinfo=dt.UTC)
 # --- (a) 出荷 config -----------------------------------------------------------------------
 
 
-def test_shipped_config_keeps_issue_creation_disabled_as_a_real_boolean() -> None:
+def test_shipped_config_enables_issue_creation_as_a_real_boolean() -> None:
     raw = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8"))
-    assert raw["issue_creation_enabled"] is False  # 引用符つきの文字列("false" など)ではない
-    assert load_config().incident_notification.issue_creation_enabled is False
+    assert raw["issue_creation_enabled"] is True  # 引用符つきの文字列("true" など)ではない
+    assert load_config().incident_notification.issue_creation_enabled is True
 
 
-def test_shipped_config_has_the_known_keys_and_only_the_flag_is_off() -> None:
+def test_shipped_config_has_the_known_keys_and_only_the_flag_is_on() -> None:
     raw = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8"))
     assert raw == {
         "version": 1,
         "dedup_window_minutes": 30,
         "claim_stale_minutes": 5,
-        "issue_creation_enabled": False,
+        "issue_creation_enabled": True,
         "github_issue_claim_timeout_minutes": 10,
         "issue_labels": ["production-incident", "auto-generated"],
     }
@@ -251,28 +261,29 @@ def _decide_limits(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-# --- (b) 出荷 config のまま: 配線が揃っていても GitHub を呼ばない(今回の Production の状態) ------
+# --- (b) 出荷 config のまま(flag = true)+ 出荷の上限値(承認済み): 起票する(有効化後の構成)-----
 
 
-def test_with_shipped_config_and_full_wiring_github_is_never_called(
+def test_with_shipped_config_and_full_wiring_exactly_one_issue_is_created(
     monkeypatch: pytest.MonkeyPatch, line: _RecordingLineClient, secret_arn: str
 ) -> None:
     _wire(monkeypatch, secret_arn)
-    fake = _install_urlopen(monkeypatch, [])
+    fake = _install_urlopen(monkeypatch, [_TOKEN, _ISSUE])
     message = _alarm_message()
 
-    # handler の load_config を上書きしない = 出荷 config がそのまま使われる。
-    # 同じ signal を 3 回届けても(再配信・再試行を想定)、GitHub は一度も呼ばれない
-    for _ in range(3):
-        result = handler_module.handler(_sns_event(message), None)
-        assert result == {"processed": 1}
+    # handler の load_config・上限値を上書きしない = 出荷の config・上限値(承認済み)を使う。
+    # (同じ occurrence の再配信で新規 Issue が増えないことは shipped_activation_behaviour 側)
+    result = handler_module.handler(_sns_event(message), None)
+    assert result == {"processed": 1}
 
-    assert fake.requests == []  # installation token の取得も Issue の作成もない
+    assert len(fake.requests) == 2  # installation token の取得 + Issue の作成(1 回だけ)
+    created = json.loads(fake.requests[1].data.decode("utf-8"))
+    assert created["labels"] == ["production-incident", "auto-generated"]
     assert len(line.sent) == 1  # LINE は 1 通(2 回目以降は LINE 側の dedup で抑止される)
     state = tracker.get_incident_state(_fingerprint_of(message))
     assert state["status"] == "SENT"
-    assert "github_issue_create_status" not in state  # 無効の間は状態も書かない
-    assert "github_issue_number" not in state
+    assert state["github_issue_create_status"] == "CREATED"
+    assert state["github_issue_number"] == 7
 
 
 # --- (b') 有効の config と配線があれば、起票する(有効化後の経路) --------------------------------
