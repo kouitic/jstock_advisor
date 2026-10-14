@@ -140,7 +140,7 @@ Parameters:
       全件処理は起動時に拒否される(段階導入の安全側デフォルトと対になる二重の安全策)。
   GithubAppSecretArn:
     Type: String
-    Default: "arn:aws:secretsmanager:ap-northeast-1:970547364058:secret:jstock/github-app-not-configured"
+    Default: "arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:jstock/github-app-not-configured"
     Description: >
       振り返り機能改修(2026-08)。週次改善レビューのGitHub Issue自動起票に使う
       GitHub App認証情報({"app_id","installation_id","private_key"}のJSON)を
