@@ -211,6 +211,9 @@ _REVIEWED_CURRENT_HANDLED_FAILURE_REASON_CODES = frozenset(
         "HOLDINGS_WATCHLIST_RUNTIME_CONFIG_STALE_CACHE_USED",
         "HOLDINGS_WATCHLIST_RUNTIME_CONFIG_FALLBACK_USED",
         "HOLDINGS_WATCHLIST_KILL_SWITCH_FETCH_FAILED",
+        # trading_pause_service.py(Issue #670 HF-5。売買一時停止設定の取得失敗によるfail-safe。
+        # envelope辞書に直接記載。1箇所)
+        "LINE_WEBHOOK_TRADING_PAUSE_CONFIG_FETCH_FAILED",
     }
 )
 
@@ -534,6 +537,8 @@ _REVIEWED_HANDLED_FAILURE_FILES = frozenset(
         "services/shareholder_benefit_registry_service.py",
         # Issue #669(HF-4)
         "services/holding_decision_runtime_config_service.py",
+        # Issue #670(HF-5)
+        "services/trading_pause_service.py",
     }
 )
 
@@ -768,6 +773,10 @@ _REVIEWED_INCIDENT_CONTENT_LABELS = {
     ),
     "HOLDINGS_WATCHLIST_KILL_SWITCH_FETCH_FAILED": (
         "通知設定を取得できなかったため、投資判断の通知を止めた状態で処理を続けています"
+    ),
+    # Issue #670(HF-5): ★ PROVISIONAL(暫定の文言。USERの承認なし)。deploy前にUSERの確認が要る。
+    "LINE_WEBHOOK_TRADING_PAUSE_CONFIG_FETCH_FAILED": (
+        "売買登録の一時停止の設定を取得できなかったため、安全側で売買登録を停止しています"
     ),
     "CLOUDWATCH_ALARM": "システムの監視アラームが検知されました",
     "OTHER": "技術的な問題を検知しました",

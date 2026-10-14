@@ -198,6 +198,15 @@ class IncidentContent(StrEnum):
     HOLDINGS_WATCHLIST_KILL_SWITCH_FETCH_FAILED = (
         "通知設定を取得できなかったため、投資判断の通知を止めた状態で処理を続けています"
     )
+    # Issue #670(HF-5): ★ PROVISIONAL(暫定の文言)。この「内容」文についてのUSERの承認は無い
+    # (USER承認の範囲は、暫定の文面で実装してよく、deploy前にUSERが文面を承認する、という
+    # 進め方のみ)。『技術的な取得の失敗により、安全側で売買登録を停止している』ことを伝える
+    # 暫定案(意図的な一時停止ではない)。LINEの会話型UIの『売買登録』が止まる事実を述べ、
+    # 投資判断(BUY/SELLの通知)の停止とは区別する。利用者に分かりやすいかは未検証。deploy前に
+    # USERの確認が要る項目としてPR本文に載せる(「USER決定」ではない)。
+    LINE_WEBHOOK_TRADING_PAUSE_CONFIG_FETCH_FAILED = (
+        "売買登録の一時停止の設定を取得できなかったため、安全側で売買登録を停止しています"
+    )
     CLOUDWATCH_ALARM = "システムの監視アラームが検知されました"
     OTHER = "技術的な問題を検知しました"  # 対応表に無いreason_codeの落ち先
 
@@ -292,6 +301,12 @@ _REASON_CODE_TO_CONTENT: dict[str, IncidentContent] = {
     ),
     "HOLDINGS_WATCHLIST_KILL_SWITCH_FETCH_FAILED": (
         IncidentContent.HOLDINGS_WATCHLIST_KILL_SWITCH_FETCH_FAILED
+    ),
+    # Issue #670(HF-5。発行元 = services/trading_pause_service.py の
+    # _notify_fetch_failure_safely。モジュール定数経由)。内容文は PROVISIONAL
+    # (IncidentContent の該当行のコメント参照)。
+    "LINE_WEBHOOK_TRADING_PAUSE_CONFIG_FETCH_FAILED": (
+        IncidentContent.LINE_WEBHOOK_TRADING_PAUSE_CONFIG_FETCH_FAILED
     ),
     "CloudWatchAlarm": IncidentContent.CLOUDWATCH_ALARM,
 }

@@ -44,13 +44,15 @@ _TARGETS: dict[str, str] = {
     "WatchlistWorkerFunction": "AllowWatchlistWorkerPublish",
     "WatchlistTerminalFailureHandlerFunction": "AllowWatchlistTerminalFailureHandlerPublish",
     "EvaluationFunction": "AllowEvaluationPublish",
+    # Issue #670(HF-5): 売買一時停止の設定の取得失敗の通知(LINE webhook)。意図して追加
+    "LineWebhookFunction": "AllowLineWebhookPublish",
 }
 _RECONCILER = "WatchlistBatchReconcilerFunction"
-# 対象外の6関数(publish_incident_envelope()を経由しない。grepで確認)
+# 対象外の5関数(publish_incident_envelope()を経由しない。grepで確認。LINE webhookは
+# Issue #670で対象へ移した)
 _OTHERS = (
     "DisclosureCheckFunction",
     "IncidentNotifierFunction",
-    "LineWebhookFunction",
     "MonthlyReviewFunction",
     "QuarterlyReviewFunction",
     "WeeklyReviewFunction",
@@ -96,9 +98,9 @@ def test_t1_target_function_has_the_topic_arn_env(name: str) -> None:
     assert variables[_ENV_KEY] == _TOPIC_REF
 
 
-def test_t1_all_eight_targets_are_covered() -> None:
-    assert len(_TARGETS) == 8
-    assert len(set(_TARGETS.values())) == 8
+def test_t1_all_nine_targets_are_covered() -> None:
+    assert len(_TARGETS) == 9
+    assert len(set(_TARGETS.values())) == 9
 
 
 # --- T2 -------------------------------------------------------------------------
@@ -118,7 +120,7 @@ def test_t2_target_function_can_publish_only_to_the_incident_topic(name: str) ->
 # --- T3 -------------------------------------------------------------------------
 
 
-def test_t3_topic_policy_has_ten_statements_with_unique_sids() -> None:
+def test_t3_topic_policy_has_eleven_statements_with_unique_sids() -> None:
     statements = _topic_policy_statements()
     sids = [s["Sid"] for s in statements]
     assert sids == [
@@ -132,8 +134,9 @@ def test_t3_topic_policy_has_ten_statements_with_unique_sids() -> None:
         "AllowWatchlistWorkerPublish",
         "AllowWatchlistTerminalFailureHandlerPublish",
         "AllowEvaluationPublish",
+        "AllowLineWebhookPublish",
     ]
-    assert len(set(sids)) == len(sids) == 10  # Sidの重複はEXECUTE時に失敗する(#557)
+    assert len(set(sids)) == len(sids) == 11  # Sidの重複はEXECUTE時に失敗する(#557)
 
 
 @pytest.mark.parametrize(("name", "sid"), list(_TARGETS.items()))
@@ -148,11 +151,11 @@ def test_t3_new_statement_grants_exactly_the_function_role(name: str, sid: str) 
     }
 
 
-def test_t3_principals_map_one_to_one_to_the_eight_roles() -> None:
+def test_t3_principals_map_one_to_one_to_the_nine_roles() -> None:
     new = [s for s in _topic_policy_statements() if s["Sid"] in _TARGETS.values()]
     principals = sorted(s["Principal"]["AWS"]["Fn::GetAtt"] for s in new)
     assert principals == sorted(f"{name}Role.Arn" for name in _TARGETS)
-    assert len(set(principals)) == 8
+    assert len(set(principals)) == 9
 
 
 def test_t3_cloudwatch_alarm_statement_is_the_only_service_principal() -> None:
@@ -272,6 +275,12 @@ _EXPECTED_ENV_KEYS = {
         "WEEKLY_AGGREGATE_WRITE_ENABLED",
         "WEEKLY_EVALUATION_AGGREGATE_TABLE",
     ],
+    # Issue #670(HF-5): INCIDENT_NOTIFICATION_TOPIC_ARNは意図して追加
+    "LineWebhookFunction": [
+        "CANDIDATE_UNIVERSE_CACHE_BUCKET",
+        "INCIDENT_NOTIFICATION_TOPIC_ARN",
+        "LINE_CHANNEL_SECRET",
+    ],
 }
 _EXPECTED_STATEMENT_SIDS = {
     "BuyCandidatesFunction": [
@@ -326,6 +335,13 @@ _EXPECTED_STATEMENT_SIDS = {
         "PutEvaluationRunSummaryAudit",
         "PublishIncidentNotification",
     ],
+    # Issue #670(HF-5): PublishIncidentNotificationは意図して追加(末尾)
+    "LineWebhookFunction": [
+        "DynamoDbCrudAccess",
+        "AvailableCashAccess",
+        "TradingPauseConfigConditionCheckAccess",
+        "PublishIncidentNotification",
+    ],
 }
 # Policiesのエントリ数(SAMのpolicy templateを含む。配線で+1)
 _EXPECTED_POLICY_ENTRIES = {
@@ -337,6 +353,7 @@ _EXPECTED_POLICY_ENTRIES = {
     "WatchlistWorkerFunction": 4,
     "WatchlistTerminalFailureHandlerFunction": 17,
     "EvaluationFunction": 5,
+    "LineWebhookFunction": 11,
 }
 
 
