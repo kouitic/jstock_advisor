@@ -2718,6 +2718,15 @@ Resources:
               AWS: !GetAtt EvaluationFunctionRole.Arn
             Action: sns:Publish
             Resource: !Ref IncidentNotificationTopic
+          # Issue #670(HF-5): 売買一時停止の設定の取得失敗(fail-safe)の通知を発行する
+          # LINE webhook関数の実行ロールを個別に許可する(上と同じ方式。Resource="*"・
+          # ワイルドカードPrincipalは使わない)。Sidは11件すべて一意(#557)。
+          - Sid: AllowLineWebhookPublish
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt LineWebhookFunctionRole.Arn
+            Action: sns:Publish
+            Resource: !Ref IncidentNotificationTopic
 
   # fingerprint(#502 compute_fingerprint()の出力。SHA-256 hex 64桁)をPKとする
   # claim/dedup状態(infrastructure.aws.incident_state_tracker.py参照)。
@@ -3846,6 +3855,10 @@ Resources:
           # 無かったため常に全ソース失敗しstock_codeへフォールバックしていた
           # (画面上「8306(8306)」のように表示される不具合)。JPXソース用のバケット名を渡す。
           CANDIDATE_UNIVERSE_CACHE_BUCKET: !Ref CandidateUniverseCacheBucket
+          # Issue #670(HF-5): 売買一時停止の設定を取得できずfail-safe(一時停止)へ倒れたとき、
+          # HANDLED_FAILUREをUSERへ通知する(services/trading_pause_service.py)。下の
+          # PublishIncidentNotification Statementとセット。
+          INCIDENT_NOTIFICATION_TOPIC_ARN: !Ref IncidentNotificationTopic
       Policies:
         # LINEボタン起点会話型UI(2026-08)のconversation_commit.pyがTransactWriteItems
         # で複数テーブルを原子的に更新する(実装プランv2 3節)。TransactWriteItemsは
@@ -3938,6 +3951,15 @@ Resources:
                 - !GetAtt TradingPauseConfigTable.Arn
                 - !Sub "${TradingPauseConfigTable.Arn}/index/*"
         - S3ReadPolicy: { BucketName: !Ref CandidateUniverseCacheBucket }
+        # Issue #670(HF-5): HANDLED_FAILURE通知をIncidentNotificationTopic限定でpublishする
+        # (Resource="*"は付与しない。#725の他関数と同じ内容。**このIAM追加は本番へ反映
+        # されるまで効かない**ので、反映前はenv変数も無く通知は送られない)。
+        - Statement:
+            - Sid: PublishIncidentNotification
+              Effect: Allow
+              Action: sns:Publish
+              Resource:
+                - !Ref IncidentNotificationTopic
       Events:
         Webhook:
           Type: HttpApi
