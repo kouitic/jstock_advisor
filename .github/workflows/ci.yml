@@ -17,6 +17,14 @@ on:
         description: "true なら tests/conftest.py の番号を定数 0 にする(重複を起こす変異)"
         required: false
         default: "false"
+      baseline:
+        description: "true なら tests/conftest.py を origin/main の版へ戻す(変更前の測定)"
+        required: false
+        default: "false"
+      count_dirs:
+        description: "true なら --basetemp を固定して、終了後に作られたディレクトリの数を数える"
+        required: false
+        default: "false"
       label:
         description: "この run の目印"
         required: false
@@ -42,6 +50,15 @@ jobs:
         run: |
           sed -i 's/f"t{next(_store_dir_counter)}"/"t0"/' tests/conftest.py
           git diff --stat
-      - run: python -m pytest -q ${{ inputs.pytest_args }}
+      - if: ${{ inputs.baseline == 'true' }}
+        run: |
+          git checkout origin/main -- tests/conftest.py
+          git status --short
+      - run: python -m pytest -q ${{ inputs.pytest_args }} ${{ inputs.count_dirs == 'true' && '--basetemp=/tmp/bt' || '' }}
         env:
           PYTHONHASHSEED: ${{ inputs.hashseed }}
+      - if: ${{ always() && inputs.count_dirs == 'true' }}
+        run: |
+          echo "top-level dirs under basetemp: $(find /tmp/bt -mindepth 1 -maxdepth 1 -type d | wc -l)"
+          echo "dirs named like tmp_path (excluding default_store): $(find /tmp/bt -mindepth 1 -maxdepth 1 -type d ! -name default_store | wc -l)"
+          echo "default_store dirs: $(find /tmp/bt/default_store -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"
