@@ -660,7 +660,7 @@ def test_c7_every_cli_construction_of_the_service_opts_out_of_notifications() ->
     不在で成り立っているが、将来 CLI から is_buy_sell_paused() を呼ぶ・環境変数が入る変更でも、
     CLI は通知しない。cli/ の TradingPauseService() の生成はすべて notify_fetch_failures=False。"""
     constructions = 0
-    for path in sorted((_PACKAGE_ROOT / "cli").glob("*.py")):
+    for path in sorted((_PACKAGE_ROOT / "cli").rglob("*.py")):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if not isinstance(node, ast.Call):
                 continue
