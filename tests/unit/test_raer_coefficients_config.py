@@ -459,7 +459,7 @@ def test_only_the_shadow_wiring_imports_the_coefficients_loader() -> None:
         for path in sorted(_SRC.rglob("*.py"))
         if path != _MODULE_PATH and "raer_coefficients_config" in path.read_text(encoding="utf-8")
     ]
-    # 読むのは F2-2b の配線(出荷 OFF の Shadow の枠。設定 ON のときだけ import される)だけ
+    # 読むのは F2-2b の配線(出荷 SHADOW の Shadow の枠。設定 ON のときだけ import される)だけ
     assert importers == ["lambda_handlers/allocation_shadow_wiring.py"]
 
 
