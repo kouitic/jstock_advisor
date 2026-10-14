@@ -5937,7 +5937,7 @@ C  上限を超えた試行の数を 0 に戻してから再開する(下。追�
 ```bash
 # 例外操作 C の 1 つ目: 上限を超えた試行の数の初期化(kill switch がまだ入っている間に行う)。
 # SET_AT は上の再開のコマンドと同じ値(38.3 で読んだ kill_switch_set_at)。
-WINDOW=$(TZ=JST-9 date +%F)   # 今日(JST)の窓の id。TZ=Asia/Tokyo へ置き換えない(UTC へ落ちて 9 時間ずれる)
+WINDOW=$(TZ=JST-9 date +%F)   # 今日(JST)の窓の id。TZ=Asia/Tokyo へ置き換えない(UTC へ落ちて時刻が 9 時間ずれる)
 [[ "$SET_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+[+-][0-9]{2}:[0-9]{2}$ ]] && [[ "$WINDOW" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] && preflight && aws dynamodb update-item --table-name "$TABLE" \
   --key '{"fingerprint": {"S": "__control__:github_issue"}}' \
   --update-expression "SET global_denied_count = :zero" \
@@ -5949,7 +5949,7 @@ WINDOW=$(TZ=JST-9 date +%F)   # 今日(JST)の窓の id。TZ=Asia/Tokyo へ置�
 ・condition-expression が確かめるもの: 停止中である(github_issue_kill_switch = true)/ 停止の理由が自動(AUTO_GLOBAL_FLOOD)/ 確認した、その停止である
   (kill_switch_set_at が一致)/ 数えている窓が今日(JST)の窓である(global_denied_window_id = WINDOW)。どれかが違えば
   ConditionalCheckFailedException になる = 何も変わらない(停止していない・手動の停止・窓が古い・別の停止のときに、件数を書き換えない)
-・WINDOW は JST の日付(TZ=JST-9 の date)。★ TZ=JST-9 を TZ=Asia/Tokyo へ置き換えない ★(この環境の Git Bash では Asia/Tokyo が認識されず、静かに UTC へ落ちて日付が最大 9 時間ずれる。ずれると窓が一致せず条件が成立しないか、前日の窓を指す)。日付が替わる直前・直後に実行すると窓が一致せず成立しない(その場合は通常の手順で再開する)
+・WINDOW は JST の日付(TZ=JST-9 の date)。★ TZ=JST-9 を TZ=Asia/Tokyo へ置き換えない ★(この環境の Git Bash では Asia/Tokyo が認識されず、静かに UTC へ落ちて時刻が 9 時間ずれ、JST 午前 0 時〜9 時前には日付が前日になる場合がある。前日の窓を指すと、窓が一致せず条件が成立しない)。日付が替わる直前・直後に実行すると窓が一致せず成立しない(その場合は通常の手順で再開する)
 ・全体の作成件数 global_created_count は戻さない(上限の意味を変えない)
 ・項目は DELETE しない。global_denied_window_id も変えない
 ・成立した後、続けて上の『通常の手順』の解除のコマンド(同じ SET_AT)を実行する(2 つ目)
