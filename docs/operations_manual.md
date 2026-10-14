@@ -6155,7 +6155,7 @@ jstock allocation today --backend dynamodb --aws-region ap-northeast-1 \
 すべての所有者の記録があります                      正常(終了コード 0)。★ 索引の件数が互いに整合し〔試行 = 記録 + 未記録、記録 = 載せた符号の数〕、すべての記録が読めた場合だけ ★。件数が矛盾する索引・記録が欠けた符号・解釈できない値がある日は、この見出しを出さない(終了コード 3)
 記録できなかった所有者があります                    予算切れ・書込の失敗など。理由別の件数が出る。再実行で後から追加された記録は先着の索引に載らない(既知の限界)
 Shadow は動きましたが、記録は 0 件です              索引はあるが記録が 0 件。理由別の件数を見る
-Shadow は動きましたが、その日は記録できませんでした   索引なし + 日単位の skip あり。『日単位の skip』の行の理由を見る: KEY_UNAVAILABLE = 鍵の取得に失敗(続けて鍵の理由 NOT_CONFIGURED / ACCESS_DENIED / NOT_FOUND / TIMEOUT / MALFORMED / ERROR と記録できなかった所有者の数。鍵の Secret・IAM・環境変数を運用で確認する。kv1 の殻の手順)/ HOLDINGS_READ_FAILED・RECOMMENDATIONS_READ_FAILED = 入力の読取の失敗 / INPUT_LIMIT_EXCEEDED = 入力の件数の超過 / COEFFICIENTS_UNAVAILABLE = RAER の係数が読めない(入力の失敗の日は、所有者が分からないので件数を持たない)
+Shadow は動きましたが、その日は記録できませんでした   索引なし + 日単位の skip あり。『日単位の skip』の行の理由を見る: KEY_UNAVAILABLE = 鍵の取得に失敗(続けて鍵の理由 NOT_CONFIGURED / ACCESS_DENIED / NOT_FOUND / TIMEOUT / MALFORMED / ERROR と記録できなかった所有者の数。鍵の Secret・IAM・環境変数を運用で確認する。kv1 の殻の手順)/ HOLDINGS_READ_FAILED・RECOMMENDATIONS_READ_FAILED = 入力の読取の失敗 / INPUT_LIMIT_EXCEEDED = 入力の件数の超過 / COEFFICIENTS_UNAVAILABLE = RAER の係数が読めない / TIME_LIMIT = 入力の読取の途中で期限が切れた / COMPUTATION_FAILED = 入力の準備で想定外の例外(入力の失敗の日は、所有者が分からないので件数を持たない)
 その日の索引がありません                           Shadow が未実行、または記録の途中で止まった可能性。記録がある可能性を否定できない。待つか、原因を調べる
 対応していない記録の版、または読めない索引です       schema_version を表示する。CLI の更新が要る可能性
 ```

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import dataclasses
 import datetime as dt
 import inspect
 import json
@@ -1206,3 +1207,49 @@ def test_a_coefficient_set_id_that_is_not_an_identifier_is_rejected(
 
     with pytest.raises(RecordSchemaError):
         validate_items_record({**record, "model": {**record["model"], "coefficient_set_id": bad}})
+
+
+# --- 縮退した日(係数の束が無い)の整合・schema_version を据え置く理由(#603 …6161266213)-------
+
+
+def _record_with_a_raer_value(tmp_path: Path) -> dict[str, Any]:
+    bundle, inputs, result = scenario(tmp_path)
+    record = build_items_record(
+        meta=META, bundle=bundle, cash=CASH, inputs=inputs, result=result, details={}
+    )
+    assert any(row["raer_out"]["value"] is not None for row in record["candidates"])
+    return record
+
+
+def test_a_record_without_a_coefficient_set_cannot_carry_a_raer_value(tmp_path: Path) -> None:
+    """版はあるが係数の束の id が無い記録は、候補に RAER の値を 1 つも持てない(縮退の側の固定)。"""
+    record = _record_with_a_raer_value(tmp_path)
+    validate_items_record(record)  # 束の id がある記録は値を持てる
+
+    degraded = {**record, "model": {**record["model"], "coefficient_set_id": None}}
+    with pytest.raises(RecordSchemaError):
+        validate_items_record(degraded)
+
+    for row in degraded["candidates"]:  # 値が無ければ(縮退の実態)通る
+        row["raer_out"] = {**row["raer_out"], "value": None}
+    validate_items_record(degraded)
+
+
+def test_a_header_only_record_without_a_coefficient_set_is_valid(tmp_path: Path) -> None:
+    record = build_header_record(
+        meta=dataclasses.replace(META, coefficient_set_id=None),
+        bundle=decided_bundle(tmp_path),
+        cash=CashSnapshot(None, None, None),
+        outcome="SKIPPED",
+        skip_reason="COEFFICIENTS_UNAVAILABLE",
+    )
+
+    validate_items_record(record)
+    assert record["model"]["coefficient_set_id"] is None
+
+
+def test_the_schema_version_rule_is_written_in_the_module_docstring() -> None:
+    doc = rec.__doc__ or ""
+
+    assert "旧い形の記録が存在し得るか" in doc
+    assert "配線後は、キーの追加・削除は必ず SCHEMA_VERSION を上げる" in doc

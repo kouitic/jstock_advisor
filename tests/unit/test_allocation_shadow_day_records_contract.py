@@ -44,6 +44,7 @@ from jstock_advisor.domain.signals.allocation_shadow_record import (
     validate_day_skip_record,
     validate_index_record,
 )
+from jstock_advisor.services.allocation_shadow_service import ShadowSkipReason
 
 _REPO = Path(__file__).resolve().parents[2]
 _SIGNALS = _REPO / "src" / "jstock_advisor" / "domain" / "signals"
@@ -520,10 +521,38 @@ _INPUT_FAILURES = (
     "RECOMMENDATIONS_READ_FAILED",
     "INPUT_LIMIT_EXCEEDED",
     "COEFFICIENTS_UNAVAILABLE",
+    "TIME_LIMIT",
+    "COMPUTATION_FAILED",
+)
+_COMPUTE = (
+    Path(__file__).resolve().parents[2]
+    / "src"
+    / "jstock_advisor"
+    / "services"
+    / "allocation_shadow_compute.py"
 )
 
 
-def test_the_day_skip_vocabulary_is_the_key_failure_plus_the_four_input_failures() -> None:
+def _reasons_prepare_batch_inputs_can_return() -> set[str]:
+    """prepare_batch_inputs の AST から、BatchUnavailable(...) の理由を全数集める(手で書かない)。"""
+    tree = ast.parse(_COMPUTE.read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "prepare_batch_inputs"
+    )
+    found: set[str] = set()
+    for node in ast.walk(function):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "BatchUnavailable":
+            reason = node.args[0]
+            # 理由は ShadowSkipReason.X の形だけ(変数・式にしない = 導出が成り立つ前提)
+            assert isinstance(reason, ast.Attribute), ast.dump(reason)
+            assert getattr(reason.value, "id", None) == "ShadowSkipReason", ast.dump(reason)
+            found.add(ShadowSkipReason[reason.attr].value)
+    return found
+
+
+def test_the_day_skip_vocabulary_is_the_key_failure_plus_the_six_input_failures() -> None:
     assert ("KEY_UNAVAILABLE", *_INPUT_FAILURES) == DAY_SKIP_REASONS
 
 
@@ -602,3 +631,28 @@ def test_the_validator_rejects_a_hand_made_record_that_breaks_the_pairing() -> N
     for change in ({"key_unavailable_reason": None}, {"unrecorded_owner_count": None}):
         with pytest.raises(RecordSchemaError):
             validate_day_skip_record({**keyed, **change})
+
+
+def test_every_reason_prepare_batch_inputs_can_return_can_be_written_as_a_day_skip() -> None:
+    """★ 導出の網 ★ prepare_batch_inputs が将来新しい理由を返せば、ここで落ちる(取りこぼし防止)。"""
+    derived = _reasons_prepare_batch_inputs_can_return()
+
+    assert len(derived) >= 6  # 空振り防止: 実際に 6 種が導出されている(AST が空を返していない)
+    assert derived <= set(DAY_SKIP_REASONS)
+    assert derived == set(_INPUT_FAILURES)  # 手書きの一覧との完全一致も併せて残す
+
+
+def test_the_most_likely_input_failures_can_actually_be_written() -> None:
+    for reason in ("TIME_LIMIT", "COMPUTATION_FAILED"):
+        record = build_day_skip_record(
+            business_date=_DATE, batch_id=_BATCH, shadow_mode="SHADOW", reason=reason
+        )
+        validate_day_skip_record(record)
+        assert record["reason"] == reason
+
+
+def test_the_input_failure_words_are_real_shadow_skip_reasons() -> None:
+    """綴り間違いが入ると CLI が『未対応の理由コード』しか出せない(部分集合であることを固定)。"""
+    shadow_reasons = {reason.value for reason in ShadowSkipReason}
+
+    assert set(DAY_SKIP_REASONS) - {"KEY_UNAVAILABLE"} <= shadow_reasons

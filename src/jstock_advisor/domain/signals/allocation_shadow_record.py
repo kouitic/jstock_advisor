@@ -24,6 +24,23 @@ portfolio   総額 / 業種別 / high-risk の保有額(集計金額だけ)
 candidates  銘柄コード・種類・属性・価格と鮮度・RAER の入力と結果・配分の結果
 ```
 
+## schema_version を上げる条件(#603 …6161266213 の判定)
+
+判定の問いは『任意 / 必須』ではなく **『旧い形の記録が存在し得るか』**。この記録の形に
+『任意のキー』は無い(`_check` は不足も余分も拒否する。`_opt` は値が None でよいだけでキーは
+必須)ので、キーの追加・削除は旧い記録を『キー不足』で、新しい記録を旧いコードで
+『allowlist 外』で、双方向に拒否する。
+
+* 旧い形の記録が存在し得ない間は、どんな形の変更でも `SCHEMA_VERSION` を据え置く
+* ★ 1 件でも存在し得るなら、キーの追加・削除は必ず `SCHEMA_VERSION` を上げる
+  (任意・必須に関係なく)★
+
+`model.coefficient_set_id`(#603 小 PR)を据え置いたのは、この形の記録を書ける経路が無いため:
+この module を import する src は `allocation_shadow_compute` だけで、compute を import する src は
+0 件(どちらも契約テストが固定)・Shadow は出荷 OFF(#606 の契約テストが固定)。根拠はコード上の
+到達性のみ(AWS 側の記録の不在は、表の走査が要るため確かめていない)。
+★ F2-2b の配線でこの前提は消える。配線後は、キーの追加・削除は必ず SCHEMA_VERSION を上げる ★
+
 ## 構造的に拒否するもの(allowlist)
 
 * **キー**: 全ての入れ子を含め、定義したキーだけ。未知・不足のキーは拒否(再帰)
@@ -387,6 +404,11 @@ def validate_items_record(record: Mapping[str, Any]) -> None:
     _check(_RECORD_SPEC, record, "record")
     if record["schema_version"] != SCHEMA_VERSION or record["record_kind"] != RECORD_KIND:
         raise _schema_fail("record", "is not this kind or version")
+    if record["model"]["coefficient_set_id"] is None and any(
+        candidate["raer_out"]["value"] is not None for candidate in record["candidates"]
+    ):
+        # 係数の束が無い(縮退)記録に RAER の値は有り得ない(版と束の識別子が同じ束から来る)
+        raise _schema_fail("model", "has no coefficient set but a candidate has a RAER value")
     if record_size_bytes(record) > MAX_RECORD_BYTES:
         raise _schema_fail("record", "is too large")
 
@@ -846,15 +868,18 @@ UNRECORDED_REASONS: Final = (
     "REFUSED",
 )
 
-#: 日単位の skip の理由(語彙)。KEY_UNAVAILABLE = 鍵が取れない日(owner は分かる)/ 他 4 語 =
-#: バッチ共通の入力が作れない日(owner が分からない)。語は ShadowSkipReason の値と同じ
-#: (CLI の語彙表と完全一致で固定)
+#: 日単位の skip の理由(語彙)。KEY_UNAVAILABLE = 鍵が取れない日(owner は分かる)/ 他 6 語 =
+#: バッチ共通の入力が作れない日(owner が分からない)。他 6 語は `prepare_batch_inputs` が返し得る
+#: `BatchUnavailable` の理由の全部(契約テストが AST で導出して ⊆ を固定)で、ShadowSkipReason の
+#: 値の部分集合(CLI の語彙表にも日本語つきで全て有る)
 DAY_SKIP_REASONS: Final = (
     "KEY_UNAVAILABLE",
     "HOLDINGS_READ_FAILED",
     "RECOMMENDATIONS_READ_FAILED",
     "INPUT_LIMIT_EXCEEDED",
     "COEFFICIENTS_UNAVAILABLE",
+    "TIME_LIMIT",
+    "COMPUTATION_FAILED",
 )
 KEY_UNAVAILABLE_DAY_SKIP: Final = "KEY_UNAVAILABLE"
 
