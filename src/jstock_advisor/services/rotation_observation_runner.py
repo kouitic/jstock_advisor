@@ -37,8 +37,9 @@ AuditService・boto3・他の services を import しない(書込・読取は P
   (書込の予約)。runner は『残り時間』を返す注入された関数 `remaining_seconds()` を読取の
   ports へ渡す(runner は時計を読まない)。残りが予約以下になったら読取は部分結果にせず
   失敗(None)を返す → 読めない日 → 最後の回は gap が書ける
-* port の失敗は値(None)で返す契約。port が例外を送出するのは契約違反で
-  `UNEXPECTED_ERROR` になる
+* 読取の port(batch_runs・holdings・calendar)の失敗は値(None)で返す契約。読取の port が
+  例外を送出するのは契約違反で `UNEXPECTED_ERROR` になる。書込の port(sink)は値による失敗の
+  経路を持たないため、その例外は想定された失敗として `WRITE_FAILED` になる(§6)
 
 ## 守ること(契約テストで固定)
 
