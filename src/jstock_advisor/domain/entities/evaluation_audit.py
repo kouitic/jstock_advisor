@@ -2,8 +2,12 @@
 
 通知が送られなかった銘柄について、正常なHOLDなのか、データ不足なのか、
 データ品質チェックでブロックされたのか、処理自体が失敗したのかを区別できるように
-する。既存のAuditLogTable(AuditService)へ出力値の一部として記録されるほか、
-CloudWatch Logsへも構造化して出力し、バッチサマリーの内訳集計に使う。
+する。★ この型自体は永続化されない ★: CloudWatch Logsへ構造化して出力し
+(holdings_watchlist_handler.pyの`holding_evaluation_audit:`のログ行)、バッチサマリーの
+内訳集計に使うだけで、AuditLogTableへは書かれない(Issue #604の設計レビューで実測。
+以前のこのdocstringは『AuditLogTableへ記録』と書いており、実態と違っていた)。
+永続されるのは`HoldingEvaluationRecord`(HoldingEvaluationRecordsTable)で、
+その`authoritative_outcome_category`は`summary_category()`の戻り値を保持した文字列。
 """
 
 from __future__ import annotations

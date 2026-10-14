@@ -1900,7 +1900,10 @@ def test_the_module_defines_and_calls_nothing_that_looks_like_sending_or_saving(
             assert not any(w in name.lower() for w in words), name
 
 
-_ALLOWED_IMPORTERS: set[str] = set()  # この module を import してよい src の module(現時点は無し)
+# この module を import してよい src の module(dormant。SourceEligibility の型だけを使う)
+_ALLOWED_IMPORTERS: set[str] = {
+    "domain/signals/rotation_source_eligibility.py",  # #604 P-a(入替元の適格性の導出)
+}
 
 
 def test_the_module_is_imported_from_nowhere_in_src() -> None:
