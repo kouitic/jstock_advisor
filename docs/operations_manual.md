@@ -6049,3 +6049,67 @@ auto_stop_denied_threshold        全体の上限を超えた試行がこの回�
 ・直接の AWS 操作 = Human Gate の先例: 34.2
 ・異常を知ったときの手順: 27節
 ```
+
+## 39. owner の符号の鍵(Secret)の運用(Issue #925。#128 R1 の kv1。2026-10-14追加)
+
+### 39.1 対象
+
+```
+対象    owner の符号(owner_ref)を HMAC で作る鍵の Secret `AllocationShadowOwnerRefKeyV1`(infra/template.yaml)
+        と、その観測(MetricFilter 2 本・Alarm 2 本)
+作られ方 ChangeSet の EXECUTE で作られる(merge では何も作られない)。値は GenerateSecretString が作り、人は見ない
+読む者  BuyCandidatesFunction / BuyCandidateWorkerFunction の実行 role(GetSecretValue をこの Secret 1 つにだけ付与)
+影響    鍵が取れない日は、その日の Shadow の記録が『日単位の skip』になるだけ。買い判定・通知・本番の配分には影響しない
+```
+
+### 39.2 やってはいけないこと
+
+```
+1 論理 ID `AllocationShadowOwnerRefKeyV1` と Name(<stack 名>/allocation-shadow-owner-ref-key-v1)を変えない
+    → 変えると『置換』になり、新しい鍵が静かに作られる。過去の符号と結べなくなる(実質的な鍵の紛失)
+2 stack を削除・再作成しない(Secret は Retain で残るため、同名の再作成は失敗する)
+3 Secret の値を手で書き換えない(PutSecretValue / コンソールでの編集)。書き換えると過去の符号と結べなくなる
+4 Secret を手で削除しない(削除予約でも、取り戻すまで Shadow の記録は skip になる)
+5 鍵の版を上げたいとき(回転・紛失)は、新しい論理 ID `...V2` を別に追加する。V1 は残す(R1 では実装しない)
+```
+
+### 39.3 ChangeSet(CREATE)で確認する点
+
+```
+・Add = Secret 1 / MetricFilter 2 / Alarm 2。ResourcePolicy は Condition=false の間は作られない
+・Modify = BuyCandidatesFunction・BuyCandidateWorkerFunction(環境変数 1 つ追加)と、その実行 role(Statement 1 つ追加)
+・Remove と Replacement=True が 1 件も無い(1 件でもあれば EXECUTE しない)
+・実行 role のインライン policy が 10,240 バイトの上限に収まる(超えると ChangeSet の EXECUTE が失敗する)
+・Secret の Name が <stack 名>/allocation-shadow-owner-ref-key-v1 である
+```
+
+### 39.4 観測(Alarm)と、BuyCandidateWorkerFunction の log group
+
+```
+設定の不備(1 時間に 1 件以上)  = 鍵の取得が未設定・権限なし・Secret なしで失敗した(デプロイ・権限・資源の不備)
+異常(1 日に 3 件以上)          = タイムアウト・形式不正・その他(一時的な障害・値の不正)
+理由コード → 系統の対応は、実装(殻)が持つ。template は固定の印(ALLOCATION_SHADOW_KEY_UNAVAILABLE_CONFIG /
+..._ANOMALY)を数えるだけ
+
+★ MetricFilter は BuyCandidatesFunction の log group だけに付けてある ★。BuyCandidateWorkerFunction の log group は、
+fan-out(BuyCandidateSqsDispatchEnabled=true)が無効の間は一度も動かないため存在せず、MetricFilter を付けると
+ChangeSet の EXECUTE が失敗する(2026-10-14 に describe-log-groups で確認)。
+fan-out を有効にする前に、Worker の log group へ同じ MetricFilter 2 本を足す変更を、別の PR・ChangeSet で入れること
+(足さないと、fan-out の有効化後は Worker 側で鍵が取れなかった日を Alarm が検知しない)
+```
+
+### 39.5 リソースポリシー(第二の防壁)
+
+```
+Condition `SecretResourcePolicyIsEnabled`(= SecretResourcePolicyEnabled=true)に相乗りする。既定では作られない。
+有効化は 35 節の前提(AdminPrincipalArn / DeployPrincipalArn の実値・事前確認)と、別の USER 承認を要する。
+許可する principal = Admin / Deploy / 上記の実行 role 2 本。観測用 profile・CLI・開発者の role は入らない
+```
+
+### 39.6 この節が決めていないこと
+
+```
+・鍵の回転・紛失時の運用(R1 では実装しない。V2 を別の論理 ID で足す方針のみ)
+・Alarm の通知先の変更(既存の IncidentNotificationTopic。通知の経路は 27 節)
+・Shadow の記録の読み方(CLI の節)
+```

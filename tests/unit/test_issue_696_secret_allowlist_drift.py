@@ -39,6 +39,7 @@ template を deep copy して一部だけを変えた入力で、drift が検出
 
 from __future__ import annotations
 
+import copy
 import fnmatch
 import re
 from typing import Any
@@ -57,6 +58,10 @@ _GET_SECRET_VALUE = "secretsmanager:GetSecretValue"
 _GITHUB_APP_RESOURCE_POLICY = "GithubAppSecretResourcePolicy"
 _COMMON_ALLOWLIST = [{"Fn::Ref": "AdminPrincipalArn"}, {"Fn::Ref": "DeployPrincipalArn"}]
 _ROLE_ARN = re.compile(r"^(?P<function>[A-Za-z0-9]+)Role\.Arn$")
+# github-app secret 以外の、template 内の Secret(論理 ID)。#925 kv1 の鍵の Secret。
+# その Secret だけを Resource に持つ Statement は、github-app secret の層の対象外にする。
+# ★ ワイルドカード・他の Resource を 1 つでも含む Statement は対象に残す(github-app へ届きうる)★
+_OTHER_SECRET_LOGICAL_IDS = frozenset({"AllocationShadowOwnerRefKeyV1"})
 
 
 def _lambda_functions(template: dict[str, Any]) -> list[str]:
@@ -72,6 +77,14 @@ def _grants_get_secret_value(action: str) -> bool:
     return action == "*" or fnmatch.fnmatch(_GET_SECRET_VALUE, action)
 
 
+def _only_other_secrets(resource: Any) -> bool:
+    """Resource が、github-app 以外の既知の Secret の Ref だけ(= github-app secret へ届かない)。"""
+    resources = resource if isinstance(resource, list) else [resource]
+    return bool(resources) and all(
+        isinstance(r, dict) and r.get("Fn::Ref") in _OTHER_SECRET_LOGICAL_IDS for r in resources
+    )
+
+
 def _identity_policy_holders(template: dict[str, Any]) -> set[str]:
     """identity policy(関数の Policies の raw Statement)で GetSecretValue を持つ関数の論理 ID。"""
     holders: set[str] = set()
@@ -84,7 +97,9 @@ def _identity_policy_holders(template: dict[str, Any]) -> set[str]:
                     continue
                 action = statement.get("Action", [])
                 actions = {action} if isinstance(action, str) else set(action)
-                if any(_grants_get_secret_value(a) for a in actions):
+                if any(_grants_get_secret_value(a) for a in actions) and not _only_other_secrets(
+                    statement.get("Resource")
+                ):
                     holders.add(name)
     return holders
 
@@ -289,3 +304,24 @@ def test_a_registry_entry_without_identity_access_is_detected() -> None:
     added = _other_function(template)
     drift = secret_access_drift(template, (*SECRETSMANAGER_RUNTIME_FUNCTIONS, added))
     assert drift == {"registry_but_not_identity": {added}}
+
+
+def test_a_statement_for_another_secret_is_not_a_github_app_holder_but_a_wildcard_one_is() -> None:
+    """#925 kv1: 鍵の Secret だけを指す Statement は対象外。ワイルドカード・混在は対象に残る。"""
+    template = load_template()
+    function = _other_function(template)
+    assert function not in _identity_policy_holders(template)
+
+    def grant(resource: Any) -> dict[str, Any]:
+        copied = copy.deepcopy(template)
+        copied["Resources"][function]["Properties"].setdefault("Policies", []).append(
+            {"Statement": [{"Effect": "Allow", "Action": _GET_SECRET_VALUE, "Resource": resource}]}
+        )
+        return copied
+
+    only_key = grant([{"Fn::Ref": "AllocationShadowOwnerRefKeyV1"}])
+    assert function not in _identity_policy_holders(only_key)
+    assert function in _identity_policy_holders(grant("*"))
+    assert function in _identity_policy_holders(grant([{"Fn::Ref": "GithubAppSecretArn"}]))
+    mixed = grant([{"Fn::Ref": "AllocationShadowOwnerRefKeyV1"}, {"Fn::Ref": "GithubAppSecretArn"}])
+    assert function in _identity_policy_holders(mixed)

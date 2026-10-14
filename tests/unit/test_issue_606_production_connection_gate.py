@@ -506,6 +506,9 @@ _KNOWN_TEMPLATE_PARAMETERS: frozenset[str] = frozenset(
 )
 _KNOWN_TEMPLATE_ENVIRONMENT: frozenset[str] = frozenset(
     {
+        # #925 kv1: owner の符号の鍵の Secret の ARN(値は Secret への Ref だけで、有効化の入口
+        # ではない。下の専用テストで固定)
+        "ALLOCATION_SHADOW_REF_KEY_SECRET_ARN",
         "ALLOW_FULL_MARKET_SCREENING",
         "BUY_CANDIDATES_FUNCTION_NAME",
         "BUY_CANDIDATE_QUEUE_URL",
@@ -695,13 +698,123 @@ def test_no_new_template_parameter_or_lambda_environment_variable() -> None:
     )
 
 
-def test_the_template_has_no_parameter_environment_or_resource_for_a_128_feature() -> None:
-    """infra/template.yaml を全文走査: #128 の機能の Parameter・環境変数・表・Function が無い。"""
-    template = (_REPO / "infra" / "template.yaml").read_text(encoding="utf-8")
-    tokens = re.findall(
-        r"[A-Za-z0-9_]*(?:[Aa]llocation|[Ee]xpected_?[Rr]eturn|[Rr]aer|RAER)\w*", template
+#: #925 kv1(owner の符号の鍵)が template に持ち込む #128 の機能の語の『完全一致』の許可リスト。
+#: ★ 接続を許す変更(許可リストの拡張) ★。USER の承認の記録 = #925 の構成承認(HANAKO が提示。
+#: PR 本文へ Issue コメント番号を残す)。語は『Secret・その ResourcePolicy・MetricFilter・Alarm・
+#: Lambda の環境変数 1 つ』だけで、有効化の入口ではない(下の補償のテストで固定)。
+#: 新しい語は新しい経路であり、この一覧へ足す変更は同じ承認を要する。
+_A_925_KEY_TOKENS: frozenset[str] = frozenset(
+    {
+        "ALLOCATION_SHADOW_KEY_UNAVAILABLE_ANOMALY",
+        "ALLOCATION_SHADOW_KEY_UNAVAILABLE_CONFIG",
+        "ALLOCATION_SHADOW_REF_KEY_SECRET_ARN",
+        "AllocationShadow",
+        "AllocationShadowKeyAnomalyAlarm",
+        "AllocationShadowKeyAnomalyFilter",
+        "AllocationShadowKeyConfigIssueAlarm",
+        "AllocationShadowKeyConfigIssueFilter",
+        "AllocationShadowOwnerRefKeyResourcePolicy",
+        "AllocationShadowOwnerRefKeyV1",
+        # Secret の Name / Alarm の名前の一部(`-` 区切りの小文字)
+        "allocation",
+    }
+)
+_KEY_SECRET_ID = "AllocationShadowOwnerRefKeyV1"
+_KEY_ENV_VARIABLE = "ALLOCATION_SHADOW_REF_KEY_SECRET_ARN"
+_KEY_RESOURCE_TYPES = frozenset(
+    {
+        "AWS::SecretsManager::Secret",
+        "AWS::SecretsManager::ResourcePolicy",
+        "AWS::Logs::MetricFilter",
+        "AWS::CloudWatch::Alarm",
+    }
+)
+#: 『有効化・切替の入口』を示す語(論理 ID・環境変数・Parameter の名前の語に持たせない)
+_SWITCH_WORDS = frozenset(
+    {"mode", "enabled", "enable", "active", "activate", "on", "off", "switch", "toggle", "flag"}
+)
+_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_]*(?:allocation|expected_?return|raer)\w*", re.IGNORECASE)
+
+
+def _template_document() -> dict:  # type: ignore[type-arg]
+    return yaml.load(  # noqa: S506 - 信頼できる repo 内のファイル。タグは無視する loader
+        (_REPO / "infra" / "template.yaml").read_text(encoding="utf-8"), Loader=_IgnoreTagsLoader
     )
-    assert sorted(set(tokens)) == []
+
+
+def _words(name: str) -> set[str]:
+    """名前を語へ分ける(`_`・`-`・`/`・camelCase の境界)。"""
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name)
+    return {w.lower() for w in re.split(r"[\s_\-/]+", spaced) if w}
+
+
+def test_the_template_has_only_the_approved_128_feature_words() -> None:
+    """infra/template.yaml を全文走査: #128 の機能の語は、承認した許可リストと『完全一致』する。
+
+    ★ #925 kv1 で、全文に 1 つも許さない assert から、完全一致の許可リストへ変えた(接続を許す変更)。
+    同時に、大文字小文字を区別しない走査へ強化した(全大文字の名前のすり抜けを閉じる)。
+    許可リストに無い語が 1 つでも増えれば落ちる。緩めた分は下の補償のテストで固定する。
+    """
+    template = (_REPO / "infra" / "template.yaml").read_text(encoding="utf-8")
+    assert set(_TOKEN_PATTERN.findall(template)) == set(_A_925_KEY_TOKENS)
+
+
+def test_the_approved_words_are_the_key_secret_and_its_observation_not_an_entry_point() -> None:
+    """補償: 許可した語は鍵の Secret とその観測(環境変数 1 つを含む)だけで、入口でない。"""
+    document = _template_document()
+    resources = document["Resources"]
+
+    # (1) Parameter に #128 の機能の語を持たせない(有効化の入口を作らない)
+    assert [n for n in document.get("Parameters", {}) if _TOKEN_PATTERN.search(n)] == []
+
+    # (2) 語を持つ資源は 4 種類の Type だけ。Function・Table・Queue・Topic・Rule 等が無い
+    featured = {
+        logical_id: resource["Type"]
+        for logical_id, resource in resources.items()
+        if _TOKEN_PATTERN.search(logical_id)
+    }
+    assert featured, "許可した資源が template に無い(テストが空振り)"
+    assert set(featured.values()) <= _KEY_RESOURCE_TYPES, featured
+
+    # (3) 論理 ID・環境変数の名前に『有効化・切替』の語が無い
+    names = [*featured, _KEY_ENV_VARIABLE]
+    assert [n for n in names if _words(n) & _SWITCH_WORDS] == []
+
+    # (4) 語を持つ環境変数は 1 つだけ。値は Secret への Ref だけ(固定の文字列・Parameter でない)
+    holders: list[tuple[str, str, object]] = []
+    for logical_id, resource in resources.items():
+        variables = resource.get("Properties", {}).get("Environment", {}).get("Variables", {}) or {}
+        holders += [
+            (logical_id, name, value)
+            for name, value in variables.items()
+            if _TOKEN_PATTERN.search(name)
+        ]
+    assert sorted({name for _, name, _ in holders}) == [_KEY_ENV_VARIABLE]
+    assert {logical_id for logical_id, _, _ in holders} == {
+        "BuyCandidatesFunction",
+        "BuyCandidateWorkerFunction",
+    }
+    # tag を無視する loader では、`!Ref X` は対象の名前 X になる
+    assert {value for _, _, value in holders} == {_KEY_SECRET_ID}
+
+    # (5) Secret: 値を template に持たない(GenerateSecretString だけ)・Retain・Name を固定
+    secret = resources[_KEY_SECRET_ID]
+    assert secret["Type"] == "AWS::SecretsManager::Secret"
+    assert secret["DeletionPolicy"] == "Retain" and secret["UpdateReplacePolicy"] == "Retain"
+    properties = secret["Properties"]
+    assert "SecretString" not in properties and "GenerateSecretString" in properties
+    # 256 ビット以上(英数字 62 種なら 43 文字以上)
+    assert properties["GenerateSecretString"]["PasswordLength"] >= 43
+    assert properties["GenerateSecretString"]["ExcludePunctuation"] is True
+
+    # (6) ResourcePolicy は既存の Condition に相乗り(既定では作られない)
+    policy = resources["AllocationShadowOwnerRefKeyResourcePolicy"]
+    assert policy["Condition"] == "SecretResourcePolicyIsEnabled"
+
+    # (7) 観測(MetricFilter・Alarm)は IncidentNotificationTopic だけを通知先にする
+    for logical_id, resource in resources.items():
+        if logical_id in featured and resource["Type"] == "AWS::CloudWatch::Alarm":
+            assert resource["Properties"]["AlarmActions"] == ["IncidentNotificationTopic"]
 
 
 #: #128 の機能の名前を持つ config と、その『役割』。全走査で許可リストと比べる
