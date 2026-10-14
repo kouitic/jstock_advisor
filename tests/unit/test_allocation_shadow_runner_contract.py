@@ -741,6 +741,53 @@ def test_an_invalid_owner_is_refused_and_does_not_stop_the_others() -> None:
     assert index["unrecorded_reasons"] == {"REFUSED": 1}
 
 
+def test_refused_owners_are_logged_by_count_so_that_a_day_of_no_records_is_observable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """★ 符号を作れない owner(空など)が 1 件でもあれば WARNING を 1 行(件数だけ。値は出さない)。
+
+    全員が REFUSED の日は索引も日単位の skip も書かない(根拠が無い)ので、ログが唯一の手がかり。
+    """
+    audit = _Audit()
+
+    with caplog.at_level(logging.INFO):
+        recorded, compute, provider = _run(
+            audit, ["", " "], prepare=lambda deadline, io: SimpleNamespace(owners=("", " "))
+        )
+
+    assert recorded is False
+    assert audit.records == {}  # 全員 REFUSED の日は、記録を 1 件も書かない(従来どおり)
+    assert compute.owners == [] and provider.calls == 0  # 符号を作れないので鍵も取らない
+    warnings = [r for r in caplog.records if "refused" in r.getMessage()]
+    assert len(warnings) == 1
+    assert warnings[0].levelno == logging.WARNING
+    assert "2 owner(s) refused" in warnings[0].getMessage()
+
+
+def test_a_partly_refused_day_logs_the_count_and_still_records_the_others(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    audit = _Audit()
+
+    with caplog.at_level(logging.WARNING):
+        _run(
+            audit,
+            ["", "owner-01"],
+            prepare=lambda deadline, io: SimpleNamespace(owners=("", "owner-01")),
+        )
+
+    assert "1 owner(s) refused" in caplog.text
+    [index] = [r["output_values"] for r in audit.of("allocation_shadow_index")]
+    assert index["recorded_owner_count"] == 1
+
+
+def test_no_refused_owner_means_no_refused_warning(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO):
+        _run(_Audit(), _owners(2))
+
+    assert "refused" not in caplog.text
+
+
 def test_an_exhausted_budget_allows_one_over_budget_owner_then_counts_the_rest() -> None:
     clock = _Clock()
 
