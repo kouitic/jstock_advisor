@@ -1448,7 +1448,7 @@ def test_only_the_shadow_frame_imports_the_assembler() -> None:
         if path != _MODULE_PATH and "raer_inputs" in path.read_text("utf-8")
     ]
     # 例外は #603 PR-F2-2a(計算の組み立て)と F2-2b の配線(AssemblerPolicy を作る。出荷 OFF)だけ
-    assert [p.relative_to(_SRC).as_posix() for p in importers] == [
+    assert sorted(p.relative_to(_SRC).as_posix() for p in importers) == [
         "lambda_handlers/allocation_shadow_wiring.py",
         "services/allocation_shadow_compute.py",
     ]
