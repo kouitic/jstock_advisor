@@ -73,7 +73,7 @@ def init(
 ) -> None:
     """TradingPauseConfigの初回作成(既に存在する場合は失敗する)。"""
     with _target_backend(target):
-        service = TradingPauseService()
+        service = TradingPauseService(notify_fetch_failures=False)  # CLI では通知しない(#670)
         try:
             created = service.init_config(
                 pause_buy_sell=paused, updated_by=changed_by, change_reason=reason
@@ -101,7 +101,7 @@ def set_pause(
     """BUY/SELLの一時停止フラグを切り替える。再デプロイ不要。WATCH(ウォッチリスト
     登録)には影響しない(HoldingsもPurchaseLotsも変更しない経路のため)。"""
     with _target_backend(target):
-        service = TradingPauseService()
+        service = TradingPauseService(notify_fetch_failures=False)  # CLI では通知しない(#670)
         current = service.get_config()
         if current is None:
             typer.echo("TradingPauseConfigが未初期化です。先にinitを実行してください。")
@@ -127,7 +127,7 @@ def status(
     target: CliTarget = typer.Option(..., "--target", help="local | aws(必須指定)"),
 ) -> None:
     with _target_backend(target):
-        service = TradingPauseService()
+        service = TradingPauseService(notify_fetch_failures=False)  # CLI では通知しない(#670)
         config = service.get_config()
     if config is None:
         typer.echo("TradingPauseConfigは未初期化です(既定: pause_buy_sell=False、通常運用)。")
