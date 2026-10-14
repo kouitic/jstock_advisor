@@ -1,4 +1,4 @@
-"""Issue #603 / PR-C: 配分の最適化 `optimize_allocation` の契約テスト(C603-v1.2)。
+"""Issue #603 / PR-C: 配分の最適化 `optimize_allocation` の契約テスト(C603-v1.3)。
 
 純粋関数だけで、時計・I/O・永続化・配線に触れない。どこからも import されない(dormant)。
 閾値は決めない(数値の None は未決定 = POLICY_INCOMPLETE → 配分しない)。

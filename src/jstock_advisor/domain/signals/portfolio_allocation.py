@@ -1,4 +1,4 @@
-"""Issue #603 / PR-C: 配分の最適化 `optimize_allocation`(C603-v1.2。#128。dormant)。
+"""Issue #603 / PR-C: 配分の最適化 `optimize_allocation`(C603-v1.3。#128。dormant)。
 
 買い判定を済ませた候補(BUY 系)に、買付余力を RAER の順に貪欲に割り当てる**純粋関数**である。
 どこからも import されない(現行の判定・通知・保存・config・AWS は変わらない)。時計・I/O・永続化・

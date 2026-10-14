@@ -1,4 +1,4 @@
-"""Issue #603 / PR-A: 配分(Portfolio Allocation)の型・方針の完全性の契約テスト(C603-v1.2)。
+"""Issue #603 / PR-A: 配分(Portfolio Allocation)の型・方針の完全性の契約テスト(C603-v1.3)。
 
 型と不変条件だけを固定する。計算(optimizer)・閾値の決定・専用 YAML・入力の組み立て・
 資金入替は含まない(PR-C / PR-E / PR-F / PR-D)。どこからも import されない(dormant)。
