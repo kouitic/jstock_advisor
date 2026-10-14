@@ -1441,15 +1441,16 @@ def test_the_module_has_no_float_arithmetic_clock_or_io_dependency() -> None:
     assert "logging" not in text
 
 
-def test_nothing_in_src_imports_the_assembler_yet() -> None:
+def test_only_the_shadow_frame_imports_the_assembler() -> None:
     importers = [
         path
         for path in _SRC.rglob("*.py")
         if path != _MODULE_PATH and "raer_inputs" in path.read_text("utf-8")
     ]
-    # 例外は #603 PR-F2-2a(計算の組み立て。それ自体が dormant)の 1 件だけ
+    # 例外は #603 PR-F2-2a(計算の組み立て)と F2-2b の配線(AssemblerPolicy を作る。出荷 OFF)だけ
     assert [p.relative_to(_SRC).as_posix() for p in importers] == [
-        "services/allocation_shadow_compute.py"
+        "lambda_handlers/allocation_shadow_wiring.py",
+        "services/allocation_shadow_compute.py",
     ]
 
 

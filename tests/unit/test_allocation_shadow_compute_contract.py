@@ -902,14 +902,18 @@ def test_the_module_imports_only_the_keyed_reference_type_from_the_identifier_mo
     assert imported == {"KeyedOwnerRef"}  # 符号は呼び出し側(F2-2b)が作って渡す。鍵・kv0 に触れない
 
 
-def test_the_module_is_not_imported_by_anything_yet() -> None:
+def test_the_module_is_imported_only_by_the_loop_and_the_wiring() -> None:
+    """F2-2b の配線後: 観測のループ(型)と配線(prepare / compute の束縛)だけが import する。"""
     importers = []
     for path in _PACKAGE.rglob("*.py"):
         if path == _MODULE_PATH:
             continue
         if any(m.endswith("allocation_shadow_compute") for m in _imported_modules(path)):
             importers.append(path.relative_to(_PACKAGE).as_posix())
-    assert importers == []
+    assert sorted(importers) == [
+        "lambda_handlers/allocation_shadow_wiring.py",
+        "services/allocation_shadow_runner.py",
+    ]
 
 
 def test_the_reader_protocol_has_exactly_the_three_reads() -> None:

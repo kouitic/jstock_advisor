@@ -38,10 +38,13 @@ from jstock_advisor.domain.signals.allocation_shadow_config import (
 from jstock_advisor.infrastructure.local_repository.recommendation_repository import (
     RecommendationRepository,
 )
+from jstock_advisor.lambda_handlers import allocation_shadow_wiring as wiring_module
 from jstock_advisor.lambda_handlers import buy_candidate_worker_handler as worker_module
 from jstock_advisor.lambda_handlers import buy_candidates_handler as handler_module
 from jstock_advisor.services import allocation_shadow_service as svc
-from jstock_advisor.services.allocation_shadow_service import DECISION_TYPE
+from jstock_advisor.services.allocation_shadow_compute import BatchUnavailable
+from jstock_advisor.services.allocation_shadow_runner import make_runner
+from jstock_advisor.services.allocation_shadow_service import ShadowSkipReason
 from tests.unit.test_buy_candidates_handler import (
     _CONFIG,
     _NOW,
@@ -72,6 +75,26 @@ def _tripwire(*_a: object, **_kw: object) -> Any:
     raise AssertionError("must not be called")
 
 
+class _NoKey:
+    """鍵の provider の fake(この試験では鍵を使わない日だけを作る)。"""
+
+    def get(self) -> Any:
+        raise AssertionError("the key must not be fetched on a day that has no owner")
+
+
+def _fake_build_runner(**_kwargs: Any) -> Any:
+    """配線の fake: バッチ共通の入力が作れない日(保有の読取の失敗)= 日単位の skip を 1 件書く。"""
+    return make_runner(
+        prepare=lambda deadline, io: BatchUnavailable(ShadowSkipReason.HOLDINGS_READ_FAILED, {}),
+        compute_owner=_tripwire,
+        key_provider=_NoKey(),
+    )
+
+
+def _is_shadow_record(record: dict[str, Any]) -> bool:
+    return str(record["decision_type"]).startswith("allocation_shadow")
+
+
 def _drive(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -84,6 +107,7 @@ def _drive(
     remaining_ms: Any = None,
     execution_context: ExecutionContext | None = None,
     audit: _RecordingAuditService | None = None,
+    build_runner: Any = None,
 ) -> dict[str, Any]:
     """_process_single_candidate を acquire_results の回数だけ走らせ、外から観測できる結果を返す。
 
@@ -120,6 +144,11 @@ def _drive(
         lambda b, t, n: events.append("mark") or True,
     )
     shadow_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        wiring_module,
+        "build_shadow_runner",
+        build_runner if build_runner is not None else _fake_build_runner,
+    )
     monkeypatch.setattr(handler_module, "observe_allocation_shadow", _REAL_ENTRY)
     monkeypatch.setattr(
         svc,
@@ -172,8 +201,8 @@ def _drive(
         "audit": audit,
         "saved": sorted(r.model_dump_json() for r in repo.list_all()),
         "notification": {k: repr(v) for k, v in vars(notification).items()},
-        "audit_main": [r for r in audit.records if r["decision_type"] != DECISION_TYPE],
-        "audit_shadow": [r for r in audit.records if r["decision_type"] == DECISION_TYPE],
+        "audit_main": [r for r in audit.records if not _is_shadow_record(r)],
+        "audit_shadow": [r for r in audit.records if _is_shadow_record(r)],
     }
 
 
@@ -293,7 +322,7 @@ def test_shadow_audit_failure_does_not_change_the_main_flow(
 ) -> None:
     class _AuditThatFailsOnShadow(_RecordingAuditService):
         def record_if_absent(self, audit_id: str, decision_type: str, **kwargs: Any) -> Any:
-            if decision_type == DECISION_TYPE:
+            if decision_type.startswith("allocation_shadow"):
                 raise RuntimeError("shadow audit down")
             return super().record_if_absent(audit_id, decision_type, **kwargs)
 
@@ -327,11 +356,12 @@ def test_shadow_adds_exactly_one_audit_record_and_changes_nothing_else(
 
     _same_main_flow(shadow, baseline)
     [record] = shadow["audit_shadow"]
-    assert record["output_values"]["reason"] == "COMPUTE_NOT_IMPLEMENTED"
+    assert record["decision_type"] == "allocation_shadow_day_skip"
+    assert record["output_values"]["reason"] == "HOLDINGS_READ_FAILED"
     assert record["stock_code"] is None
 
 
-def test_shadow_with_less_than_the_minimum_remaining_time_only_records_the_skip(
+def test_shadow_with_less_than_the_minimum_remaining_time_only_records_the_day_skip(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     baseline = _drive(monkeypatch, tmp_path / "base", shadow_entry=lambda **kw: False)
@@ -341,7 +371,8 @@ def test_shadow_with_less_than_the_minimum_remaining_time_only_records_the_skip(
 
     _same_main_flow(short, baseline)
     [record] = short["audit_shadow"]
-    assert record["output_values"] == {"outcome": "SKIPPED", "reason": "TIME_BUDGET"}
+    assert record["decision_type"] == "allocation_shadow_day_skip"
+    assert record["output_values"]["reason"] == "TIME_BUDGET"  # owner が分からない日の skip
 
 
 def test_shadow_without_remaining_time_fails_closed(
@@ -351,7 +382,7 @@ def test_shadow_without_remaining_time_fails_closed(
     run = _drive(monkeypatch, tmp_path, shadow_config=_SHADOW)
 
     [record] = run["audit_shadow"]
-    assert record["output_values"] == {"outcome": "SKIPPED", "reason": "TIME_BUDGET"}
+    assert record["output_values"]["reason"] == "TIME_BUDGET"
 
 
 @pytest.mark.parametrize(
@@ -373,6 +404,61 @@ def test_validation_and_dry_run_write_no_shadow_record(
     )
 
     assert run["audit_shadow"] == []
+
+
+def test_shipped_off_never_builds_the_wiring_or_touches_a_repository_or_the_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """出荷 OFF では、配線の組み立て(repository・鍵の provider)に 1 度も入らない。"""
+    run = _drive(monkeypatch, tmp_path, build_runner=_tripwire)  # 呼ばれたら失敗する
+
+    assert run["audit_shadow"] == []
+    assert run["events"] == ["finalize", "mark"]
+
+
+def test_shadow_on_builds_the_wiring_once_after_the_completion_mark(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    built: list[dict[str, Any]] = []
+
+    def _build(**kwargs: Any) -> Any:
+        built.append(kwargs)
+        return _fake_build_runner(**kwargs)
+
+    run = _drive(
+        monkeypatch,
+        tmp_path,
+        shadow_config=_SHADOW,
+        remaining_ms=lambda: _PLENTY_OF_TIME,
+        build_runner=_build,
+    )
+
+    assert run["events"] == ["finalize", "mark"]
+    [kwargs] = built
+    assert kwargs["batch_id"] == _BATCH
+    assert kwargs["now"] == _NOW
+    assert callable(kwargs["holding_recommendation_id"])
+    assert isinstance(kwargs["candidate_ids"], dict)
+
+
+def test_a_wiring_that_cannot_be_built_does_not_change_the_main_flow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def _broken(**_kwargs: Any) -> Any:
+        raise RuntimeError("wiring exploded")
+
+    baseline = _drive(monkeypatch, tmp_path / "base", shadow_entry=lambda **kw: False)
+    broken = _drive(
+        monkeypatch,
+        tmp_path / "broken",
+        shadow_config=_SHADOW,
+        remaining_ms=lambda: _PLENTY_OF_TIME,
+        build_runner=_broken,
+    )
+
+    assert broken["error"] is None
+    assert broken["audit_shadow"] == []
+    _same_main_flow(broken, baseline)
 
 
 # --- W5 Worker 経路と handler の task 経路が残り時間を渡す --------------------------

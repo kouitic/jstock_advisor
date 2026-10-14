@@ -23,6 +23,7 @@ import ast
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 import pytest
 import yaml
@@ -210,28 +211,121 @@ def test_unconnected_modules_exist_so_the_check_is_not_vacuous() -> None:
         assert any(m == prefix or m.startswith(prefix + ".") for m in known), prefix
 
 
+#: ★ Shadow の枠(出荷 OFF)が handler から到達してよい『未接続の名前』の module = 完全一致の免除 ★
+#: (#603 PR-F2-2b)。根拠は ★ #122 issuecomment-6138622792【1. 最優先目標】のみ ★:
+#: 完了条件『本番BUY候補バッチ内でShadow計算が実行できる』『RAER・資金配分が算出できる』『既存の購入
+#: 判断・通知に影響しない』と、末尾『承認済み仕様に収まる限り、追加のHuman Gateは不要』。
+#: (kv1 = #122 …6142404655・coefficient_set_id = #602 …6159406045 は到達性の承認ではない。別の条件)
+#: ★ token 6 語・prefix 1 行は 1 語も消さない ★。消すと、将来の `raer_*` / `expected_return_*` /
+#: `portfolio_allocation*` の module(判断を動かす側を含む)が、無審査で handler へ繋がっても
+#: 落ちない。免除は『この完全一致の集合だけ』で、CLI の根には適用しない。11 件目以降が実測で
+#: 増えたら 1 行ずつ足す
+_SHADOW_FRAME_EXEMPT: Final = {
+    "jstock_advisor.domain.signals.allocation_inputs": "#122 …6138622792【1】",
+    "jstock_advisor.domain.signals.allocation_policy_config": "#122 …6138622792【1】",
+    "jstock_advisor.domain.signals.allocation_shadow_record": "#122 …6138622792【1】",
+    "jstock_advisor.domain.signals.portfolio_allocation": "#122 …6138622792【1】",
+    "jstock_advisor.domain.signals.portfolio_allocation_types": "#122 …6138622792【1】",
+    "jstock_advisor.domain.valuation.expected_return": "#122 …6138622792【1】",
+    "jstock_advisor.domain.valuation.raer": "#122 …6138622792【1】",
+    "jstock_advisor.domain.valuation.raer_coefficients_config": "#122 …6138622792【1】",
+    "jstock_advisor.domain.valuation.raer_composition": "#122 …6138622792【1】",
+    "jstock_advisor.domain.valuation.raer_inputs": "#122 …6138622792【1】",
+}
+
+
+def _is_unconnected_name(module: str) -> bool:
+    return any(module == p or module.startswith(p + ".") for p in _UNCONNECTED_PREFIXES) or any(
+        token in module for token in _UNCONNECTED_NAME_TOKENS
+    )
+
+
+def _unconnected(reached: set[str]) -> list[str]:
+    return sorted(m for m in reached if _is_unconnected_name(m))
+
+
 def test_no_handler_or_cli_reaches_an_unconnected_module() -> None:
     reached, known = _production_reachable()
     assert "jstock_advisor.domain.entities.enums" in reached  # 推移閉包が実際に深く辿れている
-    offenders = sorted(
-        m
-        for m in reached
-        if any(m == p or m.startswith(p + ".") for p in _UNCONNECTED_PREFIXES)
-        or any(token in m for token in _UNCONNECTED_NAME_TOKENS)
-    )
-    assert offenders == []
+    handler = _reachable_from_root(_HANDLER_ROOT_PREFIX)
+    cli = _reachable_from_root(_CLI_ROOT_PREFIX)
+    # handler の根: Shadow の枠(完全一致の免除)だけが到達してよい。免除に無い名前は 1 つも許さない
+    assert [m for m in _unconnected(handler) if m not in _SHADOW_FRAME_EXEMPT] == []
+    # CLI の根: 免除を適用しない(CLI は記録を辞書として読むだけで、重い module へ到達しない)
+    assert _unconnected(cli) == []
 
 
-#: 配分系の module のうち、handler の根から到達してよいもの = 出荷 OFF の Shadow の枠(Q')だけ。
-#: ★ F2-2b(配線)で handler から `allocation_shadow_compute` へ到達させると、この集合は
-#: 2 → 8 件(6 行の追加)になり、★ 鳴る `_UNCONNECTED_NAME_TOKENS` が 6 語
-#: (allocation_inputs / allocation_policy / allocation_shadow_record / expected_return /
-#: portfolio_allocation / raer)★、さらに ★ `_UNCONNECTED_PREFIXES` の
-#: `domain.valuation.expected_return` にも到達する ★(独立レビューの実測。#605 …6160204670)。
-#: ★『行を足すだけ』では CI は通らない。prefix の除外は上の規則どおり『接続を許す変更 =
-#: USER の承認の記録(Issue 番号)』を要する ★。CLI の集合には触れない
+def test_the_exemption_is_exactly_the_unconnected_modules_the_shadow_frame_reaches() -> None:
+    """補償 (a)(b): 免除は『ちょうど実際に到達する未接続の module』= 10 件。
+
+    免除を 1 つ外せばその module が offender に挙がり(= 免除が実際に効いている・網が生きている)、
+    免除に無い module が 1 つ増えれば落ちる(10 件目以降は必ず差分として見える)。
+    """
+    handler = _reachable_from_root(_HANDLER_ROOT_PREFIX)
+
+    reached_unconnected = _unconnected(handler)
+
+    assert len(_SHADOW_FRAME_EXEMPT) == 10
+    assert reached_unconnected == sorted(_SHADOW_FRAME_EXEMPT)
+    for module in _SHADOW_FRAME_EXEMPT:  # 免除を外せば、全件が offender に挙がる
+        remaining = {m: why for m, why in _SHADOW_FRAME_EXEMPT.items() if m != module}
+        assert [m for m in reached_unconnected if m not in remaining] == [module]
+    assert all(why.startswith("#122 …6138622792【1】") for why in _SHADOW_FRAME_EXEMPT.values())
+
+
+def test_the_token_and_prefix_nets_are_untouched_by_the_exemption() -> None:
+    """★ token 6 語・prefix 1 行は 1 語も消えていない(免除は『削除』ではない)★。"""
+    for token in (
+        "raer",
+        "expected_return",
+        "portfolio_allocation",
+        "allocation_policy",
+        "allocation_inputs",
+        "allocation_shadow_record",
+    ):
+        assert token in _UNCONNECTED_NAME_TOKENS, token
+    assert "jstock_advisor.domain.valuation.expected_return" in _UNCONNECTED_PREFIXES
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "jstock_advisor.domain.valuation.raer_runtime_shadow",  # 将来の raer_* の新 module
+        "jstock_advisor.domain.valuation.expected_return_runtime_shadow",  # #601 の仲間
+        "jstock_advisor.domain.signals.portfolio_allocation_optimizer_v2",
+        "jstock_advisor.domain.signals.allocation_policy_runtime",
+        "jstock_advisor.domain.signals.capital_rotation_plan",
+    ],
+)
+def test_a_synthetic_unapproved_module_is_caught_and_is_not_exempt(module: str) -> None:
+    """補償 (d): 実在しない名前でも、免除に無ければ未接続の網に掛かる(削除では失われる性質)。"""
+    assert module not in _module_files()  # 実在しない合成の名前
+    assert _is_unconnected_name(module)
+    assert module not in _SHADOW_FRAME_EXEMPT
+    assert [m for m in _unconnected({module}) if m not in _SHADOW_FRAME_EXEMPT] == [module]
+
+
+#: 配分系(名前に allocation を含む)の module のうち、handler の根から到達してよいもの = 出荷 OFF の
+#: Shadow の枠(Q')と、その配線(#603 PR-F2-2b)だけ。★ 完全一致 ★(#948 の形を維持)。
+#: ★ `_SHADOW_FRAME_EXEMPT`(免除。raer・expected_return 系を含む 10 件)とは別の集合 ★:
+#: ここは『名前に allocation を含む到達 module』の完全一致で、免除と重なるが同一ではない
+#: (allocation_inputs / allocation_policy_config / allocation_shadow_record /
+#: portfolio_allocation(+types)は両方に載る。免除にだけ載る = raer・expected_return 系 /
+#: ここにだけ載る = config・service・compute・runner・wiring・鍵の provider)。
+#: `lambda_handlers/allocation_shadow_wiring.py` は lambda_handlers 配下 = それ自体が 606 の
+#: 『根』で、
+#: handler が遅延 import しても静的な露出は減らない(gate を迂回しない保守的な選択)
 _ALLOCATION_MODULES_REACHABLE_FROM_HANDLERS = [
+    "jstock_advisor.domain.signals.allocation_inputs",
+    "jstock_advisor.domain.signals.allocation_policy_config",
     "jstock_advisor.domain.signals.allocation_shadow_config",
+    "jstock_advisor.domain.signals.allocation_shadow_record",
+    "jstock_advisor.domain.signals.portfolio_allocation",
+    "jstock_advisor.domain.signals.portfolio_allocation_types",
+    "jstock_advisor.infrastructure.aws.allocation_shadow_key_provider",
+    "jstock_advisor.lambda_handlers.allocation_shadow_wiring",
+    "jstock_advisor.services.allocation_shadow_compute",
+    "jstock_advisor.services.allocation_shadow_runner",
     "jstock_advisor.services.allocation_shadow_service",
 ]
 #: CLI の根から到達してよい配分系の module(#605 最小 CLI。読取専用。5 件の完全一致)。
@@ -248,7 +342,7 @@ _ALLOCATION_MODULES_REACHABLE_FROM_CLI = [
 
 
 def test_the_only_allocation_modules_reachable_from_handlers_are_the_off_shadow_frame() -> None:
-    """handler の根から到達できる配分系 = 出荷 OFF の Shadow の枠(Q')だけ(完全一致)。"""
+    """handler の根から到達できる配分系 = 出荷 OFF の Shadow の枠(Q')とその配線だけ(完全一致)。"""
     reached = _reachable_from_root(_HANDLER_ROOT_PREFIX)
     assert sorted(m for m in reached if "allocation" in m) == (
         _ALLOCATION_MODULES_REACHABLE_FROM_HANDLERS
@@ -497,6 +591,7 @@ def _scan_environment(package_root: Path) -> _EnvironmentScan:
 _KNOWN_ENVIRONMENT_VARIABLES: frozenset[str] = frozenset(
     {
         "ALLOW_FULL_MARKET_SCREENING",
+        "ALLOCATION_SHADOW_REF_KEY_SECRET_ARN",  # #603 F2-2b(wiring が読む。下の専用テストで固定)
         "AWS_LAMBDA_FUNCTION_NAME",
         "BUY_CANDIDATES_FUNCTION_NAME",
         "BUY_CANDIDATE_QUEUE_URL",
@@ -683,10 +778,90 @@ def test_no_new_environment_variable_is_read_by_src() -> None:
     )
 
 
+#: 名前に #128 の機能の語を含んでよい環境変数 = 鍵の Secret の ARN の 1 つだけ(完全一致)。
+#: ★ 有効化の入口ではない ★(Secret への参照を渡すだけ。ON の入口は `allocation_shadow.yaml` の
+#: `enabled` だけ)。template 側で #947 が同じ名前について済ませた許可リスト化の鏡
+#: (承認の記録 = #925 …6159386050〔USER の構成承認〕。到達性は #122 …6138622792【1】)
+_ALLOWED_FEATURE_NAMED_ENVIRONMENT: Final = frozenset({"ALLOCATION_SHADOW_REF_KEY_SECRET_ARN"})
+_WIRING_PATH: Final = _PACKAGE / "lambda_handlers" / "allocation_shadow_wiring.py"
+
+
 def test_no_environment_variable_can_enable_a_128_feature() -> None:
-    """(上の一覧への追加に加えて)名前に #128 の機能の語を含む環境変数が無い。"""
+    """名前に #128 の機能の語を含む環境変数は、鍵の Secret の ARN の 1 つだけ(完全一致)。
+
+    補償 (a): `==`(`<=` ではない)で、増えれば落ちる。(b)(c)(d) は下の専用テスト。
+    """
     offenders = sorted(n for n in _REAL_SCAN.names if _FEATURE_TOKEN.search(n))
-    assert offenders == []
+    assert offenders == sorted(_ALLOWED_FEATURE_NAMED_ENVIRONMENT)
+
+
+def test_the_allowed_environment_name_is_not_a_switch() -> None:
+    """補償 (b): 名前が有効化・切替の語を持たない(template 側と同じ検査を src 側にも)。"""
+    # template 側と同じ 1 つ
+    assert {_KEY_ENV_VARIABLE} == _ALLOWED_FEATURE_NAMED_ENVIRONMENT
+    assert not _words(_KEY_ENV_VARIABLE) & _SWITCH_WORDS
+
+
+def test_the_synthetic_feature_named_variables_are_caught_by_the_allow_list() -> None:
+    """補償 (d): 許可リストに無い『機能の語を含む合成の環境変数名』は落ちる(空振り防止)。"""
+    for name in (
+        "ALLOCATION_SHADOW_ENABLED",
+        "RAER_SHADOW_MODE",
+        "EXPECTED_RETURN_RUNTIME",
+        "CAPITAL_ROTATION_ON",
+        "ALLOCATION_SHADOW_REF_KEY_SECRET_ARN_V2",
+    ):
+        assert _FEATURE_TOKEN.search(name)
+        assert name not in _ALLOWED_FEATURE_NAMED_ENVIRONMENT
+        assert sorted({name, *_ALLOWED_FEATURE_NAMED_ENVIRONMENT}) != sorted(
+            _ALLOWED_FEATURE_NAMED_ENVIRONMENT
+        )
+
+
+def _parents(tree: ast.Module) -> dict[ast.AST, ast.AST]:
+    return {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+
+
+def test_the_key_environment_variable_never_reaches_a_condition() -> None:
+    """補償 (c) ★最重要★: 読んだ値は provider の組み立てにしか渡らない。
+
+    = 環境変数で Shadow を ON にできない。
+
+    * src でこの名前を持つのは wiring だけ
+    * `os.environ.get(...)` の結果は、`shared_key_provider(...)` の引数にしか渡さない
+      (if / bool / 比較 / in / return / 代入のどれにも現れない)
+    """
+    holders = [
+        path.relative_to(_PACKAGE).as_posix()
+        for path in sorted(_PACKAGE.rglob("*.py"))
+        if _KEY_ENV_VARIABLE in path.read_text(encoding="utf-8")
+    ]
+    assert holders == ["lambda_handlers/allocation_shadow_wiring.py"]
+
+    tree = ast.parse(_WIRING_PATH.read_text(encoding="utf-8"))
+    parents = _parents(tree)
+    reads = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "environ"
+    ]
+    assert len(reads) == 1  # 読むのは 1 か所だけ(空振り防止)
+    parent = parents[reads[0]]
+    assert (
+        isinstance(parent, ast.Call) and getattr(parent.func, "id", None) == "shared_key_provider"
+    )
+    # その呼び出しの結果(provider)は return されるだけで、条件・比較・真偽に使われない
+    assert isinstance(parents[parent], ast.Return)
+    environ_uses = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr in {"environ", "getenv"}
+    ]
+    assert len(environ_uses) == 1
 
 
 class _IgnoreTagsLoader(yaml.SafeLoader):

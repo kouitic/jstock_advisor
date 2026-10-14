@@ -910,8 +910,15 @@ def test_reachability_helper_follows_chains_and_relative_imports(tmp_path: Path)
     assert "pkg.orphan" not in reached
 
 
-def test_the_new_module_is_not_reachable_from_any_handler_or_cli() -> None:
-    known = _module_files(_SRC)
+def test_the_new_module_is_reachable_from_handlers_only_through_the_shadow_wiring() -> None:
+    """RAER が handler・CLI から到達できる入口は、出荷 OFF の Shadow の配線だけ(#603 PR-F2-2b)。
+
+    承認の記録 = #122 issuecomment-6138622792【1】(本番 BUY 候補バッチ内で RAER・配分を算出できる)。
+    配線の module を『辿らない』ようにすると、他の経路からは到達しない(= 入口はそこだけ)。
+    """
+    wiring = "jstock_advisor.lambda_handlers.allocation_shadow_wiring"
+    known = {m: p for m, p in _module_files(_SRC).items() if m != wiring}
+    assert wiring not in known
     roots = {
         m
         for m in known
@@ -924,7 +931,12 @@ def test_the_new_module_is_not_reachable_from_any_handler_or_cli() -> None:
 
     assert "jstock_advisor.domain.entities.enums" in reached
     assert "jstock_advisor.domain.valuation.raer" in known
-    assert "jstock_advisor.domain.valuation.raer" not in reached
+    assert "jstock_advisor.domain.valuation.raer" not in reached  # 配線以外の入口は無い
+    with_wiring = _reachable(
+        roots | {wiring},
+        {**known, wiring: _SRC / "lambda_handlers" / "allocation_shadow_wiring.py"},
+    )
+    assert "jstock_advisor.domain.valuation.raer" in with_wiring  # 配線からは到達する(空振り防止)
 
 
 # この module を import してよい src の module の明示リスト(いずれも未配線の dormant)。
@@ -939,7 +951,8 @@ _ALLOWED_IMPORTERS = {
     "domain/signals/allocation_inputs.py",  # #603 PR-F1(候補の RaerResult を受ける)
     "domain/signals/allocation_shadow_record.py",  # #603 PR-F2-1(RaerResult を記録へ写す)
     "domain/valuation/raer_inputs.py",  # #602 PR-G1(入力の組み立て。RaerResult を作る)
-    "services/allocation_shadow_compute.py",  # #603 PR-F2-2a(RAER を計算して候補へ渡す。dormant)
+    "services/allocation_shadow_compute.py",  # #603 PR-F2-2a(RAER を計算して候補へ渡す)
+    "lambda_handlers/allocation_shadow_wiring.py",  # #603 PR-F2-2b(係数・assembler を読む)
 }
 
 

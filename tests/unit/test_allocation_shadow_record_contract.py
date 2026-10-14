@@ -850,7 +850,7 @@ def test_the_error_classes_are_built_in_one_place_each() -> None:
 
 
 def test_nothing_in_src_imports_the_record_builder() -> None:
-    """dormant: F2-2b(配線)が書込むまで、importer は計算の組み立て(F2-2a)だけ。"""
+    """importer は、計算の組み立て(F2-2a)と観測のループ(F2-2b。記録を書く)だけ。"""
     importers = sorted(
         path.relative_to(_PACKAGE).as_posix()
         for path in _PACKAGE.rglob("*.py")
@@ -862,6 +862,7 @@ def test_nothing_in_src_imports_the_record_builder() -> None:
     assert importers == [
         "domain/notification/allocation_shadow_cli_view.py",
         "services/allocation_shadow_compute.py",
+        "services/allocation_shadow_runner.py",
     ]
 
 

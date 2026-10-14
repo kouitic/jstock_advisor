@@ -1,19 +1,19 @@
-"""購入側 Shadow(Q')の記録が『条件付き書込』であることの契約テスト(Issue #603)。
+"""購入側 Shadow の記録が『条件付き書込』であることの契約テスト(Issue #603)。
 
 AuditLog の表は moto(mocked DynamoDB)で、本番と同じ Lambda 上の経路(`lambda_runtime_env`)を通す。
-固定するもの:
+観測のループ(`allocation_shadow_runner`)の記録を、実際の `AuditService` で保存して固定するもの:
 
-  1. 8 スレッドが同じ (batch_id, owner) を同時に記録しても、保存されるのは 1 件
+  1. 4 スレッドが同じ日・同じ owner を同時に記録しても、各 audit_id の保存は 1 件
   2. 既存の audit_id への 2 回目は ConditionalCheckFailed になり、既存の項目を変えない
   3. 記録の間に呼ぶ DynamoDB の操作は PutItem だけ
      (GetItem / Scan / Query / Update / Delete を呼ばない)
   4. その PutItem はすべて `attribute_not_exists` の条件つき(無条件の書込がない)
-  5. 保存された項目に owner の実名・金額・株数が無い
+  5. 保存された項目に owner の実名・金額・株数が無く、owner は kv1 の符号だけ
+  6. 鍵が取れない日は、日単位の skip が 1 件だけ(owner 単位の記録は 0 件)
 """
 
 from __future__ import annotations
 
-import datetime as dt
 import threading
 from collections.abc import Callable, Iterator
 from typing import Any
@@ -23,43 +23,29 @@ import pytest
 from botocore.client import BaseClient
 from moto import mock_aws
 
-from jstock_advisor.domain.entities.execution_context import ExecutionContext
-from jstock_advisor.domain.entities.identifier_ref import owner_ref
-from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
-from jstock_advisor.domain.signals.allocation_shadow_config import (
-    AllocationShadowConfig,
-    AllocationShadowMode,
+from jstock_advisor.domain.entities.identifier_ref import KeyUnavailable, KeyUnavailableReason
+from jstock_advisor.domain.signals.allocation_shadow_record import (
+    day_skip_audit_id,
+    index_audit_id,
+    items_audit_id,
 )
 from jstock_advisor.infrastructure.collection_store import resolve_table_name
-from jstock_advisor.services.allocation_shadow_service import (
-    DECISION_TYPE,
-    SKIP_ID_PREFIX,
-    ShadowOutcome,
-    ShadowResult,
-    observe_allocation_shadow,
-    result_audit_id,
-    skip_audit_id,
-)
+from jstock_advisor.services.allocation_shadow_runner import make_runner
+from jstock_advisor.services.allocation_shadow_service import Deadline, ShadowRunContext
 from jstock_advisor.services.audit_service import AuditService
+from tests.unit.test_allocation_shadow_runner_contract import (
+    _BATCH,
+    _DATE,
+    _NOW,
+    _SENTINEL,
+    _Compute,
+    _owners,
+    _prepare,
+    _Provider,
+    _ref,
+)
 
 _REGION = "ap-northeast-1"
-_NOW = dt.datetime(2026, 10, 12, 8, 0, tzinfo=dt.UTC)
-_BATCH = "buy-candidates-2026-10-12"
-
-
-@pytest.fixture
-def allow_any_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    """予算・件数の挙動を複数 owner で試験するため、kv0 の owner の制限だけを外す(試験の中だけ)。
-
-    本番の制限(DEFAULT_OWNER 以外を kv0 で永続しない)は test_kv0_boundary で別に固定している。
-    """
-    from jstock_advisor.services import allocation_shadow_service as service_module
-
-    monkeypatch.setattr(service_module, "require_persistable", lambda owner: None)
-
-
-_SHADOW = AllocationShadowConfig(mode=AllocationShadowMode.SHADOW)
-_PLENTY_OF_TIME = lambda: 300_000  # noqa: E731 - 残り 300 秒
 
 
 @pytest.fixture
@@ -78,19 +64,23 @@ def audit_table(
         )
 
 
-def _observe(
-    owners: list[str] | None = None, compute: Any = None, remaining_ms: Any = None
-) -> bool:
+def _run(owners: list[str] | None = None, provider: Any = None) -> bool:
     # スレッドごとに自前の AuditService(自前の boto3 resource)を作る
-    return observe_allocation_shadow(
-        batch_id=_BATCH,
-        now=_NOW,
-        execution_context=ExecutionContext.normal(),
-        audit_service=AuditService(),
-        remaining_time_ms=remaining_ms or _PLENTY_OF_TIME,
-        shadow_config=_SHADOW,
-        compute=compute,
-        owners=owners,
+    runner = make_runner(
+        prepare=_prepare(owners if owners is not None else _owners(2)),
+        compute_owner=_Compute(),
+        key_provider=provider if provider is not None else _Provider(),
+    )
+    return runner(
+        ShadowRunContext(
+            batch_id=_BATCH,
+            now=_NOW,
+            audit_service=AuditService(),
+            deadline=Deadline(30.0),
+            io_timeout_seconds=5.0,
+            shadow_mode="SHADOW",
+            precheck=lambda: None,
+        )
     )
 
 
@@ -113,52 +103,52 @@ class _OperationSpy:
         monkeypatch.setattr(BaseClient, "_make_api_call", _wrapped)
 
 
-def test_a_single_run_stores_one_item_with_the_deterministic_id(audit_table: Any) -> None:
-    assert _observe() is True
+def _expected_ids(owners: list[str]) -> set[str]:
+    ids = {index_audit_id(_DATE)}
+    for owner in owners:
+        ref = _ref(owner)
+        ids.add(items_audit_id(_DATE, ref))
+        ids.add(f"allocation_shadow_skip:{_BATCH}:{ref}")  # 枠の記録(この fake は SKIPPED の結果)
+    return ids
 
-    [item] = _items(audit_table)
-    # 既定の計算は『未実装』= スキップなので、スキップの ID（結果の ID とは別の鍵。Q-B）
-    assert item["audit_id"] == skip_audit_id(_BATCH, DEFAULT_OWNER)
-    assert item["audit_id"] == f"{SKIP_ID_PREFIX}:{_BATCH}:{owner_ref(DEFAULT_OWNER)}"
+
+def test_a_single_run_stores_the_deterministic_ids(audit_table: Any) -> None:
+    assert _run() is True
+
+    ids = {item["audit_id"] for item in _items(audit_table)}
+    assert ids == _expected_ids(_owners(2))
 
 
-def test_eight_concurrent_runs_store_exactly_one_item(audit_table: Any) -> None:
+def test_four_concurrent_runs_store_each_record_exactly_once(audit_table: Any) -> None:
     results: list[bool] = []
-    barrier = threading.Barrier(8)
+    barrier = threading.Barrier(4)
     lock = threading.Lock()
 
     def worker() -> None:
         barrier.wait()  # 同時に開始する
-        recorded = _observe()
+        recorded = _run()
         with lock:
             results.append(recorded)
 
-    threads = [threading.Thread(target=worker) for _ in range(8)]
+    threads = [threading.Thread(target=worker) for _ in range(4)]
     for t in threads:
         t.start()
     for t in threads:
-        t.join(30)
+        t.join(60)
 
-    assert len(results) == 8
-    assert results.count(True) == 1  # 記録できたのは 1 実行だけ
-    assert len(_items(audit_table)) == 1
-
-
-def test_second_run_hits_conditional_check_failed_and_keeps_the_item(audit_table: Any) -> None:
-    assert _observe() is True
-    [before] = _items(audit_table)
-
-    assert _observe() is False  # 既存 -> 何も変えない
-
-    assert _items(audit_table) == [before]
+    assert len(results) == 4
+    assert results.count(True) >= 1  # 少なくとも 1 実行が新しい記録を書いた
+    ids = [item["audit_id"] for item in _items(audit_table)]
+    assert sorted(ids) == sorted(_expected_ids(_owners(2)))  # 各 ID はちょうど 1 件
 
 
-@pytest.mark.usefixtures("allow_any_owner")
-def test_distinct_owners_are_stored_separately(audit_table: Any) -> None:
-    assert _observe(["owner-a", "owner-b"]) is True
+def test_second_run_hits_conditional_check_failed_and_keeps_every_item(audit_table: Any) -> None:
+    assert _run() is True
+    before = sorted(_items(audit_table), key=lambda item: item["audit_id"])
 
-    ids = sorted(item["audit_id"] for item in _items(audit_table))
-    assert ids == sorted(skip_audit_id(_BATCH, o) for o in ("owner-a", "owner-b"))
+    assert _run() is False  # すべて既存 -> 何も変えない
+
+    assert sorted(_items(audit_table), key=lambda item: item["audit_id"]) == before
 
 
 def test_only_conditional_put_item_is_issued(
@@ -166,44 +156,36 @@ def test_only_conditional_put_item_is_issued(
 ) -> None:
     spy = _OperationSpy(monkeypatch)
 
-    _observe()  # 1 回目: 新規
-    _observe()  # 2 回目: ConditionalCheckFailed
+    _run()  # 1 回目: 新規
+    _run()  # 2 回目: すべて ConditionalCheckFailed
 
     operations = [name for name, _ in spy.calls]
     assert operations, "DynamoDB 呼び出しが観測されていない(spy が効いていない)"
     assert set(operations) == {"PutItem"}  # GetItem / Scan / Query / UpdateItem / DeleteItem なし
-    assert operations.count("PutItem") == 2
+    assert operations.count("PutItem") == 2 * len(_expected_ids(_owners(2)))
     for _, params in spy.calls:
         assert "attribute_not_exists" in params["ConditionExpression"]
 
 
-def test_stored_item_contains_no_owner_name_or_money(audit_table: Any) -> None:
-    _observe()
+def test_stored_items_contain_no_plain_owner_and_use_kv1_references_only(
+    audit_table: Any,
+) -> None:
+    _run([_SENTINEL, "owner-01"])
+
+    stored = _items(audit_table)
+    text = repr(stored)
+    assert _SENTINEL not in text  # 実名は保存しない
+    assert "owner-01" not in text
+    assert _ref(_SENTINEL) in text  # kv1 の符号は保存する
+    assert "kv0" not in text
+
+
+def test_a_key_failure_day_stores_one_day_skip_and_no_owner_record(audit_table: Any) -> None:
+    provider = _Provider(KeyUnavailable(KeyUnavailableReason.ACCESS_DENIED))
+
+    assert _run(provider=provider) is True
 
     [item] = _items(audit_table)
-    text = repr(item)
-    assert DEFAULT_OWNER not in text  # 実名(固定の既定 owner 文字列)は保存しない
-    assert owner_ref(DEFAULT_OWNER) in text  # 符号は保存する
-    assert "COMPUTE_NOT_IMPLEMENTED" in text
-
-
-def test_late_result_is_stored_next_to_the_time_limit_skip(audit_table: Any) -> None:
-    """捨てたワーカーが後から成功した場合（Q-B）: スキップと結果は別の ID で、両方が残る。"""
-    assert _observe(remaining_ms=lambda: 119_900) is True  # 残り時間が足りない = スキップを記録
-    assert (
-        _observe(  # 後から本物の結果が書ける（スキップに塞がれない）
-            compute=lambda run: ShadowResult(ShadowOutcome.COMPUTED, facts={"candidates": 2})
-        )
-        is True
-    )
-
-    items = {item["audit_id"]: item for item in _items(audit_table)}
-    assert set(items) == {
-        skip_audit_id(_BATCH, DEFAULT_OWNER),
-        result_audit_id(_BATCH, DEFAULT_OWNER),
-    }
-    assert result_audit_id(_BATCH, DEFAULT_OWNER).startswith(f"{DECISION_TYPE}:")
-    # どちらの ID も、先に書いた方が残る（同じ内容の 2 回目は何もしない）
-    assert _observe(remaining_ms=lambda: 119_900) is False
-    assert _observe(compute=lambda run: ShadowResult(ShadowOutcome.COMPUTED)) is False
-    assert len(_items(audit_table)) == 2
+    assert item["audit_id"] == day_skip_audit_id(_DATE)  # 業務日だけが key
+    assert "ACCESS_DENIED" in repr(item)
+    assert provider.calls == 1

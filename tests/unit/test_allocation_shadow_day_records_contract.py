@@ -552,8 +552,9 @@ def _reasons_prepare_batch_inputs_can_return() -> set[str]:
     return found
 
 
-def test_the_day_skip_vocabulary_is_the_key_failure_plus_the_six_input_failures() -> None:
-    assert ("KEY_UNAVAILABLE", *_INPUT_FAILURES) == DAY_SKIP_REASONS
+def test_the_day_skip_vocabulary_is_the_key_failure_the_input_failures_and_the_budget() -> None:
+    # 入口の判定(Lambda の残り時間が足りない日)の TIME_BUDGET は、導出の網の外に 1 語だけ別に持つ
+    assert ("KEY_UNAVAILABLE", *_INPUT_FAILURES, "TIME_BUDGET") == DAY_SKIP_REASONS
 
 
 @pytest.mark.parametrize("reason", _INPUT_FAILURES)
@@ -643,7 +644,7 @@ def test_every_reason_prepare_batch_inputs_can_return_can_be_written_as_a_day_sk
 
 
 def test_the_most_likely_input_failures_can_actually_be_written() -> None:
-    for reason in ("TIME_LIMIT", "COMPUTATION_FAILED"):
+    for reason in ("TIME_LIMIT", "COMPUTATION_FAILED", "TIME_BUDGET"):
         record = build_day_skip_record(
             business_date=_DATE, batch_id=_BATCH, shadow_mode="SHADOW", reason=reason
         )
