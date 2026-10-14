@@ -84,8 +84,19 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: python scripts/ci_markdown_only.py
       - run: pip install -r requirements-lock.txt
+      # Issue #965: 計測のみ(判定・テストの対象を変えない)。runnerのCPU数・メモリ・Pythonを記録し、
+      # 並列実行の見込みを実測で確かめる土台にする。★ continue-on-error: 計測のためにCIを赤くしない ★
+      # (取れない日があってもjobは成功する)。判定(classify)の後・pip installの後・full pytestの前。
+      - continue-on-error: true
+        run: |
+          nproc
+          free -m
+          python -c "import sys; print(sys.version)"
+      # Issue #965: --durations=50 でテスト単位の所要時間の上位を出す(出力が増えるだけで結果は変わらない)。
+      # 1件あたり約7msの固定費のような一様なコストは、この一覧では測れない(#967の検証はfull pytestの
+      # 総時間の前後比較〔複数回の中央値〕で行う)。
       - if: steps.classify.outputs.markdown_only != 'true'
-        run: python -m pytest tests -q
+        run: python -m pytest tests -q --durations=50
       - if: steps.classify.outputs.markdown_only == 'true'
         run: echo "Markdown-only change - full pytest skipped (running the Markdown-reading subset only)"
       - if: steps.classify.outputs.markdown_only == 'true'
