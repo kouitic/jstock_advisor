@@ -204,6 +204,13 @@ _UNCONNECTED_NAME_TOKENS = (
     "allocation_policy",
     "allocation_inputs",  # #603 PR-F1(入力の組み立て。同じく前向きの網)
     "allocation_shadow_record",  # #603 PR-F2-1(記録の組み立て。同じく前向きの網)
+    # signals.rotation_: ★ 前向きの網 ★(#604 P-b1。SUBU-20261014-047 の SHOULD-1)。
+    # 資金入替の入替元の適格性(P-a `rotation_source_eligibility`)と、その観測
+    # (P-b `rotation_observation*`)。これまでは P-a が `capital_rotation` を import している
+    # 『偶然』で落ちていた。名前の網へ入れ、P-b2 以降の `rotation_*` の module も同じ網に入れる。
+    # ★ 接続を許す変更ではなく、網を広げる変更 ★
+    # (運用手順書 §37.5 が USER の承認を要求するのは『接続を許す変更』)
+    "signals.rotation_",
 )
 
 
@@ -294,6 +301,35 @@ def test_the_token_and_prefix_nets_are_untouched_by_the_exemption() -> None:
     ):
         assert token in _UNCONNECTED_NAME_TOKENS, token
     assert "jstock_advisor.domain.valuation.expected_return" in _UNCONNECTED_PREFIXES
+
+
+def test_the_rotation_modules_are_inside_the_unconnected_name_net() -> None:
+    """★ P-a・P-b の module は、capital_rotation の import に頼らず、名前だけで網に入る ★。"""
+    for module in (
+        "jstock_advisor.domain.signals.rotation_source_eligibility",
+        "jstock_advisor.domain.signals.rotation_observation",
+        "jstock_advisor.domain.signals.rotation_observation_record",
+        "jstock_advisor.domain.signals.rotation_anything_new",  # 将来の module
+    ):
+        assert _is_unconnected_name(module), module
+    assert "signals.rotation_" in _UNCONNECTED_NAME_TOKENS
+
+
+def test_the_rotation_token_is_not_vacuous_and_not_too_broad() -> None:
+    known = _module_files()
+    named = sorted(m for m in known if "signals.rotation_" in m)
+
+    assert "jstock_advisor.domain.signals.rotation_source_eligibility" in named
+    assert "jstock_advisor.domain.signals.rotation_observation" in named
+    # 既存の接続済み module を巻き込んでいない(網は rotation_ で始まる名前だけ)
+    assert all(m.rsplit(".", 1)[-1].startswith("rotation_") for m in named)
+
+
+def test_a_synthetic_rotation_module_reached_from_a_handler_is_caught() -> None:
+    module = "jstock_advisor.domain.signals.rotation_new_unapproved"
+
+    assert _unconnected({module}) == [module]
+    assert module not in _SHADOW_FRAME_EXEMPT
 
 
 @pytest.mark.parametrize(

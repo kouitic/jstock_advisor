@@ -695,8 +695,8 @@ def test_the_module_reads_no_clock_and_does_no_io() -> None:
     assert not names & {"print", "open", "input", "logger", "logging"}
 
 
-def test_nothing_in_src_imports_the_module_yet() -> None:
-    """dormant: P の入力の組み立て(P-b)が入るまで、どこからも import されない。"""
+def test_only_the_observation_modules_import_the_module() -> None:
+    """dormant: P-b の観測(rotation_observation・その記録の形)だけが import する。配線は P-b4。"""
     importers = [
         path.relative_to(_PACKAGE).as_posix()
         for path in sorted(_PACKAGE.rglob("*.py"))
@@ -704,4 +704,7 @@ def test_nothing_in_src_imports_the_module_yet() -> None:
         and "rotation_source_eligibility" in path.read_text(encoding="utf-8")
     ]
 
-    assert importers == []
+    assert importers == [
+        "domain/signals/rotation_observation.py",
+        "domain/signals/rotation_observation_record.py",
+    ]
