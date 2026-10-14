@@ -75,8 +75,9 @@ _REGISTRY_MODULES = tuple(entry.module for entry in _REGISTRY)
 _COHORTS = tuple(sorted({entry.cohort for entry in _REGISTRY}))
 _DUMP_PLUGIN = "tests.support.cohort_marker_dump"
 
-#: 子プロセスの起動の回数(実際に起動した回数。`_collect` が数える)
-_launches = 0
+#: 実際に起動した子プロセスの (extra_args, with_dump)(`_collect` が起動のたびに記録する)。
+#: 回数だけでなく「何を起動したか」を持ち、`_launch_plan()` との突き合わせに使う
+_launched: list[tuple[tuple[str, ...], bool]] = []
 
 
 def _modules_of(cohort: str) -> frozenset[str]:
@@ -116,7 +117,6 @@ def _collect(extra_args: tuple[str, ...], with_dump: bool) -> _Collected:
     `-p tests.support.cohort_marker_dump --cohort-dump <path>` を渡す。
     plugin の出力が読めない・壊れているときは AssertionError(★ 空のまま緑にしない ★)。
     """
-    global _launches
     with tempfile.TemporaryDirectory() as work_dir:
         out_path = Path(work_dir) / "stdout.txt"
         err_path = Path(work_dir) / "stderr.txt"
@@ -135,7 +135,7 @@ def _collect(extra_args: tuple[str, ...], with_dump: bool) -> _Collected:
             *extra_args,
             *_REGISTRY_MODULES,
         ]
-        _launches += 1
+        _launched.append((extra_args, with_dump))
         with out_path.open("wb") as out, err_path.open("wb") as err:
             returncode = subprocess.run(
                 command,
@@ -209,6 +209,14 @@ def _union() -> _Collected:
     return _collect(extra_args, with_dump)
 
 
+def _planned_single(cohort: str) -> tuple[tuple[str, ...], bool]:
+    """計画の中の、その cohort の単一 marker の `-m` の起動(★ 起動の出所は計画だけ ★)。"""
+    wanted = ("-m", cohort_marker_name(cohort))
+    matches = [entry for entry in _launch_plan() if entry[0] == wanted]
+    assert len(matches) == 1, f"{cohort} の単一 marker の起動が計画に {len(matches)} 件(期待 1)"
+    return matches[0]
+
+
 def _owners_of(marker: str) -> frozenset[str]:
     """子 1 の dump で、その marker が付いている module の集合。"""
     return frozenset(module for module, names in _union().markers.items() if marker in names)
@@ -263,7 +271,8 @@ def test_a_single_cohort_marker_selects_through_dash_m(solo: bool) -> None:
     """
     cohort = _representative(solo=solo)
     assert cohort is not None, "registry に代表にできる cohort が無い"
-    assert _collect(("-m", cohort_marker_name(cohort)), False).modules == _modules_of(cohort)
+    extra_args, with_dump = _planned_single(cohort)
+    assert _collect(extra_args, with_dump).modules == _modules_of(cohort)
 
 
 def test_every_cohort_marker_name_is_a_valid_dash_m_expression() -> None:
@@ -292,14 +301,18 @@ def test_the_number_of_child_processes_does_not_depend_on_the_number_of_cohorts(
     """子プロセスの起動は(代表の通常・代表の SOLO・OR の)3 回以内で、cohort の数に比例しない。
 
     以前は cohort の数(20)だけ起動していた(#966)。起動の回数が cohort の数に戻ると、ここで落ちる。
+    ★ 実際に起動した引数の組を記録し、計画(`_launch_plan()`)と一致することを確かめる ★
+    (回数だけでは『計画が起動を記述している』ことを守れない)。
     """
     plan = _launch_plan()
     assert 1 <= len(plan) <= 3
     assert len(_COHORTS) > len(plan)  # 計画が cohort ごとの起動になっていない
-    # 実際に起動した回数(このテストが単独で走っても、計画どおり全部起動して数える)
+    # このテストが単独で走っても、計画どおり全部起動する(同じ引数は使い回され、再起動しない)
     for extra_args, with_dump in plan:
         _collect(extra_args, with_dump)
-    assert _launches <= 3
+    # 実際の起動 = 計画(順序は問わない。重複も計画外の起動も無い)
+    assert sorted(_launched) == sorted(plan)
+    assert len(_launched) <= 3
 
 
 def test_registered_markers_match_registry_cohorts() -> None:
