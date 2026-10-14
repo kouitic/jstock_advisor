@@ -43,16 +43,7 @@ from jstock_advisor.domain.notification.allocation_shadow_cli_renderer import (
     render_json,
     render_table,
 )
-from jstock_advisor.domain.notification.allocation_shadow_cli_view import (
-    DayInput,
-    RecordInput,
-    RecordState,
-    build_screen,
-    day_skip_key,
-    index_key,
-    items_key,
-    refs_to_read,
-)
+from jstock_advisor.domain.notification.allocation_shadow_cli_view import build_screen
 from jstock_advisor.infrastructure.aws.allocation_shadow_reader import (
     DynamoRecordSource,
     ReadFailure,
@@ -61,6 +52,7 @@ from jstock_advisor.infrastructure.aws.allocation_shadow_reader import (
     RecordRead,
     RecordSource,
     build_client,
+    read_day,
 )
 from jstock_advisor.infrastructure.local_repository.audit_log_repository import (
     AuditLogRepository,
@@ -194,19 +186,6 @@ class LocalRecordSource:
         if not isinstance(output, dict):
             return RecordRead(ReadStatus.UNREADABLE)
         return RecordRead(ReadStatus.FOUND, dict(output))
-
-
-def _input(read: RecordRead) -> RecordInput:
-    return RecordInput(RecordState(read.status.value), read.record)
-
-
-def read_day(source: RecordSource, business_date: dt.date) -> DayInput:
-    """索引 1 + skip 1 + 索引が載せた符号ごとの項目つきの記録(最大 16)を GetItem で読む。"""
-    day = business_date.isoformat()
-    index = _input(source.get(index_key(day)))
-    skip = _input(source.get(day_skip_key(day)))
-    items = {ref: _input(source.get(items_key(day, ref))) for ref in refs_to_read(index)}
-    return DayInput(day, index, skip, items)
 
 
 def _build_source(selection: BackendSelection) -> RecordSource:
