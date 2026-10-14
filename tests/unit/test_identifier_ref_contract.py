@@ -161,6 +161,8 @@ _NEW_RECORD_WRITERS = {
     "services/allocation_shadow_service.py",
     "domain/signals/allocation_shadow_record.py",
     "services/allocation_shadow_compute.py",  # #603 PR-F2-2a(計算の組み立て)
+    "services/allocation_shadow_runner.py",  # #603 PR-F2-2b(観測のループ。記録を書く)
+    "lambda_handlers/allocation_shadow_wiring.py",  # #603 PR-F2-2b(配線。ループを組み立てる)
 }
 
 
@@ -241,9 +243,13 @@ def test_the_key_providers_touch_no_record_layer() -> None:
         assert offenders == [], (relative, offenders)
 
 
-def test_the_listed_writers_that_exist_use_the_reference_function() -> None:
-    service = _PACKAGE / "services" / "allocation_shadow_service.py"
-    assert "owner_ref(" in service.read_text(encoding="utf-8")
+def test_the_loop_creates_owner_references_only_through_the_keyed_resolver() -> None:
+    """新規の記録の符号は鍵つき(kv1)だけ: ループは `resolve_owner_ref` を使い、kv0 を使わない。"""
+    runner = (_PACKAGE / "services" / "allocation_shadow_runner.py").read_text(encoding="utf-8")
+    service = (_PACKAGE / "services" / "allocation_shadow_service.py").read_text(encoding="utf-8")
+
+    assert "resolve_owner_ref(" in runner
+    assert "owner_ref(" not in service.replace("resolve_owner_ref(", "")  # kv0 の関数を呼ばない
 
 
 # --- 型: 平文の str を渡せない -------------------------------------------------------------

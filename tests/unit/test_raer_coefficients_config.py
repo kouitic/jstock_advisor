@@ -453,13 +453,14 @@ def test_the_module_has_no_service_infrastructure_clock_or_network_dependency() 
     assert "time" not in names
 
 
-def test_nothing_in_src_imports_the_coefficients_loader_yet() -> None:
+def test_only_the_shadow_wiring_imports_the_coefficients_loader() -> None:
     importers = [
         path.relative_to(_SRC).as_posix()
         for path in sorted(_SRC.rglob("*.py"))
         if path != _MODULE_PATH and "raer_coefficients_config" in path.read_text(encoding="utf-8")
     ]
-    assert importers == []  # dormant。配線は #603 PR-F 系(別の承認の後)
+    # 読むのは F2-2b の配線(出荷 OFF の Shadow の枠。設定 ON のときだけ import される)だけ
+    assert importers == ["lambda_handlers/allocation_shadow_wiring.py"]
 
 
 def test_the_logger_level_is_declared() -> None:

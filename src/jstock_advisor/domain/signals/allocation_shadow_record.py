@@ -868,10 +868,11 @@ UNRECORDED_REASONS: Final = (
     "REFUSED",
 )
 
-#: 日単位の skip の理由(語彙)。KEY_UNAVAILABLE = 鍵が取れない日(owner は分かる)/ 他 6 語 =
-#: バッチ共通の入力が作れない日(owner が分からない)。他 6 語は `prepare_batch_inputs` が返し得る
-#: `BatchUnavailable` の理由の全部(契約テストが AST で導出して ⊆ を固定)で、ShadowSkipReason の
-#: 値の部分集合(CLI の語彙表にも日本語つきで全て有る)
+#: 日単位の skip の理由(語彙)。KEY_UNAVAILABLE = 鍵が取れない日(owner は分かる)/ 他 7 語 =
+#: owner が分からない日。うち 6 語は `prepare_batch_inputs` が返し得る `BatchUnavailable` の
+#: 理由の全部(契約テストが AST で導出して ⊆ を固定)、TIME_BUDGET は観測のループの入口の判定
+#: (Lambda の残り時間が足りない)。全て ShadowSkipReason の値の部分集合で、CLI の語彙表にも
+#: 日本語つきで有る
 DAY_SKIP_REASONS: Final = (
     "KEY_UNAVAILABLE",
     "HOLDINGS_READ_FAILED",
@@ -880,6 +881,7 @@ DAY_SKIP_REASONS: Final = (
     "COEFFICIENTS_UNAVAILABLE",
     "TIME_LIMIT",
     "COMPUTATION_FAILED",
+    "TIME_BUDGET",
 )
 KEY_UNAVAILABLE_DAY_SKIP: Final = "KEY_UNAVAILABLE"
 

@@ -154,7 +154,10 @@ from jstock_advisor.lambda_handlers._market_holiday import (
     should_skip_for_market_closed,
 )
 from jstock_advisor.lambda_handlers._scheduling import derive_scheduled_batch_id
-from jstock_advisor.services.allocation_shadow_service import observe_allocation_shadow
+from jstock_advisor.services.allocation_shadow_service import (
+    ShadowRunner,
+    observe_allocation_shadow,
+)
 from jstock_advisor.services.audit_service import AuditService
 from jstock_advisor.services.buy_signal_service import RULE_VERSION_PLACEHOLDER, BuySignalService
 from jstock_advisor.services.decision_snapshot_service import save_decision_snapshot_safely
@@ -1257,8 +1260,61 @@ def _process_single_candidate(
                     execution_context=execution_context,
                     audit_service=audit_service,
                     remaining_time_ms=remaining_time_ms,
+                    wiring_factory=_shadow_wiring_factory(
+                        progress=progress,
+                        batch_id=batch_id,
+                        now=now,
+                        config=config,
+                        recommendation_repo=recommendation_repo,
+                    ),
                 )
     return result
+
+
+def _shadow_candidate_ids(progress: BatchProgress) -> dict[str, str]:
+    """finalize の ranking entries(BUY 候補)→ 銘柄コード → 推奨 ID。読めない entry は飛ばす。"""
+    ids: dict[str, str] = {}
+    unreadable = 0
+    for entry in progress.ranking_entries:
+        try:
+            _, stock_code, recommendation_id = _decode_buy_ranking_entry(entry)
+        except ValueError:
+            # 自前の符号化と復号が食い違ったときだけ起きる(バグの信号なので数えて出す)
+            unreadable += 1
+            continue
+        ids[stock_code] = recommendation_id
+    if unreadable:
+        # 値は出さない(件数だけ)。この候補は Shadow の母数から外れる(黙って消さない)
+        logger.warning(
+            "allocation shadow: %d ranking entr(ies) could not be read and are not candidates",
+            unreadable,
+        )
+    return ids
+
+
+def _shadow_wiring_factory(
+    *,
+    progress: BatchProgress,
+    batch_id: str,
+    now: dt.datetime,
+    config: AppConfig,
+    recommendation_repo: RecommendationRepository,
+) -> Callable[[], ShadowRunner]:
+    """設定 ON のときだけ入口が呼ぶ。配線の module は、ここで初めて import する(OFF では不要)。"""
+
+    def factory() -> ShadowRunner:
+        from jstock_advisor.lambda_handlers.allocation_shadow_wiring import build_shadow_runner
+
+        return build_shadow_runner(
+            config=config,
+            batch_id=batch_id,
+            now=now,
+            candidate_ids=_shadow_candidate_ids(progress),
+            holding_recommendation_id=lambda code: _deterministic_recommendation_id(batch_id, code),
+            recommendation_repo=recommendation_repo,
+        )
+
+    return factory
 
 
 def _observe_allocation_shadow_safely(
@@ -1268,8 +1324,12 @@ def _observe_allocation_shadow_safely(
     execution_context: ExecutionContext,
     audit_service: AuditService,
     remaining_time_ms: Callable[[], int] | None,
+    wiring_factory: Callable[[], ShadowRunner] | None = None,
 ) -> None:
-    """Q' の入口を呼ぶ。入口自体が例外を送出しない契約だが、本流を守るため二重に握る。"""
+    """Q' の入口を呼ぶ。入口自体が例外を送出しない契約だが、本流を守るため二重に握る。
+
+    戻り値は使わない(Shadow の出力は買い判定・通知の入力に入らない)。
+    """
     try:
         observe_allocation_shadow(
             batch_id=batch_id,
@@ -1277,6 +1337,7 @@ def _observe_allocation_shadow_safely(
             execution_context=execution_context,
             audit_service=audit_service,
             remaining_time_ms=remaining_time_ms,
+            wiring_factory=wiring_factory,
         )
     except Exception as exc:  # noqa: BLE001 - 購入判定・通知・完了処理へ波及させない
         logger.warning("allocation shadow entry raised and was isolated (%s)", type(exc).__name__)

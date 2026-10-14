@@ -443,9 +443,10 @@ def test_the_functions_return_the_new_types_by_annotation() -> None:
     assert returns["owner_ref"] == "OwnerRef"
 
 
-#: kv0 の owner_ref()(鍵なし)を使ってよい src。Shadow の枠の記録(DEFAULT_OWNER だけ。
-#: require_persistable で実在の owner を拒否する)のみ。F2-2 の配線は resolve_owner_ref を経由する
-_UNKEYED_REFERENCE_USERS = {"services/allocation_shadow_service.py"}
+#: kv0 の owner_ref()(鍵なし)・require_persistable を使ってよい src = ★ 空 ★(#603 PR-F2-2b)。
+#: 新規の記録の符号は、観測のループが `resolve_owner_ref` で作る kv1 だけ(例外なし)。
+#: 一覧に 1 つでも足す変更は『実在の owner を kv0 で永続できる経路』を作る(USER の承認の記録が要る)
+_UNKEYED_REFERENCE_USERS: set[str] = set()
 
 
 def _is_identifier_ref_module(node: ast.expr) -> bool:
@@ -502,3 +503,66 @@ def test_the_module_stays_free_of_io_and_logging() -> None:
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             assert node.func.id not in {"print", "open", "input"}
+
+
+# --- 配線後の境界(#603 PR-F2-2b): 符号は resolve_owner_ref を経由した kv1 だけ ----------------
+# (旧い『owners を渡す呼び出しが 1 つも無い』tripwire は、kv0 の前提 = CURRENT_VERSION に依存して
+#  自動では外れなかった。配線後は、前提に依存しない形 = 作り手と呼び出しの集合の完全一致で固定する)
+
+_ENTRY_KEYWORDS = {
+    "batch_id",
+    "now",
+    "execution_context",
+    "audit_service",
+    "remaining_time_ms",
+    "shadow_config",
+    "wiring_factory",
+    "monotonic",
+}
+
+
+def _calls_named(names: set[str]) -> dict[str, set[str]]:
+    """src 全体で、指定した名前の関数の呼び出しを持つ file(identifier_ref 自身を除く)。"""
+    found: dict[str, set[str]] = {}
+    for path in _PACKAGE.rglob("*.py"):
+        if path == _MODULE_PATH:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call):
+                func = node.func
+                called = (
+                    func.id
+                    if isinstance(func, ast.Name)
+                    else func.attr
+                    if isinstance(func, ast.Attribute)
+                    else None
+                )
+                if called in names:
+                    found.setdefault(path.relative_to(_PACKAGE).as_posix(), set()).add(called)
+    return found
+
+
+def test_owner_references_are_created_only_by_the_loop_through_the_keyed_resolver() -> None:
+    found = _calls_named(
+        {"keyed_owner_ref", "resolve_owner_ref", "owner_ref", "require_persistable"}
+    )
+
+    # ★ 符号を作る呼び出しは、観測のループの `resolve_owner_ref` だけ(kv0・直接の kv1 の生成は 0)★
+    assert found == {"services/allocation_shadow_runner.py": {"resolve_owner_ref"}}
+
+
+def test_no_src_call_site_passes_owners_or_a_compute_to_the_shadow_entry() -> None:
+    """入口に owner の一覧・計算の差し込み先を渡す呼び出しが無い(渡せる引数も無い)。"""
+    sites = []
+    for path in _PACKAGE.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (
+                isinstance(node, ast.Call)
+                and getattr(node.func, "id", None) == "observe_allocation_shadow"
+            ):
+                sites.append((path.relative_to(_PACKAGE).as_posix(), node))
+    assert [file for file, _ in sites] == ["lambda_handlers/buy_candidates_handler.py"]
+    for _, node in sites:
+        keywords = {keyword.arg for keyword in node.keywords}
+        assert keywords <= _ENTRY_KEYWORDS, sorted(keywords - _ENTRY_KEYWORDS)
+        assert not keywords & {"owners", "compute"}

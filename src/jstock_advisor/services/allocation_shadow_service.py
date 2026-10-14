@@ -1,8 +1,9 @@
 """購入側 Shadow(Portfolio Allocation。Q')の『枠』(Issue #603)。
 
 #128 の Portfolio Allocation(#603)を、買い候補バッチの finalize が**完了した後**に、Production の
-判断へ一切接続せずに観測するための入口と保護。この module は『枠』だけを持つ。配分の計算
-(optimizer・RAER)は差し込み式で、既定は『計算は未実装』を理由に記録するだけ(SHADOW のときのみ)。
+判断へ一切接続せずに観測するための入口と保護。この module は『枠』(入口の判定・総予算・期限つきの
+I/O・読取の補助)だけを持つ。観測のループ(owner の符号 kv1・記録・索引・日単位の skip)は
+`allocation_shadow_runner`、配線は `lambda_handlers/allocation_shadow_wiring`(#603 PR-F2-2b)。
 
 ## 入口の契約(契約テストで固定する。USER 承認: #122 の Q' の最終設計。#128 …6100461428 /
 ## サブちゃんの独立確認 …6101393320 への回答 …6101499922)
@@ -48,9 +49,8 @@
   (botocore の既定の timeout・再試行のまま走る)。害は、同じ決定的 ID の条件付き追記が後で成立
   しうることに限られる(上記の既知の振る舞い)。
 
-  既知の限界: 総予算が尽きた時点で記録するのは 1 件だけで、残りの owner は件数をログに出すのみ
-  (現在の owner は 1 人。複数 owner へ拡張する際に見直す)。finalize のみの再実行(recovery)の
-  経路には置かないため、再実行で finalize した batch は記録なし。
+  既知の限界: 総予算が尽きた owner は、索引の未記録(BUDGET_EXHAUSTED)として数える。finalize のみの
+  再実行(recovery)の経路には置かないため、再実行で finalize した batch は記録なし。
 
 ## 本 module に置かないもの
 
@@ -64,7 +64,7 @@ import datetime as dt
 import logging
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
@@ -74,12 +74,6 @@ from botocore.exceptions import ClientError
 
 from jstock_advisor.domain.entities.available_cash import AvailableCash
 from jstock_advisor.domain.entities.execution_context import ExecutionContext
-from jstock_advisor.domain.entities.identifier_ref import (
-    KeyedReferenceRequiredError,
-    owner_ref,
-    require_persistable,
-)
-from jstock_advisor.domain.entities.owner import DEFAULT_OWNER
 from jstock_advisor.domain.signals.allocation_shadow_config import (
     AllocationShadowConfig,
     load_allocation_shadow_config,
@@ -256,96 +250,6 @@ def read_available_cash(
     )
 
 
-@dataclass(frozen=True)
-class ShadowRun:
-    """計算の差し込み先に渡す、1 owner 分の文脈。"""
-
-    batch_id: str
-    owner: str
-    deadline: Deadline
-    io_timeout_seconds: float
-
-    def read_available_cash(
-        self, get: Callable[[str], AvailableCash | None] | None = None
-    ) -> CashRead:
-        """期限の残りと I/O の上限の小さい方だけ待って、買付余力を読む。"""
-        timeout = min(self.io_timeout_seconds, self.deadline.remaining())
-        if timeout <= 0.0:
-            return CashRead(CashReadStatus.TIMEOUT)
-        return read_available_cash(self.owner, timeout_seconds=timeout, get=get)
-
-
-ShadowCompute = Callable[[ShadowRun], ShadowResult]
-
-
-def compute_not_implemented(run: ShadowRun) -> ShadowResult:
-    """既定の差し込み先。配分の計算は未実装(optimizer・RAER は別 PR)。"""
-    return ShadowResult(ShadowOutcome.SKIPPED, ShadowSkipReason.COMPUTE_NOT_IMPLEMENTED)
-
-
-def result_audit_id(batch_id: str, owner: str) -> str:
-    """結果(COMPUTED)の決定的な監査 ID。owner は `owner_ref` の符号(実名を出さない)。"""
-    return f"{DECISION_TYPE}:{batch_id}:{owner_ref(owner)}"
-
-
-def skip_audit_id(batch_id: str, owner: str) -> str:
-    """スキップ・失敗の決定的な監査 ID(結果とは別の鍵。後から結果が書けるようにする。Q-B)。"""
-    return f"{SKIP_ID_PREFIX}:{batch_id}:{owner_ref(owner)}"
-
-
-def shadow_audit_id(batch_id: str, owner: str, outcome: ShadowOutcome) -> str:
-    return (
-        result_audit_id(batch_id, owner)
-        if outcome is ShadowOutcome.COMPUTED
-        else skip_audit_id(batch_id, owner)
-    )
-
-
-def record_result(
-    audit_service: AuditService,
-    *,
-    batch_id: str,
-    owner: str,
-    result: ShadowResult,
-    now: dt.datetime,
-    io_timeout_seconds: float,
-) -> bool:
-    """結果を AuditLog へ条件付きで追記する(期限つき)。追記したら True。失敗は握る。
-
-    実在の owner を kv0(鍵なし)で永続化することは禁止(USER 決定 #925)。DEFAULT_OWNER 以外は
-    書かずに False を返す(鍵つきの kv1 の実装後に、許可を kv1 のときへ替える)。
-    """
-    try:
-        require_persistable(owner)
-    except KeyedReferenceRequiredError:
-        logger.warning("allocation shadow record refused: a keyed reference is required")
-        return False
-    output_values: dict[str, Any] = {
-        "outcome": result.outcome.value,
-        "reason": result.reason.value if result.reason is not None else None,
-        **dict(result.facts),
-    }
-
-    def write() -> Any:
-        return audit_service.record_if_absent(
-            audit_id=shadow_audit_id(batch_id, owner, result.outcome),
-            decision_type=DECISION_TYPE,
-            stock_code=None,
-            input_values={"batch_id": batch_id, "owner_ref": owner_ref(owner)},
-            calculation_formulas={"schema_version": str(SCHEMA_VERSION)},
-            output_values=output_values,
-            data_sources=[],
-            rule_version=RULE_VERSION,
-            timestamp=now,
-        )
-
-    try:
-        return call_with_timeout(write, io_timeout_seconds) is not None
-    except Exception as exc:  # noqa: BLE001 - 記録の失敗も本流へ伝播させない
-        logger.warning("allocation shadow record failed and was isolated (%s)", type(exc).__name__)
-        return False
-
-
 def _precheck(
     config: AllocationShadowConfig,
     remaining_time_ms: Callable[[], int] | None,
@@ -362,6 +266,25 @@ def _precheck(
     return None
 
 
+@dataclass(frozen=True)
+class ShadowRunContext:
+    """観測のループ(`allocation_shadow_runner`)へ渡す、1 batch 分の文脈。"""
+
+    batch_id: str
+    now: dt.datetime
+    audit_service: AuditService
+    deadline: Deadline
+    io_timeout_seconds: float
+    shadow_mode: str
+    #: owner ごとの開始時に毎回読む(使い回さない。Q-F)。実行してよければ None
+    precheck: Callable[[], ShadowSkipReason | None]
+
+
+#: 設定 ON のときだけ呼ばれる『観測のループ』。例外を送出しない契約(入口が二重に握る)。
+#: 記録したら True
+ShadowRunner = Callable[[ShadowRunContext], bool]
+
+
 def observe_allocation_shadow(
     *,
     batch_id: str | None,
@@ -370,13 +293,13 @@ def observe_allocation_shadow(
     audit_service: AuditService,
     remaining_time_ms: Callable[[], int] | None,
     shadow_config: AllocationShadowConfig | None = None,
-    compute: ShadowCompute | None = None,
-    owners: Sequence[str] | None = None,
+    wiring_factory: Callable[[], ShadowRunner] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> bool:
     """handler の finalize 完了後の合流点から呼ぶ入口。**例外を送出しない**。記録したら True。
 
-    設定 OFF なら最初の判定で False を返す(何もしない)。
+    設定 OFF なら最初の判定で False を返す(何もしない。`wiring_factory` も呼ばない = repository・
+    鍵の provider を生成しない)。ON のときだけ、`wiring_factory` が『観測のループ』を返す。
     """
     config = shadow_config if shadow_config is not None else load_allocation_shadow_config()
     if not config.enabled:
@@ -389,8 +312,7 @@ def observe_allocation_shadow(
             execution_context=execution_context,
             audit_service=audit_service,
             remaining_time_ms=remaining_time_ms,
-            compute=compute if compute is not None else compute_not_implemented,
-            owners=list(owners) if owners is not None else [DEFAULT_OWNER],
+            wiring_factory=wiring_factory,
             monotonic=monotonic,
         )
     except Exception as exc:  # noqa: BLE001 - 本流を落とさない。型名だけを警告する
@@ -406,8 +328,7 @@ def _observe(
     execution_context: ExecutionContext,
     audit_service: AuditService,
     remaining_time_ms: Callable[[], int] | None,
-    compute: ShadowCompute,
-    owners: list[str],
+    wiring_factory: Callable[[], ShadowRunner] | None,
     monotonic: Callable[[], float],
 ) -> bool:
     if batch_id is None:
@@ -417,60 +338,19 @@ def _observe(
         # 非通常実行(VALIDATION・DRY_RUN)は、何も書かずに戻る(検証の経路へ副作用を持ち込まない)
         logger.info("allocation shadow skipped: non-normal execution")
         return False
+    if wiring_factory is None:
+        logger.info("allocation shadow skipped: no wiring")
+        return False
     deadline = Deadline(config.time_limit_seconds, monotonic)  # 区間全体で 1 つ(総予算。Q-G)
-    recorded = False
-    over_budget_write_used = False
-    refused = 0
-    for position, owner in enumerate(owners):
-        try:
-            require_persistable(owner)
-        except KeyedReferenceRequiredError:
-            # 実在の owner は kv0 で記録しない(計算にも進まない)。件数だけ数える
-            refused += 1
-            continue
-        precheck = _precheck(config, remaining_time_ms)  # owner ごとに毎回読む(Q-F)
-        if deadline.expired():
-            result = ShadowResult(ShadowOutcome.SKIPPED, ShadowSkipReason.TIME_LIMIT)
-        elif precheck is not None:
-            result = ShadowResult(ShadowOutcome.SKIPPED, precheck)
-        else:
-            run = ShadowRun(batch_id, owner, deadline, config.io_timeout_seconds)
-            try:
-                result = compute(run)
-            except Exception as exc:  # noqa: BLE001
-                result = ShadowResult(
-                    ShadowOutcome.FAILED,
-                    ShadowSkipReason.COMPUTATION_FAILED,
-                    {"error_type": type(exc).__name__},
-                )
-        # 各 I/O の直前に総予算を確認する。尽きていれば、記録は 1 件だけ(io_timeout を上限)許し、
-        # その後は書かずに打ち切る(最悪の所要 = 総予算 + 記録 1 回。N x (5 + 5) 秒にしない)
-        remaining = deadline.remaining()
-        if remaining <= 0.0:
-            if over_budget_write_used:
-                unrecorded_count = len(owners) - position
-                logger.warning(
-                    "allocation shadow budget exhausted; %d owner(s) not recorded",
-                    unrecorded_count,
-                )
-                break
-            over_budget_write_used = True
-            write_timeout = config.io_timeout_seconds
-        else:
-            write_timeout = min(config.io_timeout_seconds, remaining)
-        recorded = (
-            record_result(
-                audit_service,
-                batch_id=batch_id,
-                owner=owner,
-                result=result,
-                now=now,
-                io_timeout_seconds=write_timeout,
-            )
-            or recorded
+    run = wiring_factory()
+    return run(
+        ShadowRunContext(
+            batch_id=batch_id,
+            now=now,
+            audit_service=audit_service,
+            deadline=deadline,
+            io_timeout_seconds=config.io_timeout_seconds,
+            shadow_mode=config.mode.value,
+            precheck=lambda: _precheck(config, remaining_time_ms),
         )
-    if refused:
-        logger.warning(
-            "allocation shadow refused %d owner(s): a keyed reference is required", refused
-        )
-    return recorded
+    )
