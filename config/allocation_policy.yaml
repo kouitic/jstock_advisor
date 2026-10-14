@@ -10,8 +10,11 @@
 #
 # 項目:
 #   policy_id               記録に残す方針の名前(承認済みの『標準的』の組)
-#   comparison_key          RAER の比較条件の鍵。★ 未決定(null)のまま = 配分しない(POLICY_INCOMPLETE)。
-#                           RAER の版・適用軸は #602 が決めた後に、別の変更で設定する
+#   comparison_key          RAER の比較条件の鍵(RAER の版 + 適用軸)。★ #602 PR-G2 で設定した ★。
+#                           値は RAER 側の定数 RAER_FULL_COMPARISON_KEY(全 4 軸が適用のときの鍵)と
+#                           一致することを契約テストで固定する(唯一の算出元は RAER 側)。軸 4 が未実装
+#                           であることに依存する: 軸 4 を実装すると鍵が変わり、旧い記録と比較できなくなる
+#                           (モデル版の更新として扱い、旧記録との比較可能性を再評価する)
 #   min_raer_to_allocate    これ未満の RAER の候補には配分しない(判断 B。RAER の確定後に妥当性を再検証する)
 #   max_single_stock_amount 1 銘柄の金額の上限。『上限なし』は大きな有限値で表す(判断 B の (a)。
 #                           実質上限なしで、具体の桁は内部の選択)
@@ -31,7 +34,7 @@
 # (= 配分しない側へ倒す)。本流の起動を落とさない。
 version: 1
 policy_id: "standard-2026-10"
-comparison_key: null
+comparison_key: "raer-combined-v1-provisional-axes-y|BUSINESS_RISK,COMPANY_QUALITY,EARNINGS_TREND,FAIR_VALUE_CONFIDENCE"
 min_raer_to_allocate: 12
 max_single_stock_amount: 1000000000000000
 max_single_stock_ratio: 0.15
