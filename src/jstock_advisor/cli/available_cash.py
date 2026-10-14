@@ -39,7 +39,8 @@ def _reject_when_aws_env_is_set(command: str) -> None:
             f"環境変数 {_AWS_OVERRIDE_ENV_VAR} が設定されているため、available-cash {command} は"
             "拒否します(この設定のもとでは、ローカルのつもりでも Production の DynamoDB の"
             "買付余力を読み書きする可能性があります)。"
-            "ローカルで実行するなら、この環境変数を外してください。"
+            "手元で確認するなら、環境変数 AWS_LAMBDA_FUNCTION_NAME を外して実行してください"
+            "(ローカルのストアだけを読み書きします)。"
             "Production の買付余力の登録・確認は、LINE の『余力管理』メニューで行ってください",
             param_hint=_AWS_OVERRIDE_ENV_VAR,
         )

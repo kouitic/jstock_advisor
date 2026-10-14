@@ -228,3 +228,170 @@ def test_manual_33_2_does_not_tell_the_operator_to_initialize_production_with_th
     assert "LINE" in section and "余力管理" in section
     assert "jstock available-cash reconcile" not in section
     assert "Productionには" in section and "反映されない" in section
+
+
+# --- ★ cli/*.py の全走査: 保存先が環境変数だけで決まる CLI の一覧(MUST-1。サブちゃんの設計レビュー)
+
+_PACKAGE = _REPO / "src" / "jstock_advisor"
+_SRC = _REPO / "src"
+_STORE_MODULE = "jstock_advisor.infrastructure.collection_store"
+_UNSUPPORTED = "未対応(#923 の後に別 Issue で判断。保存先は環境変数だけで決まる)"
+
+#: ★ 完全一致の許可リスト ★: collection_store へ到達し(= 保存先が running_on_lambda() で決まる)、
+#: ガード(AWS_LAMBDA_FUNCTION_NAME の拒否)も対象を明示する option も持たない CLI と、その理由。
+#: 新しい CLI が同じ形で増えたら落ちる。1 件直すたびに 1 行消える(進捗が差分で見える)。
+#: ★ 18 件を直すことは #923 の範囲外(本テストは『見える一覧』にするだけ)★
+_UNGUARDED_CLI_MODULES: dict[str, str] = {
+    "analyze.py": _UNSUPPORTED,
+    "audit.py": _UNSUPPORTED,
+    "baseline_repair.py": _UNSUPPORTED,
+    "calibration.py": _UNSUPPORTED,
+    "candidate_universe.py": _UNSUPPORTED,
+    "decision_performance.py": _UNSUPPORTED,
+    "evaluation.py": _UNSUPPORTED,
+    "feedback.py": _UNSUPPORTED,
+    "holdings.py": _UNSUPPORTED,
+    "judgment_safety_shadow.py": _UNSUPPORTED,
+    "performance.py": _UNSUPPORTED,
+    "review.py": _UNSUPPORTED,
+    "rules.py": _UNSUPPORTED,
+    "shareholder_benefit.py": _UNSUPPORTED,
+    "transactions.py": _UNSUPPORTED,
+    "valuation_shadow.py": _UNSUPPORTED,
+    "watchlist.py": _UNSUPPORTED,
+    # 意図的: 本番の BatchRuns・進捗の表を直接操作する運用コマンド。運用手順書が
+    # AWS_LAMBDA_FUNCTION_NAME による本番の選択を前提に書かれている
+    "watchlist_screening.py": "意図的(手順書が環境変数による本番の選択を前提にした運用コマンド)",
+}
+
+
+def _module_path(name: str) -> Path | None:
+    candidate = _SRC / (name.replace(".", "/") + ".py")
+    if candidate.exists():
+        return candidate
+    package = _SRC / name.replace(".", "/") / "__init__.py"
+    return package if package.exists() else None
+
+
+def _imported_modules(path: Path, module: str) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    package = module if path.name == "__init__.py" else module.rsplit(".", 1)[0]
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.level:
+                parts = package.split(".")
+                parts = parts[: len(parts) - (node.level - 1)] if node.level > 1 else parts
+                target = ".".join(parts + ([node.module] if node.module else []))
+            else:
+                target = node.module or ""
+            if target.startswith("jstock_advisor"):
+                found.add(target)
+                found.update(f"{target}.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.Import):
+            found.update(a.name for a in node.names if a.name.startswith("jstock_advisor"))
+    return found
+
+
+def _import_closure(start: str) -> set[str]:
+    seen: set[str] = set()
+    stack = [start]
+    while stack:
+        module = stack.pop()
+        if module in seen:
+            continue
+        path = _module_path(module)
+        if path is None:
+            continue
+        seen.add(module)
+        stack.extend(_imported_modules(path, module))
+    return seen
+
+
+def _has_command(tree: ast.AST) -> bool:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            for decorator in node.decorator_list:
+                target = decorator.func if isinstance(decorator, ast.Call) else decorator
+                if isinstance(target, ast.Attribute) and target.attr == "command":
+                    return True
+    return False
+
+
+def _has_guard(tree: ast.AST) -> bool:
+    """AWS_LAMBDA_FUNCTION_NAME の拒否(running_on_lambda の呼出・環境変数名の定数)を持つか。"""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and node.value == "AWS_LAMBDA_FUNCTION_NAME":
+            return True
+        if isinstance(node, ast.Name) and node.id in {"running_on_lambda", "_AWS_OVERRIDE_ENV_VAR"}:
+            return True
+    return False
+
+
+_EXPLICIT_TARGET = re.compile(r'"--(?:target|backend|aws-region)"')
+
+
+def _has_explicit_target(text: str) -> bool:
+    """対象(保存先)を明示する option(--target・--backend・--aws-region)を持つか。"""
+    return _EXPLICIT_TARGET.search(text) is not None
+
+
+def _unguarded_cli_modules() -> set[str]:
+    found: set[str] = set()
+    for path in sorted((_PACKAGE / "cli").glob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        if not _has_command(tree):  # main.py のように、副 app を束ねるだけの module は対象外
+            continue
+        if _STORE_MODULE not in _import_closure(f"jstock_advisor.cli.{path.stem}"):
+            continue  # 保存先が環境変数で決まらない(collection_store へ到達しない)
+        if _has_guard(tree) or _has_explicit_target(text):
+            continue
+        found.add(path.name)
+    return found
+
+
+def test_every_cli_that_picks_its_store_from_the_environment_is_guarded_or_listed() -> None:
+    """★ cli/*.py の全走査 ★: 保存先が環境変数だけで決まる CLI は、ガードを持つか一覧にある。
+
+    一覧は完全一致(`==`)。新しい CLI が同じ形で増えたら落ちる。available_cash.py は本 PR の是正で
+    一覧から外れている(= 是正が入った証拠)。
+    """
+    assert _unguarded_cli_modules() == set(_UNGUARDED_CLI_MODULES)
+
+
+def test_the_unguarded_list_is_not_vacuous_and_does_not_hide_a_guarded_module() -> None:
+    assert "available_cash.py" not in _UNGUARDED_CLI_MODULES
+    assert all(reason.strip() for reason in _UNGUARDED_CLI_MODULES.values())
+    # 一覧の各 module は実在し、確かに collection_store へ到達し、ガードを持たない(空振りの防止)
+    for name in _UNGUARDED_CLI_MODULES:
+        path = _PACKAGE / "cli" / name
+        text = path.read_text(encoding="utf-8")
+        assert _STORE_MODULE in _import_closure(f"jstock_advisor.cli.{path.stem}"), name
+        assert not _has_guard(ast.parse(text)) and not _has_explicit_target(text), name
+    # 検出器の確認: ガードを持つ module は、一覧に出ず、ガードとして検出される
+    for name in ("allocation.py", "holding_decision.py", "trading_pause.py", "weekly_aggregate.py"):
+        assert name not in _UNGUARDED_CLI_MODULES
+        assert _has_guard(ast.parse((_PACKAGE / "cli" / name).read_text(encoding="utf-8"))), name
+
+
+@pytest.mark.parametrize(
+    ("source", "guarded"),
+    [
+        ("from x import running_on_lambda\nrunning_on_lambda()\n", True),
+        ('_AWS_OVERRIDE_ENV_VAR = "AWS_LAMBDA_FUNCTION_NAME"\n', True),
+        ('import os\nos.environ.get("AWS_LAMBDA_FUNCTION_NAME")\n', True),
+        ("import os\nos.environ.get('OTHER')\n", False),
+        ("def f():\n    pass\n", False),
+    ],
+)
+def test_the_guard_detector_recognizes_each_form(source: str, guarded: bool) -> None:
+    assert _has_guard(ast.parse(source)) is guarded
+
+
+def test_the_explicit_target_detector_recognizes_the_options() -> None:
+    assert _has_explicit_target('typer.Option("local", "--target")')
+    assert _has_explicit_target('typer.Option(..., "--backend")')
+    assert not _has_explicit_target('typer.Option("x", "--other")')
