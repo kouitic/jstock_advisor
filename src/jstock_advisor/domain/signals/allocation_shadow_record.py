@@ -37,8 +37,9 @@ candidates  銘柄コード・種類・属性・価格と鮮度・RAER の入力
 
 `model.coefficient_set_id`(#603 小 PR)を据え置いたのは、この形の記録を書ける経路が無いため:
 この module を import する src は `allocation_shadow_compute` だけで、compute を import する src は
-0 件(どちらも契約テストが固定)・Shadow は当時 出荷 OFF〔R1 の G0 で SHADOW〕(#606 の契約テストが固定)。
-根拠はコード上の到達性のみ(AWS 側の記録の不在は、表の走査が要るため確かめていない)。
+0 件(どちらも契約テストが固定)・Shadow は当時 出荷 OFF〔R1 の G0 で SHADOW〕
+(#606 の契約テストが固定)。根拠はコード上の到達性のみ
+(AWS 側の記録の不在は、表の走査が要るため確かめていない)。
 ★ F2-2b の配線でこの前提は消える。配線後は、キーの追加・削除は必ず SCHEMA_VERSION を上げる ★
 
 ## 構造的に拒否するもの(allowlist)
