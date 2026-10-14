@@ -1,4 +1,4 @@
-"""Issue #603 / PR-C: 配分の最適化 `optimize_allocation` の契約テスト(C603-v1.2)。
+"""Issue #603 / PR-C: 配分の最適化 `optimize_allocation` の契約テスト(C603-v1.3)。
 
 純粋関数だけで、時計・I/O・永続化・配線に触れない。どこからも import されない(dormant)。
 閾値は決めない(数値の None は未決定 = POLICY_INCOMPLETE → 配分しない)。
@@ -260,12 +260,14 @@ def test_a_sector_cap_needs_the_sector_exposure_and_a_high_risk_cap_needs_its_ex
 def test_candidates_with_two_comparison_keys_are_not_comparable() -> None:
     r = run(candidates=[cand("0002"), cand("0003", raer=raer(RaerState.PROVISIONAL))])
     assert r.unavailable_reason is U.RAER_NOT_COMPARABLE
-    assert r.allocations == () and r.remaining_cash is None
+    assert r.remaining_cash is None and r.total_allocated == D("0")
+    # #603 段 4: 候補ごとの診断行は残る(順位なし・配分なし)
+    assert sorted(by_code(r)) == ["0002", "0003"]
 
 
 def test_a_policy_key_that_differs_from_the_candidates_key_is_not_comparable() -> None:
     r = run(policy=pol(comparison_key="another-model|AXIS"))
-    assert r.unavailable_reason is U.RAER_NOT_COMPARABLE and r.allocations == ()
+    assert r.unavailable_reason is U.RAER_NOT_COMPARABLE and len(r.allocations) == 1
 
 
 def test_an_unavailable_raer_does_not_break_the_comparability_of_the_others() -> None:
@@ -1364,3 +1366,88 @@ def test_a_single_candidate_agrees_with_the_affordability_function_of_m2() -> No
 def test_the_candidates_accepts_any_sequence_type() -> None:
     seq: Sequence[pt.AllocationCandidate] = (cand(),)
     assert run(candidates=seq).status is pt.AllocationStatus.ALLOCATED_SOME
+
+
+# --- #603 段 4: 比較できない日の候補ごとの診断行(USER 決定 #602 …6159406045)---------------
+
+
+def _mixed_day(**over: object) -> pt.AllocationResult:
+    """鍵が 2 種類(AVAILABLE と PROVISIONAL)+ RAER が使えない候補 1 件の、比較できない日。"""
+    candidates = [
+        cand("0003", raer=raer(RaerState.PROVISIONAL, value="9")),
+        cand("0002", raer=raer(value="1")),
+        cand("0004", raer=raer(RaerState.UNAVAILABLE)),
+    ]
+    return run(candidates=candidates, **over)
+
+
+def test_a_not_comparable_day_keeps_one_diagnostic_row_per_candidate() -> None:
+    r = _mixed_day()
+    assert r.status is pt.AllocationStatus.UNAVAILABLE
+    assert r.unavailable_reason is U.RAER_NOT_COMPARABLE  # ★ status・reason は不変 ★
+    assert r.total_allocated == D("0") and r.remaining_cash is None
+    rows = by_code(r)
+    assert sorted(rows) == ["0002", "0003", "0004"]
+    assert rows["0002"].reason_code is R.RAER_NOT_COMPARABLE
+    assert rows["0003"].reason_code is R.RAER_NOT_COMPARABLE
+    assert rows["0004"].reason_code is R.RAER_UNAVAILABLE  # 使えない候補は従来の理由
+
+
+def test_the_diagnostic_rows_are_never_a_rank_and_never_an_allocation() -> None:
+    """★ 『比較不能な候補の順位を投資判断に使える順位として扱わない』を、値の不在で保証 ★"""
+    for row in _mixed_day().allocations:
+        assert row.rank is None
+        assert row.decision is pt.CandidateDecision.NOT_ALLOCATED
+        assert row.shares == 0 and row.amount == D("0")
+        assert row.price_tier_used is None
+        assert row.cap_limited_shares == 0 and row.cash_shortfall == D("0")
+
+
+def test_the_diagnostic_rows_do_not_depend_on_the_raer_value_or_the_input_order() -> None:
+    """並びは stock_code の昇順で、RAER の value の大小(0003 = 9 > 0002 = 1)に依らない。"""
+    base = [
+        cand("0003", raer=raer(RaerState.PROVISIONAL, value="9")),
+        cand("0002", raer=raer(value="1")),
+        cand("0004", raer=raer(RaerState.UNAVAILABLE)),
+    ]
+    expected = [a.stock_code for a in run(candidates=base).allocations]
+    assert expected == ["0002", "0003", "0004"]
+    for permuted in itertools.permutations(base):
+        assert [a.stock_code for a in run(candidates=list(permuted)).allocations] == expected
+
+
+def test_a_not_comparable_day_with_a_complete_policy_is_not_a_policy_problem() -> None:
+    """SHOULD-1: 方針が完全な段 4 の日。policy_missing は空のまま、診断行が残る。"""
+    r = _mixed_day(policy=pol())
+    assert r.policy_missing == ()
+    assert r.unavailable_reason is U.RAER_NOT_COMPARABLE and len(r.allocations) == 3
+
+
+def test_a_not_comparable_day_with_an_incomplete_policy_still_reports_not_comparable() -> None:
+    """段 4 は段 5(方針不完全)より先に効く。診断行の理由は段 5 の POLICY_INCOMPLETE ではない。"""
+    r = _mixed_day(policy=empty_policy())
+    assert r.unavailable_reason is U.RAER_NOT_COMPARABLE
+    assert R.POLICY_INCOMPLETE not in {a.reason_code for a in r.allocations}
+    assert all(a.rank is None for a in r.allocations)
+
+
+def test_the_incomplete_policy_shadow_still_ranks_and_uses_its_own_reason() -> None:
+    """段 5(同じ鍵・方針不完全)は従来どおり順位つき。段 4 の診断行と混同しない。"""
+    r = run(candidates=[cand("0002"), cand("0003")], policy=empty_policy())
+    assert r.unavailable_reason is U.POLICY_INCOMPLETE
+    assert {a.reason_code for a in r.allocations} == {R.POLICY_INCOMPLETE}
+    assert sorted(a.rank for a in r.allocations if a.rank is not None) == [1, 2]
+
+
+def test_the_earlier_stages_keep_no_rows() -> None:
+    mixed = [cand("0002"), cand("0003", raer=raer(RaerState.PROVISIONAL))]
+    assert run(candidates=mixed, available_cash=None).allocations == ()  # 段 2
+    ratio = cons(max_single_stock_ratio=D("0.1"))
+    assert run(candidates=mixed, constraints=ratio, portfolio_value=None).allocations == ()  # 段 3
+
+
+def test_a_day_with_one_key_is_unchanged() -> None:
+    """鍵が揃う日は従来どおり配分する(診断行の追加は段 4 だけ)。"""
+    r = run(candidates=[cand("0002"), cand("0003")])
+    assert r.status is pt.AllocationStatus.ALLOCATED_SOME
+    assert R.RAER_NOT_COMPARABLE not in {a.reason_code for a in r.allocations}

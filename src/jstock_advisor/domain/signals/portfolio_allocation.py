@@ -1,4 +1,4 @@
-"""Issue #603 / PR-C: 配分の最適化 `optimize_allocation`(C603-v1.2。#128。dormant)。
+"""Issue #603 / PR-C: 配分の最適化 `optimize_allocation`(C603-v1.3。#128。dormant)。
 
 買い判定を済ませた候補(BUY 系)に、買付余力を RAER の順に貪欲に割り当てる**純粋関数**である。
 どこからも import されない(現行の判定・通知・保存・config・AWS は変わらない)。時計・I/O・永続化・
@@ -13,7 +13,8 @@
  3 効いている比率上限に必要な総額・業種・high-risk の保有が揃わない
                                                        -> UNAVAILABLE(PORTFOLIO_VALUE_UNAVAILABLE)
  4 RAER が使える候補の comparison_key が揃わない / 方針の鍵と違う
-                                                       -> UNAVAILABLE(RAER_NOT_COMPARABLE)
+                                                       -> UNAVAILABLE(RAER_NOT_COMPARABLE)。
+                                                          候補ごとの診断行(順位なし・配分なし)を残す
  5 方針が不完全(`AllocationPolicy.missing()` が空でない)
                                                        -> UNAVAILABLE(POLICY_INCOMPLETE)。配分 0 の
                                                           『順位だけの shadow』にする
@@ -331,6 +332,27 @@ def _shadow(
     return _unavailable(owner, UnavailableReason.POLICY_INCOMPLETE, missing, _arranged(items))
 
 
+def _not_comparable_rows(
+    candidates: Sequence[AllocationCandidate],
+) -> tuple[CandidateAllocation, ...]:
+    """比較できない日(段 4)の診断行。★ 順位を付けない・配分しない ★(rank None・株数 0・金額 0)。
+
+    使える候補 = RAER_NOT_COMPARABLE(この日は比べられず評価していない)
+    使えない候補 = RAER_UNAVAILABLE
+    記録の読み手が順位を作れないよう、順位は値の不在で保証する(型の不変条件も rank を許さない)。
+    """
+    return _arranged(
+        [
+            _not_allocated(
+                c.stock_code,
+                ReasonCode.RAER_NOT_COMPARABLE if _usable(c) else ReasonCode.RAER_UNAVAILABLE,
+                None,
+            )
+            for c in candidates
+        ]
+    )
+
+
 # --- 公開関数 ---------------------------------------------------------------------------------
 
 
@@ -389,7 +411,9 @@ def optimize_allocation(
     # 4 比較可能性: RAER が使える候補どうし・方針の鍵と同じ comparison_key でなければ比べない
     keys = {c.raer.comparison_key for c in items if _usable(c)}
     if len(keys) > 1 or (policy.comparison_key is not None and keys - {policy.comparison_key}):
-        return _unavailable(owner, UnavailableReason.RAER_NOT_COMPARABLE, missing)
+        return _unavailable(
+            owner, UnavailableReason.RAER_NOT_COMPARABLE, missing, _not_comparable_rows(items)
+        )
 
     # 5 方針が不完全 -> 配分しない(順位だけの shadow)
     if missing:

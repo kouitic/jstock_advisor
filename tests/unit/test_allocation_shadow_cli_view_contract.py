@@ -1191,3 +1191,11 @@ def test_free_text_at_each_reason_position_is_counted_once_and_not_printed(posit
     assert screen.complete is False
     for text in (render_table(screen), render_json(screen)):
         assert "SENTINEL-free-text" not in text
+
+
+def test_the_candidate_level_not_comparable_text_differs_from_the_day_level_one() -> None:
+    """SHOULD-3: 同じ綴りが日単位と候補ごとの表にある。文を別にして、診断行を順位と読ませない。"""
+    day = view.UNAVAILABLE_REASONS["RAER_NOT_COMPARABLE"]
+    candidate = view.ALLOCATION_REASONS["RAER_NOT_COMPARABLE"]
+    assert day != candidate
+    assert "診断" in candidate and "順位ではない" in candidate
