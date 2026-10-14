@@ -557,6 +557,7 @@ def test_nothing_in_src_imports_the_policy_loader() -> None:
     assert importers == [
         "domain/signals/allocation_inputs.py",
         "domain/signals/allocation_shadow_record.py",  # #603 PR-F2-1(方針の値を記録へ写す)
+        "services/allocation_shadow_compute.py",  # #603 PR-F2-2a(方針の束を受ける。dormant)
     ]
 
 

@@ -1447,7 +1447,10 @@ def test_nothing_in_src_imports_the_assembler_yet() -> None:
         for path in _SRC.rglob("*.py")
         if path != _MODULE_PATH and "raer_inputs" in path.read_text("utf-8")
     ]
-    assert importers == []
+    # 例外は #603 PR-F2-2a(計算の組み立て。それ自体が dormant)の 1 件だけ
+    assert [p.relative_to(_SRC).as_posix() for p in importers] == [
+        "services/allocation_shadow_compute.py"
+    ]
 
 
 def test_the_assembler_is_not_wired_into_the_buy_flow_names() -> None:
