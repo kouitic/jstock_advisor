@@ -87,17 +87,24 @@ def test_the_shipped_file_names_exactly_the_four_values_and_they_are_real_positi
     assert {name: data[name] for name in _FIELDS} == _APPROVED
 
 
-def test_with_the_shipped_issue_creation_flag_off_the_approved_limits_do_not_create_anything() -> (
+def test_with_the_shipped_issue_creation_flag_on_the_approved_limits_define_the_activation() -> (
     None
 ):
-    """★ 上限値が決定済みでも、出荷の issue_creation_enabled が false の間は起票されない
-    (有効化は別の USER 承認。flag を true にする変更はこの変更に含まれない)。"""
+    """★ 出荷の issue_creation_enabled = true(#837 の有効化の準備)+ 決定済みの上限値 ★
+
+    = 本番に反映されれば実際に起票される構成。本番の有効化は USER の別の承認(ChangeSet 確認後)で、
+    flag を true にする PR は Draft のまま merge しない。起票を止めていた『flag = false』の固定は、
+    flag を true にする #837 の変更で『true と承認済みの上限値』の固定へ置き換えた
+    (有効化後の挙動は test_issue_837_shipped_activation_behaviour.py)。
+    """
     import yaml
 
     notification = yaml.safe_load(
         (_SHIPPED.parent / "incident_notification.yaml").read_text(encoding="utf-8")
     )
-    assert notification["issue_creation_enabled"] is False
+    assert notification["issue_creation_enabled"] is True
+    shipped = yaml.safe_load(_SHIPPED.read_text(encoding="utf-8"))
+    assert {name: shipped[name] for name in _FIELDS} == _APPROVED
 
 
 # --- 決定済みの値 --------------------------------------------------------------------------
