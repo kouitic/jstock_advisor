@@ -303,6 +303,12 @@ class _Loop:
                 recorded.append(resolved)
             else:
                 count("BUDGET_EXHAUSTED")
+        refused = unrecorded.get("REFUSED", 0)
+        if refused:
+            # 符号を作れなかった owner(空など = データの破損)。全員がそうなる日は索引も日単位の
+            # skip も書かないため、owner 0 人(info)・OWNER_CAP(warning)と並べて観測できるように
+            # する。値は出さない
+            logger.warning("allocation shadow: %d owner(s) refused (no reference created)", refused)
         if not recorded and key_failure is not None:
             return self._day_skip(
                 "KEY_UNAVAILABLE",
