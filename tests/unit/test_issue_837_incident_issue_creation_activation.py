@@ -10,10 +10,12 @@ issuecomment-6114701122)。USER 判断(#122 issuecomment-6114810773 の【1】)�
 『有効化の準備を承認・起票上限値を承認(360 分 / 2 / 5 / 10)・Production での
 issue_creation_enabled = true の反映は未承認』となった。本 PR で出荷値を true にする。
 
-★ 出荷値 = true + 出荷の上限値(承認済み)= 本番に反映されれば実際に GitHub Issue が自動起票される構成 ★。
+★ 出荷値 = true + 出荷の上限値(承認済み)= 本番に反映されれば実際に GitHub Issue が
+自動起票される構成 ★。
 ゆえに本 PR の安全の主張は『true でも立たない』ではなく『USER の個別承認(ChangeSet 確認後)まで
 本番に出さない』(Draft のまま merge しない・同梱の可否は SHA 固定の承認時に USER が判断)。
-有効化後の挙動(上限・最小間隔・自動停止)は test_issue_837_shipped_activation_behaviour.py が固定する。
+有効化後の挙動(上限・最小間隔・自動停止)は
+test_issue_837_shipped_activation_behaviour.py が固定する。
 
 ## 何を検証するか
 
@@ -269,8 +271,8 @@ def test_with_shipped_config_and_full_wiring_exactly_one_issue_is_created(
     fake = _install_urlopen(monkeypatch, [_TOKEN, _ISSUE])
     message = _alarm_message()
 
-    # handler の load_config・上限値を上書きしない = 出荷の config・上限値(承認済み)がそのまま使われる。
-    # (同じ occurrence の再配信で新規 Issue が増えないことは test_issue_837_shipped_activation_behaviour.py)
+    # handler の load_config・上限値を上書きしない = 出荷の config・上限値(承認済み)を使う。
+    # (同じ occurrence の再配信で新規 Issue が増えないことは shipped_activation_behaviour 側)
     result = handler_module.handler(_sns_event(message), None)
     assert result == {"processed": 1}
 
