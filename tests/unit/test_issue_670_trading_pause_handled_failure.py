@@ -563,3 +563,116 @@ def test_c4_the_trading_pause_service_is_created_in_the_service_constructor_not_
 
     assert inside >= 1
     assert outside == 0
+
+
+def test_c4_two_router_builds_get_independent_trading_pause_services(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ 挙動で固定(サブちゃん SHOULD-1)★ 重複抑止の単位 = TradingPauseService の instance。
+    build_line_event_router() を 2 回呼ぶと別々の instance になる(= リクエストごとに作り直される)。
+    関数の中で module 変数へ cache する・@lru_cache を付ける、といった AST の検査をすり抜ける
+    最適化も、ここで落ちる(同じ instance が返るため)。"""
+    from jstock_advisor.services.line_event_router import build_line_event_router
+
+    first = build_line_event_router()
+    second = build_line_event_router()
+
+    assert first is not second
+    assert first.conversation_service is not second.conversation_service
+    assert (
+        first.conversation_service._trading_pause  # noqa: SLF001 - 粒度の前提を測る
+        is not second.conversation_service._trading_pause  # noqa: SLF001
+    )
+
+
+# =============================================================================
+# 通知の発行元の到達性(サブちゃん SHOULD-2。job 名 "line-webhook" の固定の根拠を固定する)
+# =============================================================================
+
+_PACKAGE_ROOT = Path(__file__).resolve().parents[2] / "src" / "jstock_advisor"
+
+
+def _module_files() -> dict[str, Path]:
+    modules: dict[str, Path] = {}
+    for path in _PACKAGE_ROOT.rglob("*.py"):
+        parts = list(path.relative_to(_PACKAGE_ROOT.parent).with_suffix("").parts)
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        modules[".".join(parts)] = path
+    return modules
+
+
+def _direct_imports(module: str, path: Path, known: dict[str, Path]) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    base = module.split(".") if path.name == "__init__.py" else module.split(".")[:-1]
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            targets = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                anchor = base[: len(base) - (node.level - 1)]
+                prefix = ".".join(anchor + ([node.module] if node.module else []))
+            else:
+                prefix = node.module or ""
+            targets = [prefix] + [f"{prefix}.{a.name}" for a in node.names]
+        else:
+            continue
+        for target in targets:
+            parts = target.split(".")
+            for i in range(1, len(parts) + 1):
+                candidate = ".".join(parts[:i])
+                if candidate in known:
+                    found.add(candidate)
+    return found
+
+
+def _reaches(root: str, target: str, known: dict[str, Path]) -> bool:
+    seen: set[str] = set()
+    stack = [root]
+    while stack:
+        module = stack.pop()
+        if module in seen:
+            continue
+        seen.add(module)
+        if module == target:
+            return True
+        stack.extend(_direct_imports(module, known[module], known) - seen)
+    return False
+
+
+def test_c4_only_the_line_webhook_handler_reaches_the_trading_pause_service() -> None:
+    """job 名を `line-webhook` に固定した根拠(本 service の本番の呼び出し元は LINE webhook だけ)。
+    #725 で 9 関数すべてに通知用の環境変数が入ったため、環境変数の有無は防波堤にならない。
+    別の handler がこの service へ到達するようになったら、job 名を引数にするなどの見直しが要る。"""
+    known = _module_files()
+    target = "jstock_advisor.services.trading_pause_service"
+    handlers = sorted(m for m in known if m.startswith("jstock_advisor.lambda_handlers."))
+    assert len(handlers) > 15  # 根を取れている(空振りでない)
+
+    reaching = [m for m in handlers if _reaches(m, target, known)]
+
+    assert reaching == ["jstock_advisor.lambda_handlers.line_webhook_handler"]
+
+
+def test_c7_every_cli_construction_of_the_service_opts_out_of_notifications() -> None:
+    """★ 『CLI では通知しない』のコード上の保証(サブちゃん SHOULD-3)★ 今は呼び出し経路と環境変数の
+    不在で成り立っているが、将来 CLI から is_buy_sell_paused() を呼ぶ・環境変数が入る変更でも、
+    CLI は通知しない。cli/ の TradingPauseService() の生成はすべて notify_fetch_failures=False。"""
+    constructions = 0
+    for path in sorted((_PACKAGE_ROOT / "cli").glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if name != "TradingPauseService":
+                continue
+            constructions += 1
+            keywords = {k.arg: k.value for k in node.keywords}
+            value = keywords.get("notify_fetch_failures")
+            assert isinstance(value, ast.Constant) and value.value is False, (
+                path.name,
+                node.lineno,
+            )
+    assert constructions >= 3  # 検査が空振りでない
