@@ -6113,3 +6113,79 @@ Condition `SecretResourcePolicyIsEnabled`(= SecretResourcePolicyEnabled=true)に
 ・Alarm の通知先の変更(既存の IncidentNotificationTopic。通知の経路は 27 節)
 ・Shadow の記録の読み方(CLI の節)
 ```
+
+## 40. 資金配分 Shadow の結果を見る CLI(`jstock allocation today`)の使い方(Issue #605、2026-10-14追加)
+
+資金配分 Shadow(試験計算。出荷設定は無効)の記録を、**読むだけ**で表示するコマンド。本節の手順は、
+Shadow が有効化され(別の USER 承認)、記録が書かれた後にだけ意味を持つ。**投資判断には使わない。LINE へは送られない。**
+
+### 40.1 実行前に知っておくこと
+
+```
+・読取専用: GetItem だけ(索引 1 + 日単位の skip 1 + 索引が載せた所有者ごとに 1。最大 18 回)。書込・Scan・通知・再計算をしない
+・--backend は必須(既定なし)。環境変数からは選ばない。local = 開発・試験用 / dynamodb = 本番
+・--backend dynamodb は --aws-region と --confirm-table(AuditLog の表名。既定は jstock-audit_log。完全一致)が揃わなければ 1 件も読まない
+・★ 本番の記録を実際に読む実行は、USER の許可と読取計画(呼び出し = GetItem のみ・回数・中止条件)が先に要る ★(AWS の読取)。資格情報は観測用の読取専用 profile で足りる(--aws-profile)
+・Windows では Git Bash か WSL で実行する(PowerShell での実行は未確認)
+```
+
+### 40.2 コマンド
+
+```bash
+# 開発・試験(ローカルの記録)
+jstock allocation today --backend local --date 2026-10-14
+
+# 本番(読取専用 profile。USER の許可の後)。REPLACE_ の値は実際の値へ置き換える
+jstock allocation today --backend dynamodb --aws-region ap-northeast-1 \
+  --confirm-table jstock-audit_log --aws-profile REPLACE_WITH_OBSERVER_PROFILE --date 2026-10-14
+
+# JSON(共有に向く。既定では表示名を含めない)
+jstock allocation today --backend dynamodb --aws-region ap-northeast-1 \
+  --confirm-table jstock-audit_log --format json
+```
+
+```
+--date を省略すると、直近の営業日(JST。今日が営業日なら今日)。記録は『バッチの完了後』に書かれるので、今日の記録がまだ無ければ『索引がありません』と表示する(前日へ黙って遡らない)
+終了コード   0 = すべて揃っている / 1 = 読取の失敗(固定の文言。値・表名を出さない)/ 2 = 指定の誤り / 3 = 読めたが不完全(下の状態)
+```
+
+### 40.3 画面の『状況』の読み方(黙って 0 件にしない)
+
+```
+すべての所有者の記録があります                      正常(終了コード 0)。★ 索引の件数が互いに整合し〔試行 = 記録 + 未記録、記録 = 載せた符号の数〕、すべての記録が読めた場合だけ ★。件数が矛盾する索引・記録が欠けた符号・解釈できない値がある日は、この見出しを出さない(終了コード 3)
+記録できなかった所有者があります                    予算切れ・書込の失敗など。理由別の件数が出る。再実行で後から追加された記録は先着の索引に載らない(既知の限界)
+Shadow は動きましたが、記録は 0 件です              索引はあるが記録が 0 件。理由別の件数を見る
+鍵の取得に失敗したため、記録がありません             索引なし + 日単位の skip あり。理由コード(NOT_CONFIGURED / ACCESS_DENIED / NOT_FOUND / TIMEOUT / MALFORMED / ERROR)を見て、運用を確認する(鍵の Secret・IAM・環境変数。kv1 の殻の手順)
+その日の索引がありません                           Shadow が未実行、または記録の途中で止まった可能性。記録がある可能性を否定できない。待つか、原因を調べる
+対応していない記録の版、または読めない索引です       schema_version を表示する。CLI の更新が要る可能性
+```
+
+### 40.4 所有者の表示名(ローカルのラベル)
+
+```
+画面の所有者は『owner-』+ 符号の先頭 6 桁。見分けたいときは、利用者の端末にだけ表示名を持てる:
+  jstock allocation label set --ref <符号の先頭 6〜24 桁、または kv1.N:… の符号> --name <表示名(40 文字まで)>
+  jstock allocation label list / jstock allocation label remove --ref …
+ファイル   home 配下の .jstock/allocation_owner_labels.json(リポジトリ配下は拒否。Git 管理外)。AWS・鍵・記録に触れない
+★ これは『符号と実名の対応表』= 機密 ★: 共有しない。表の画面には表示名が含まれる(末尾に注意が出る)ので、共有するなら --format json(既定は表示名を含めない)を使う
+Windows のファイルの権限(ACL)は確認が難しいため、利用者のアカウントの home 配下に置くことを前提とする
+```
+
+### 40.5 してはいけないこと
+
+```
+・--backend dynamodb で、USER の許可と読取計画なしに本番の記録を読む
+・結果(符号・金額・所有者の表示名)を、Issue・PR・コメントなど公開面へそのまま貼る(DISCLOSURE = PUBLIC_SANITIZED。必要なら件数・状態だけを書く)
+・表示名のファイルを共有・コミットする
+・本コマンドの出力を投資判断・LINE の通知に使う(試験運用)
+```
+
+### 40.6 この節が確認していないこと(未確認)
+
+```
+・本番の AuditLog に、観測用の読取専用 profile が GetItem を許可されているか(AWS に接続していない)
+・実際の記録に対する表示(本番にはまだ記録が無い。実装・試験は moto と合成データだけ)
+・PowerShell での実行 / Windows の ACL
+```
+
+・設計・実装: Issue #605(設計 rev2〜rev2d)/ #925(符号 kv1・索引)/ #603(記録の形)/ #606(接続 gate)

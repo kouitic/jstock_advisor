@@ -221,6 +221,24 @@ def test_the_key_material_is_immutable_and_has_no_accessor_for_the_key() -> None
     assert not hasattr(material, "__dict__")
 
 
+def test_the_protection_scope_is_stated_and_excludes_direct_attribute_access() -> None:
+    """USER の SHOULD: 防げるもの(表示・直列化・複製・例外)と防げないもの(内部属性の直接参照)。
+
+    下の 2 つの assert は『防げない』ことの明記である(この型を使っても、同じプロセスのコードは鍵を
+    読める)。鍵の境界は『鍵を持つ role を Lambda の 2 つに限る』ことで守る(型では守らない)。
+    """
+    material = _key()
+
+    # 防げないもの(明記): 内部属性への直接アクセス・内部のメソッドの呼び出し
+    assert object.__getattribute__(material, "_key") == _SENTINEL_KEY
+    assert material._hmac(b"m") == hmac.new(_SENTINEL_KEY, b"m", hashlib.sha256).hexdigest()
+    # 防げるもの: 通常の経路(上の別のテストが全方向を走査)
+    assert not _contains_key(repr(material) + str(material) + f"{material}")
+    doc = KeyMaterial.__doc__ or ""
+    assert "内部属性への直接アクセス" in doc
+    assert "防止できない" in doc
+
+
 def test_the_key_material_compares_by_key_and_version_and_hashes_by_version_only() -> None:
     assert _key(1) == _key(1)
     assert _key(1) != _key(2)
