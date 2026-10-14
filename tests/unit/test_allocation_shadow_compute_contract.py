@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import datetime as dt
 import json
 import threading
@@ -918,3 +919,79 @@ def test_the_reader_protocol_has_exactly_the_three_reads() -> None:
         "read_available_cash",
     }
     assert methods == set()
+
+
+# =================================================================================================
+# coefficient_set_id(#602 …6159406045 の USER 条件 4): モデル版と係数の束の整合
+# =================================================================================================
+
+
+def _set_id_of(config: ComputeConfig) -> str:
+    assert config.coefficients is not None
+    return config.coefficients.coefficient_set_id
+
+
+def _candidate_set_ids(record: dict[str, Any]) -> set[str]:
+    return {row["raer_out"]["extra"]["coefficient_set_id"] for row in record["candidates"]}
+
+
+def test_the_record_carries_the_coefficient_set_id_of_the_same_bundle_as_the_model_version(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    reader = _standard_reader(cashes={_SENTINEL_OWNER: cash(_SENTINEL_OWNER, "20000000")})
+    inputs = _ready(tmp_path, reader, config=config)
+
+    record = _owner(inputs, reader).record
+
+    assert record is not None
+    assert record["model"]["coefficient_set_id"] == _set_id_of(config)
+    assert record["model"]["raer_model_version"].startswith("raer-combined-v1")
+    # 候補ごとの RAER の extra も同じ束の id(モデル版と束の id が食い違う記録を作らない)
+    assert _candidate_set_ids(record) == {_set_id_of(config)}
+
+
+def test_changing_one_coefficient_changes_both_the_record_id_and_every_candidate_id(
+    tmp_path: Path,
+) -> None:
+    shipped = _config(tmp_path)
+    assert shipped.coefficients is not None
+    changed_coefficients = dataclasses.replace(
+        shipped.coefficients,
+        quality_deduction_max=shipped.coefficients.quality_deduction_max - D("0.01"),
+    )
+    changed = _config(tmp_path, coefficients=changed_coefficients)
+    reader = _standard_reader(cashes={_SENTINEL_OWNER: cash(_SENTINEL_OWNER, "20000000")})
+
+    before = _owner(_ready(tmp_path, reader, config=shipped), reader).record
+    after = _owner(_ready(tmp_path, reader, config=changed), reader).record
+
+    assert before is not None and after is not None
+    assert _set_id_of(shipped) != _set_id_of(changed)
+    assert before["model"]["coefficient_set_id"] != after["model"]["coefficient_set_id"]
+    assert after["model"]["coefficient_set_id"] == _set_id_of(changed)
+    assert _candidate_set_ids(after) == {_set_id_of(changed)}
+    assert _candidate_set_ids(before).isdisjoint(_candidate_set_ids(after))
+    # モデル版は係数だけでは変わらない(束の id が変わるのは係数の値による)
+    assert before["model"]["raer_model_version"] == after["model"]["raer_model_version"]
+
+
+@pytest.mark.parametrize(
+    "cashes",
+    [
+        {},  # 買付余力が未登録
+        {_SENTINEL_OWNER: RuntimeError("boom")},  # 読取の失敗
+    ],
+)
+def test_a_header_only_day_keeps_the_coefficient_set_id(
+    tmp_path: Path, cashes: dict[str, Any]
+) -> None:
+    config = _config(tmp_path)
+    reader = _standard_reader(cashes=cashes)
+
+    computed = _owner(_ready(tmp_path, reader, config=config), reader)
+
+    assert computed.result.outcome is ShadowOutcome.SKIPPED
+    assert computed.record is not None
+    assert computed.record["candidates"] == []
+    assert computed.record["model"]["coefficient_set_id"] == _set_id_of(config)

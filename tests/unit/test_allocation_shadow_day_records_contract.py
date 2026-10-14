@@ -324,7 +324,8 @@ def test_the_day_skip_keeps_only_the_reason_and_the_count(reason: KeyUnavailable
         business_date=_DATE,
         batch_id=_BATCH,
         shadow_mode="SHADOW",
-        reason=reason,
+        reason="KEY_UNAVAILABLE",
+        key_unavailable_reason=reason,
         unrecorded_owner_count=3,
     )
 
@@ -340,17 +341,17 @@ def test_the_day_skip_keeps_only_the_reason_and_the_count(reason: KeyUnavailable
         "key_unavailable_reason": reason.value,
         "unrecorded_owner_count": 3,
     }
-    assert DAY_SKIP_REASONS == ("KEY_UNAVAILABLE",)
 
 
-@pytest.mark.parametrize("reason", ["TIMEOUT", None, 5, "KEY_UNAVAILABLE"])
-def test_the_day_skip_reason_must_be_a_key_unavailable_reason(reason: object) -> None:
+@pytest.mark.parametrize("reason", ["TIMEOUT", "OTHER", "", None, 5, "key_unavailable"])
+def test_the_day_skip_reason_must_be_one_of_the_closed_vocabulary(reason: object) -> None:
     with pytest.raises(RecordSchemaError):
         build_day_skip_record(
             business_date=_DATE,
             batch_id=_BATCH,
             shadow_mode="SHADOW",
             reason=reason,  # type: ignore[arg-type]
+            key_unavailable_reason=KeyUnavailableReason.TIMEOUT,
             unrecorded_owner_count=0,
         )
 
@@ -362,7 +363,8 @@ def test_the_day_skip_count_must_be_a_non_negative_int(count: object) -> None:
             business_date=_DATE,
             batch_id=_BATCH,
             shadow_mode="SHADOW",
-            reason=KeyUnavailableReason.TIMEOUT,
+            reason="KEY_UNAVAILABLE",
+            key_unavailable_reason=KeyUnavailableReason.TIMEOUT,
             unrecorded_owner_count=count,  # type: ignore[arg-type]
         )
 
@@ -372,7 +374,8 @@ def test_the_day_skip_allowlist_rejects_unknown_and_missing_keys_and_owner_field
         business_date=_DATE,
         batch_id=_BATCH,
         shadow_mode="SHADOW",
-        reason=KeyUnavailableReason.ACCESS_DENIED,
+        reason="KEY_UNAVAILABLE",
+        key_unavailable_reason=KeyUnavailableReason.ACCESS_DENIED,
         unrecorded_owner_count=1,
     )
     for extra in ({"owner_ref": _ref("owner-a")}, {"owner": "owner-a"}, {"detail": "x"}):
@@ -400,7 +403,8 @@ def test_a_tampered_day_skip_is_rejected(change: dict[str, Any]) -> None:
         business_date=_DATE,
         batch_id=_BATCH,
         shadow_mode="SHADOW",
-        reason=KeyUnavailableReason.NOT_FOUND,
+        reason="KEY_UNAVAILABLE",
+        key_unavailable_reason=KeyUnavailableReason.NOT_FOUND,
         unrecorded_owner_count=0,
     )
     with pytest.raises(RecordSchemaError):
@@ -448,14 +452,16 @@ def test_the_day_skip_key_is_the_day_only_and_the_batch_id_stays_in_the_body() -
         business_date=_DATE,
         batch_id="batch-a",
         shadow_mode="SHADOW",
-        reason=KeyUnavailableReason.TIMEOUT,
+        reason="KEY_UNAVAILABLE",
+        key_unavailable_reason=KeyUnavailableReason.TIMEOUT,
         unrecorded_owner_count=1,
     )
     second = build_day_skip_record(
         business_date=_DATE,
         batch_id="batch-b",
         shadow_mode="SHADOW",
-        reason=KeyUnavailableReason.TIMEOUT,
+        reason="KEY_UNAVAILABLE",
+        key_unavailable_reason=KeyUnavailableReason.TIMEOUT,
         unrecorded_owner_count=1,
     )
 
@@ -505,3 +511,94 @@ def test_the_day_record_builders_are_pure() -> None:
                     target = getattr(call.func, "attr", getattr(call.func, "id", ""))
                     assert target not in {"now", "today", "open", "print", "getenv", "info"}
                     assert not str(target).startswith("log")
+
+
+# --- 日単位の skip の理由の拡張(#603 F2-2b 設計 rev6): バッチ共通の入力が作れない日 --------------
+
+_INPUT_FAILURES = (
+    "HOLDINGS_READ_FAILED",
+    "RECOMMENDATIONS_READ_FAILED",
+    "INPUT_LIMIT_EXCEEDED",
+    "COEFFICIENTS_UNAVAILABLE",
+)
+
+
+def test_the_day_skip_vocabulary_is_the_key_failure_plus_the_four_input_failures() -> None:
+    assert ("KEY_UNAVAILABLE", *_INPUT_FAILURES) == DAY_SKIP_REASONS
+
+
+@pytest.mark.parametrize("reason", _INPUT_FAILURES)
+def test_an_input_failure_day_skip_has_no_key_reason_and_no_count(reason: str) -> None:
+    record = build_day_skip_record(
+        business_date=_DATE, batch_id=_BATCH, shadow_mode="SHADOW", reason=reason
+    )
+
+    validate_day_skip_record(record)
+    assert json.loads(json.dumps(record)) == record
+    assert record["reason"] == reason
+    assert record["key_unavailable_reason"] is None  # 鍵の話ではない
+    assert record["unrecorded_owner_count"] is None  # owner が分からない(0 件と言わない)
+    assert not any("owner_ref" in key for key in record)
+
+
+@pytest.mark.parametrize("reason", _INPUT_FAILURES)
+def test_an_input_failure_day_skip_cannot_carry_a_key_reason_or_a_count(reason: str) -> None:
+    with pytest.raises(RecordSchemaError):
+        build_day_skip_record(
+            business_date=_DATE,
+            batch_id=_BATCH,
+            shadow_mode="SHADOW",
+            reason=reason,
+            key_unavailable_reason=KeyUnavailableReason.TIMEOUT,
+        )
+    with pytest.raises(RecordSchemaError):
+        build_day_skip_record(
+            business_date=_DATE,
+            batch_id=_BATCH,
+            shadow_mode="SHADOW",
+            reason=reason,
+            unrecorded_owner_count=0,
+        )
+
+
+def test_a_key_failure_day_skip_requires_the_key_reason_and_the_count() -> None:
+    with pytest.raises(RecordSchemaError):
+        build_day_skip_record(
+            business_date=_DATE,
+            batch_id=_BATCH,
+            shadow_mode="SHADOW",
+            reason="KEY_UNAVAILABLE",
+            unrecorded_owner_count=1,
+        )
+    with pytest.raises(RecordSchemaError):
+        build_day_skip_record(
+            business_date=_DATE,
+            batch_id=_BATCH,
+            shadow_mode="SHADOW",
+            reason="KEY_UNAVAILABLE",
+            key_unavailable_reason=KeyUnavailableReason.ERROR,
+        )
+
+
+def test_the_validator_rejects_a_hand_made_record_that_breaks_the_pairing() -> None:
+    base = build_day_skip_record(
+        business_date=_DATE, batch_id=_BATCH, shadow_mode="SHADOW", reason="HOLDINGS_READ_FAILED"
+    )
+    for change in (
+        {"key_unavailable_reason": "TIMEOUT"},
+        {"unrecorded_owner_count": 0},
+        {"reason": "KEY_UNAVAILABLE"},
+    ):
+        with pytest.raises(RecordSchemaError):
+            validate_day_skip_record({**base, **change})
+    keyed = build_day_skip_record(
+        business_date=_DATE,
+        batch_id=_BATCH,
+        shadow_mode="SHADOW",
+        reason="KEY_UNAVAILABLE",
+        key_unavailable_reason=KeyUnavailableReason.TIMEOUT,
+        unrecorded_owner_count=2,
+    )
+    for change in ({"key_unavailable_reason": None}, {"unrecorded_owner_count": None}):
+        with pytest.raises(RecordSchemaError):
+            validate_day_skip_record({**keyed, **change})

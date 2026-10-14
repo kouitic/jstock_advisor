@@ -186,6 +186,12 @@ def _timed[T](fn: Callable[[], T], deadline: Deadline, io_timeout_seconds: float
     return call_with_timeout(fn, timeout)
 
 
+def _coefficient_set_id(config: ComputeConfig) -> str | None:
+    """記録の model.coefficient_set_id。★ raer_model_version と同じ係数の束から ★(縮退 = None)。"""
+    coefficients = config.coefficients
+    return None if coefficients is None else coefficients.coefficient_set_id
+
+
 def _text(value: Decimal | None) -> str | None:
     return None if value is None else format(value, "f")
 
@@ -466,6 +472,7 @@ def compute_owner(
             owner_ref=owner_ref,
             shadow_mode=inputs.config.shadow_mode,
             raer_model_version=COMBINED_MODEL_VERSION,
+            coefficient_set_id=_coefficient_set_id(inputs.config),
             elapsed_ms=elapsed_ms,
             read_states=dict(states),
         )

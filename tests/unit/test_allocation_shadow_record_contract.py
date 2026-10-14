@@ -119,12 +119,14 @@ def _keyed(owner: str):  # type: ignore[no-untyped-def]
     return keyed_owner_ref(owner, _TEST_KEY)
 
 
+COEFFICIENT_SET_ID = "cset-test-0123456789abcdef-v1"
 META = RecordMeta(
     batch_id="buy-candidates-20261014",
     business_date=dt.date(2026, 10, 14),
     owner_ref=_keyed(OWNER),
     shadow_mode="SHADOW",
     raer_model_version=MODEL_VERSION,
+    coefficient_set_id=COEFFICIENT_SET_ID,
     elapsed_ms=1234,
     read_states={"holdings": "OK", "recommendations": "OK", "cash": "AVAILABLE"},
 )
@@ -478,6 +480,7 @@ def test_sentinel_holdings_never_reach_the_record(tmp_path: Path) -> None:
         owner_ref=_keyed(sentinel_owner),
         shadow_mode="SHADOW",
         raer_model_version=MODEL_VERSION,
+        coefficient_set_id=COEFFICIENT_SET_ID,
         elapsed_ms=1,
         read_states=META.read_states,
     )
@@ -512,6 +515,7 @@ def test_the_builder_has_no_parameter_that_could_carry_a_holding_detail() -> Non
         "owner_ref",
         "shadow_mode",
         "raer_model_version",
+        "coefficient_set_id",
         "elapsed_ms",
         "read_states",
         "add_on_gate_applied",
@@ -540,6 +544,7 @@ def test_a_plain_or_unkeyed_owner_is_rejected_by_the_builder(tmp_path: Path, bad
         owner_ref=bad_ref,  # type: ignore[arg-type]
         shadow_mode="SHADOW",
         raer_model_version=MODEL_VERSION,
+        coefficient_set_id=COEFFICIENT_SET_ID,
         elapsed_ms=1,
         read_states=META.read_states,
     )
@@ -1133,6 +1138,7 @@ def test_a_datetime_cannot_stand_in_for_the_business_date(tmp_path: Path) -> Non
         owner_ref=META.owner_ref,
         shadow_mode="SHADOW",
         raer_model_version=MODEL_VERSION,
+        coefficient_set_id=COEFFICIENT_SET_ID,
         elapsed_ms=1,
         read_states=META.read_states,
     )
@@ -1157,3 +1163,46 @@ def test_the_raer_axis_reason_codes_with_a_colon_are_accepted(tmp_path: Path) ->
         record["candidates"][0]["raer_out"]["reason_codes"] = [bad]
         with pytest.raises(RecordSchemaError):
             validate_items_record(record)
+
+
+# --- model.coefficient_set_id(#602 …6159406045 の USER 条件 4)---------------------------------
+
+
+def _header(tmp_path: Path) -> dict[str, Any]:
+    return build_header_record(
+        meta=META,
+        bundle=decided_bundle(tmp_path),
+        cash=CashSnapshot(None, None, None),
+        outcome="SKIPPED",
+        skip_reason="CASH_NOT_REGISTERED",
+    )
+
+
+def test_both_builders_record_the_coefficient_set_id_in_the_model_section(tmp_path: Path) -> None:
+    bundle, inputs, result = scenario(tmp_path)
+    items = build_items_record(
+        meta=META, bundle=bundle, cash=CASH, inputs=inputs, result=result, details=None
+    )
+
+    assert items["model"]["coefficient_set_id"] == COEFFICIENT_SET_ID
+    assert _header(tmp_path)["model"]["coefficient_set_id"] == COEFFICIENT_SET_ID
+
+
+def test_the_coefficient_set_id_key_is_required_but_its_value_may_be_null(tmp_path: Path) -> None:
+    record = _header(tmp_path)
+
+    validate_items_record(record)
+    validate_items_record({**record, "model": {**record["model"], "coefficient_set_id": None}})
+    without = {k: v for k, v in record["model"].items() if k != "coefficient_set_id"}
+    with pytest.raises(RecordSchemaError):
+        validate_items_record({**record, "model": without})
+
+
+@pytest.mark.parametrize("bad", ["", " ", "a b", "x" * 300, 7, {"a": 1}, ["x"]])
+def test_a_coefficient_set_id_that_is_not_an_identifier_is_rejected(
+    tmp_path: Path, bad: object
+) -> None:
+    record = _header(tmp_path)
+
+    with pytest.raises(RecordSchemaError):
+        validate_items_record({**record, "model": {**record["model"], "coefficient_set_id": bad}})

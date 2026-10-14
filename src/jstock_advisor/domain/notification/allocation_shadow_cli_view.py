@@ -27,6 +27,7 @@ module を推移的に import する重い module で、#606 の未接続の網�
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
@@ -157,16 +158,46 @@ BUY_ACTIONS: Final[Mapping[str, str]] = {
 
 @dataclass(frozen=True)
 class Reason:
-    """理由 = コード + 日本語(未知のコードは『未対応の理由コード』)。"""
+    """理由 = コード + 日本語。
+
+    * 表にある語 = そのまま(recognized)
+    * 表に無いが形は正しい語 = コード + 『未対応の理由コード』(recognized = False。unparsed へ)
+    * 形が正しくない値(自由文・構造・空) = 『不明』(コードも出さない。recognized = False)
+    """
 
     code: str
     text: str
+    recognized: bool = True
+
+
+#: 書込側の理由コードの形(`allocation_shadow_record._REASON` と同じ。AXIS:CODE も可)。
+#: 読取側でも検査し、形が違う値は表示面へ出さない(記録が壊れた・別経路で書かれたとき)
+_CODE_SHAPE: Final = re.compile(r"[A-Z][A-Z0-9_]{0,63}(:[A-Z][A-Z0-9_]{0,63})?")
 
 
 def _reason(table: Mapping[str, str], code: object) -> Reason | None:
-    if not isinstance(code, str) or not code:
+    if code is None:
+        return None  # 項目が無い(省略)
+    if not isinstance(code, str) or _CODE_SHAPE.fullmatch(code) is None:
+        return Reason(UNKNOWN_TEXT, UNKNOWN_TEXT, recognized=False)
+    text = table.get(code)
+    if text is None:
+        return Reason(code, UNSUPPORTED_TEXT, recognized=False)
+    return Reason(code, text)
+
+
+def _unrecognized(*reasons: Reason | None) -> int:
+    """解釈できなかった理由コードの数(表に無い・形が違う)。unparsed へ足す。"""
+    return sum(1 for r in reasons if r is not None and not r.recognized)
+
+
+def _confidence(value: object) -> str | None:
+    """確信度(HIGH / MEDIUM / LOW)。形が違う値は『不明』(unparsed は呼び出し側が数える)。"""
+    if value is None:
         return None
-    return Reason(code, table.get(code, UNSUPPORTED_TEXT))
+    if isinstance(value, str) and _CODE_SHAPE.fullmatch(value) is not None:
+        return value
+    return UNKNOWN_TEXT
 
 
 # --- 入力(読取の結果。infrastructure の型には依存しない)------------------------------------------
@@ -199,7 +230,7 @@ class DayState(StrEnum):
     COMPLETE = "COMPLETE"  # 1 索引あり・未記録 0
     PARTIAL = "PARTIAL"  # 2 索引あり・未記録あり
     EMPTY = "EMPTY"  # 3 索引あり・記録 0 件
-    NO_INDEX_KEY_FAILURE = "NO_INDEX_KEY_FAILURE"  # 4a 索引なし + skip あり(鍵の取得失敗)
+    NO_INDEX_DAY_SKIP = "NO_INDEX_DAY_SKIP"  # 4a 索引なし + 日単位の skip あり(理由つき)
     NO_INDEX = "NO_INDEX"  # 4b 索引なし + skip なし
     UNSUPPORTED = "UNSUPPORTED"  # 5 対応していない版・読めない索引
 
@@ -208,7 +239,10 @@ DAY_STATE_TEXT: Final[Mapping[DayState, str]] = {
     DayState.COMPLETE: "すべての所有者の記録があります",
     DayState.PARTIAL: "記録できなかった所有者があります",
     DayState.EMPTY: "Shadow は動きましたが、記録は 0 件です",
-    DayState.NO_INDEX_KEY_FAILURE: "鍵の取得に失敗したため、記録がありません(運用の確認が要ります)",
+    DayState.NO_INDEX_DAY_SKIP: (
+        "Shadow は動きましたが、その日は記録できませんでした"
+        "(理由は『日単位の skip』の行。運用の確認が要ります)"
+    ),
     DayState.NO_INDEX: (
         "その日の索引がありません(Shadow が未実行、または記録の途中で止まった可能性。"
         "記録がある可能性を否定できません)"
@@ -476,7 +510,7 @@ def _candidate_row(raw: object, cash_left: Decimal | None) -> tuple[CandidateRow
         buy_action=_reason(BUY_ACTIONS, attrs.get("buy_action")),
         raer_value=format_decimal(value) if value is not None else None,
         raer_state=_reason(RAER_STATES, raer.get("state")),
-        confidence=_str(raer.get("confidence")),
+        confidence=_confidence(raer.get("confidence")),
         rank=str(rank) if rank is not None else None,
         decision=decision,
         shares=str(shares) if shares is not None and allocated else None,
@@ -489,7 +523,9 @@ def _candidate_row(raw: object, cash_left: Decimal | None) -> tuple[CandidateRow
 
 
 def _reasons(table: Mapping[str, str], codes: object) -> tuple[Reason, ...]:
-    out = [r for code in _list(codes) if (r := _reason(table, code)) is not None]
+    out = [
+        _reason(table, code) or Reason(UNKNOWN_TEXT, UNKNOWN_TEXT, False) for code in _list(codes)
+    ]
     return tuple(out)
 
 
@@ -540,6 +576,8 @@ def _decode_owner(
         if not row.readable:
             unparsed += 1
         else:
+            unparsed += _unrecognized(row.buy_action, row.raer_state, row.decision, row.reason)
+            unparsed += 1 if row.confidence == UNKNOWN_TEXT else 0
             candidate = _dict(raw)
             unparsed += _opaque_values(
                 _dict(candidate.get("allocation")).get("amount"),
@@ -556,23 +594,36 @@ def _decode_owner(
         else None
     )
     outcome = _reason(OUTCOMES, run.get("outcome"))
+    skip_reason = _reason(SKIP_REASONS, run.get("skip_reason"))
+    run_status = _reason(RUN_STATUSES, run.get("status"))
+    unavailable_reason = _reason(UNAVAILABLE_REASONS, run.get("unavailable_reason"))
+    incomplete = _reasons(INCOMPLETE_REASONS, counts.get("incomplete_reasons"))
+    exclusions = _count_map(EXCLUSION_REASONS, counts.get("exclusions"))
+    unparsed += _unrecognized(
+        outcome,
+        skip_reason,
+        run_status,
+        unavailable_reason,
+        *incomplete,
+        *(reason for reason, _ in exclusions),
+    )
     return OwnerSection(
         ref=ref,
         display_ref=shown,
         label=label,
         status=OwnerStatus.OK,
         outcome=outcome,
-        skip_reason=_reason(SKIP_REASONS, run.get("skip_reason")),
-        run_status=_reason(RUN_STATUSES, run.get("status")),
-        unavailable_reason=_reason(UNAVAILABLE_REASONS, run.get("unavailable_reason")),
+        skip_reason=skip_reason,
+        run_status=run_status,
+        unavailable_reason=unavailable_reason,
         available_cash=format_yen(cash.get("available_cash")),
         last_reconciled_at=_str(cash.get("last_reconciled_at")),
         portfolio_value=format_yen(portfolio.get("portfolio_value")),
         expected_remaining_cash=expected_left,
         allocated_count=allocated if rows else None,
         not_allocated_count=not_allocated if rows else None,
-        incomplete_reasons=_reasons(INCOMPLETE_REASONS, counts.get("incomplete_reasons")),
-        exclusions=_count_map(EXCLUSION_REASONS, counts.get("exclusions")),
+        incomplete_reasons=incomplete,
+        exclusions=exclusions,
         model_version=_str(model.get("raer_model_version")),
         policy_id=_str(model.get("policy_id")),
         contract_version=_str(model.get("contract_version")),
@@ -626,6 +677,12 @@ def _decoded_skip(skip: RecordInput) -> SkipSummary | None:
         return None
 
 
+def _skip_unrecognized(skip: SkipSummary | None) -> int:
+    if skip is None:
+        return 0
+    return _unrecognized(skip.reason, skip.key_unavailable_reason)
+
+
 def index_refs(index: Mapping[str, Any]) -> tuple[list[str], int]:
     """索引の符号のうち、kv1 の形のもの(最大 MAX_OWNERS)と、上限を超えて無視した件数。"""
     refs = [r for r in _list(index.get("owner_refs")) if isinstance(r, str)]
@@ -676,8 +733,17 @@ def _build(day: DayInput, labels: Mapping[str, str]) -> AllocationShadowScreen:
     index = day.index
     record = index.record
     if index.state is RecordState.NOT_FOUND:
-        state = DayState.NO_INDEX_KEY_FAILURE if skip is not None else DayState.NO_INDEX
-        return AllocationShadowScreen(day.business_date, state, False, None, skip, (), ())
+        state = DayState.NO_INDEX_DAY_SKIP if skip is not None else DayState.NO_INDEX
+        return AllocationShadowScreen(
+            day.business_date,
+            state,
+            False,
+            None,
+            skip,
+            (),
+            (),
+            unparsed=_skip_unrecognized(skip),
+        )
     if index.state is RecordState.UNREADABLE or not isinstance(record, dict):
         return AllocationShadowScreen(
             day.business_date, DayState.UNSUPPORTED, False, None, skip, (), (), unparsed=1
@@ -702,7 +768,9 @@ def _build(day: DayInput, labels: Mapping[str, str]) -> AllocationShadowScreen:
     refs, over_cap = index_refs(record)
     owners: list[OwnerSection] = []
     missing: list[str] = []
-    unparsed = 0
+    unparsed = _skip_unrecognized(skip) + _unrecognized(
+        *(reason for reason, _ in summary.unrecorded_reasons)
+    )
     for ref in refs:
         keyed = _is_keyed(ref)
         section = _owner(ref, day.items.get(ref) if keyed else None, labels)

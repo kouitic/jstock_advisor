@@ -12,7 +12,8 @@ docs #930 の §37.2 / §37.5 / §37.6(保有由来は必要最小限の集計�
 
 ```
 header      schema_version / record_kind / business_date(JST)/ batch_id / owner_ref
-model       raer_model_version / policy_id / config_hash / contract_version / shadow_mode
+model       raer_model_version / coefficient_set_id / policy_id / config_hash / contract_version
+            / shadow_mode
 policy      配分の方針の値(replay に要る。閾値であり、個人の情報ではない)
 run         outcome / status / unavailable_reason / skip_reason / policy_missing / elapsed_ms
             / read_states
@@ -275,6 +276,7 @@ _RECORD_SPEC = {
     "owner_ref": "ref",
     "model": {
         "raer_model_version": _opt("ident"),
+        "coefficient_set_id": _opt("ident"),
         "policy_id": _opt("ident"),
         "config_hash": "ident",
         "contract_version": "ident",
@@ -424,6 +426,7 @@ class RecordMeta:
     owner_ref: KeyedOwnerRef
     shadow_mode: str
     raer_model_version: str | None
+    coefficient_set_id: str | None  # 係数の束の識別子(raer_model_version と同じ束から)
     elapsed_ms: int | None
     read_states: Mapping[str, str]
     add_on_gate_applied: bool = False
@@ -652,6 +655,7 @@ def _record(meta: RecordMeta, bundle: AllocationPolicyBundle, cash: CashSnapshot
         "owner_ref": meta.owner_ref,
         "model": {
             "raer_model_version": meta.raer_model_version,
+            "coefficient_set_id": meta.coefficient_set_id,
             "policy_id": bundle.policy_id,
             "config_hash": bundle.config_hash,
             "contract_version": CONTRACT_VERSION,
@@ -842,8 +846,17 @@ UNRECORDED_REASONS: Final = (
     "REFUSED",
 )
 
-#: 日単位の skip の理由(語彙)
-DAY_SKIP_REASONS: Final = ("KEY_UNAVAILABLE",)
+#: 日単位の skip の理由(語彙)。KEY_UNAVAILABLE = 鍵が取れない日(owner は分かる)/ 他 4 語 =
+#: バッチ共通の入力が作れない日(owner が分からない)。語は ShadowSkipReason の値と同じ
+#: (CLI の語彙表と完全一致で固定)
+DAY_SKIP_REASONS: Final = (
+    "KEY_UNAVAILABLE",
+    "HOLDINGS_READ_FAILED",
+    "RECOMMENDATIONS_READ_FAILED",
+    "INPUT_LIMIT_EXCEEDED",
+    "COEFFICIENTS_UNAVAILABLE",
+)
+KEY_UNAVAILABLE_DAY_SKIP: Final = "KEY_UNAVAILABLE"
 
 _UNRECORDED_REASONS_SPEC = _Map(_CODE, "int", len(UNRECORDED_REASONS))
 
@@ -869,8 +882,8 @@ _DAY_SKIP_SPEC = {
     "batch_id": "ident",
     "shadow_mode": "code",
     "reason": _enum(*DAY_SKIP_REASONS),
-    "key_unavailable_reason": _enum(*(r.value for r in KeyUnavailableReason)),
-    "unrecorded_owner_count": "int",
+    "key_unavailable_reason": _opt(_enum(*(r.value for r in KeyUnavailableReason))),
+    "unrecorded_owner_count": _opt("int"),
 }
 
 INDEX_ID_PREFIX: Final = "allocation_shadow_index"
@@ -1003,21 +1016,38 @@ def build_day_skip_record(
     business_date: dt.date,
     batch_id: str,
     shadow_mode: str,
-    reason: KeyUnavailableReason,
-    unrecorded_owner_count: int,
+    reason: str,
+    key_unavailable_reason: KeyUnavailableReason | None = None,
+    unrecorded_owner_count: int | None = None,
 ) -> dict[str, Any]:
-    """鍵が取れない日の記録(owner を持たない)。理由コードと記録できなかった件数だけ。"""
-    if not isinstance(reason, KeyUnavailableReason):
-        raise _schema_fail("reason", "must be a KeyUnavailableReason")
+    """記録が 1 件も書けない日の記録(owner を持たない)。理由コードと、分かる場合の件数だけ。
+
+    * reason = KEY_UNAVAILABLE: key_unavailable_reason と unrecorded_owner_count(記録対象になった
+      owner のうち記録できなかった数。OWNER_CAP で切った分は含めない)が要る
+    * それ以外(バッチ共通の入力が作れない日): owner が分からないので、どちらも持たない
+    ★ 『owner 0 件の索引』の代わりには使えない・使わない(CLI が『動いたが 0 件』と誤表示するため)
+    """
+    if reason not in DAY_SKIP_REASONS:
+        raise _schema_fail("reason", "must be one of the day-skip reasons")
+    if key_unavailable_reason is not None and not isinstance(
+        key_unavailable_reason, KeyUnavailableReason
+    ):
+        raise _schema_fail("key_unavailable_reason", "must be a KeyUnavailableReason")
     record = {
         "schema_version": SCHEMA_VERSION,
         "record_kind": DAY_SKIP_RECORD_KIND,
         "business_date": _date_text(business_date),
         "batch_id": _ident_text(batch_id, "batch_id"),
         "shadow_mode": shadow_mode,
-        "reason": "KEY_UNAVAILABLE",
-        "key_unavailable_reason": reason.value,
-        "unrecorded_owner_count": _count(unrecorded_owner_count, "unrecorded_owner_count"),
+        "reason": reason,
+        "key_unavailable_reason": (
+            key_unavailable_reason.value if key_unavailable_reason is not None else None
+        ),
+        "unrecorded_owner_count": (
+            _count(unrecorded_owner_count, "unrecorded_owner_count")
+            if unrecorded_owner_count is not None
+            else None
+        ),
     }
     validate_day_skip_record(record)
     return record
@@ -1029,3 +1059,8 @@ def validate_day_skip_record(record: Mapping[str, Any]) -> None:
     _check(_DAY_SKIP_SPEC, record, "record")
     if record["schema_version"] != SCHEMA_VERSION or record["record_kind"] != DAY_SKIP_RECORD_KIND:
         raise _schema_fail("record", "is not this kind or version")
+    keyed = record["reason"] == KEY_UNAVAILABLE_DAY_SKIP
+    if keyed != (record["key_unavailable_reason"] is not None):
+        raise _schema_fail("key_unavailable_reason", "is required only for KEY_UNAVAILABLE")
+    if keyed != (record["unrecorded_owner_count"] is not None):
+        raise _schema_fail("unrecorded_owner_count", "is required only for KEY_UNAVAILABLE")
