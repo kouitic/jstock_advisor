@@ -32,6 +32,10 @@ _TEMPLATE_PATH = _REPO_ROOT / "infra" / "template.yaml"
 
 _TABLE_LOGICAL_ID = "AvailableCashTable"
 _AUTHORIZED_FUNCTION = "LineWebhookFunction"
+# Issue #602(#128 R1。USER 承認 = #122 issuecomment-6138462304【4】O1 案): 購入側 Shadow(Q')が
+# 買付余力を読む 2 関数。GetItem だけ(書込・列挙・index なし)
+_SHADOW_READ_FUNCTIONS = ("BuyCandidatesFunction", "BuyCandidateWorkerFunction")
+_SHADOW_READ_SID = "AvailableCashReadOnly"
 
 
 class _CfnLoader(yaml.SafeLoader):
@@ -121,24 +125,28 @@ def test_available_cash_table_has_same_data_protection_as_holding_decision_runti
     assert props["PointInTimeRecoverySpecification"]["PointInTimeRecoveryEnabled"] is True
 
 
-def test_only_line_webhook_function_is_granted_available_cash_table_access(
-    template: dict[str, Any],
-) -> None:
-    """AvailableCashを実際に読み書きするのはLineWebhookFunctionのみ
-    (#592)。CLI(#594)はLambda不要、他の定期実行Lambdaは一切触れないため、
-    最小権限の原則としてLineWebhookFunction以外への付与を禁止する。
-    """
-    granted_functions = []
+def _functions_referencing_the_table(template: dict[str, Any]) -> list[str]:
+    granted = []
     for logical_id, resource in template["Resources"].items():
         if resource.get("Type") != "AWS::Serverless::Function":
             continue
         policies = resource["Properties"].get("Policies", [])
         if _TABLE_LOGICAL_ID in _collect_referenced_logical_ids(policies):
-            granted_functions.append(logical_id)
+            granted.append(logical_id)
+    return granted
 
-    assert granted_functions == [_AUTHORIZED_FUNCTION], (
-        f"AvailableCashTableへのIAM権限が想定外のFunctionへ付与されている: "
-        f"{granted_functions}(想定は{_AUTHORIZED_FUNCTION}のみ)"
+
+def test_only_the_three_intended_functions_are_granted_available_cash_table_access(
+    template: dict[str, Any],
+) -> None:
+    """AvailableCashを実際に扱うのは、LineWebhookFunction(読み書き。#592)と、購入側 Shadow が
+    読む BuyCandidatesFunction / BuyCandidateWorkerFunction(GetItem のみ。#602 O1)の 3 つだけ。
+    CLI(#594)はLambda不要、他の定期実行Lambdaは一切触れないため、最小権限の原則として
+    これ以外への付与を禁止する。
+    """
+    granted = sorted(_functions_referencing_the_table(template))
+    assert granted == sorted([_AUTHORIZED_FUNCTION, *_SHADOW_READ_FUNCTIONS]), (
+        f"AvailableCashTableへのIAM権限が想定外のFunctionへ付与されている: {granted}"
     )
 
 
@@ -159,3 +167,88 @@ def test_available_cash_table_grants_only_get_and_put_item(template: dict[str, A
     assert actions == {"dynamodb:GetItem", "dynamodb:PutItem"}, (
         f"AvailableCashTableへ付与されたactionが最小権限でない: {actions}"
     )
+
+
+# ---- #602 O1: 購入側 Shadow の買付余力の読取(GetItem のみ)----------------------------------
+
+
+@pytest.mark.parametrize("function_id", _SHADOW_READ_FUNCTIONS)
+def test_the_shadow_functions_can_only_get_item_on_the_available_cash_table(
+    template: dict[str, Any], function_id: str
+) -> None:
+    policies = template["Resources"][function_id]["Properties"]["Policies"]
+    actions = _collect_actions_for_resource(policies, _TABLE_LOGICAL_ID)
+    # PutItem・UpdateItem・DeleteItem・Scan・Query・BatchGetItem・ConditionCheckItem を混入させない
+    assert actions == {"dynamodb:GetItem"}, f"{function_id}: {actions}"
+
+
+@pytest.mark.parametrize("function_id", _SHADOW_READ_FUNCTIONS)
+def test_the_shadow_read_grant_is_a_dedicated_exact_statement(
+    template: dict[str, Any], function_id: str
+) -> None:
+    policies = template["Resources"][function_id]["Properties"]["Policies"]
+    statements = [
+        statement
+        for policy in policies
+        if isinstance(policy, dict) and "Statement" in policy
+        for statement in policy["Statement"]
+        if _TABLE_LOGICAL_ID in _collect_referenced_logical_ids(statement.get("Resource"))
+    ]
+    # 共有 Statement(DynamoDbCrudAccess)へ混ぜず、専用の 1 つだけ
+    assert len(statements) == 1, f"{function_id}: {len(statements)} statements"
+    (statement,) = statements
+    assert statement["Sid"] == _SHADOW_READ_SID
+    assert statement["Effect"] == "Allow"
+    assert statement["Action"] == ["dynamodb:GetItem"]
+    # Resource は表の ARN だけ(GSI の /index/* ・ワイルドカード・他の表を付けない)
+    assert statement["Resource"] == [{"GetAtt": f"{_TABLE_LOGICAL_ID}.Arn"}]
+
+
+@pytest.mark.parametrize("function_id", _SHADOW_READ_FUNCTIONS)
+def test_the_shared_crud_statement_of_the_shadow_functions_does_not_include_the_table(
+    template: dict[str, Any], function_id: str
+) -> None:
+    policies = template["Resources"][function_id]["Properties"]["Policies"]
+    for policy in policies:
+        if not isinstance(policy, dict) or "Statement" not in policy:
+            continue
+        for statement in policy["Statement"]:
+            if statement.get("Sid") == "DynamoDbCrudAccess":
+                assert _TABLE_LOGICAL_ID not in _collect_referenced_logical_ids(
+                    statement.get("Resource")
+                )
+
+
+def test_the_line_webhook_grant_is_not_weakened_or_widened(template: dict[str, Any]) -> None:
+    policies = template["Resources"][_AUTHORIZED_FUNCTION]["Properties"]["Policies"]
+    actions = _collect_actions_for_resource(policies, _TABLE_LOGICAL_ID)
+    assert actions == {"dynamodb:GetItem", "dynamodb:PutItem"}
+
+
+def test_the_shadow_read_grant_adds_no_environment_variable_or_parameter(
+    template: dict[str, Any],
+) -> None:
+    # Q' は表名を既存の DYNAMODB_TABLE_PREFIX(Globals)から解決する。新しい環境変数・Parameter なし
+    for function_id in _SHADOW_READ_FUNCTIONS:
+        env = template["Resources"][function_id]["Properties"].get("Environment", {})
+        assert _TABLE_LOGICAL_ID not in _collect_referenced_logical_ids(env)
+    assert not [
+        name for name in template.get("Parameters", {}) if "AvailableCash" in name or "Cash" in name
+    ]
+
+
+def test_the_inline_policy_statements_of_the_shadow_functions_stay_well_under_the_iam_limit(
+    template: dict[str, Any],
+) -> None:
+    """IAM の inline policy は 1 role あたり 10,240 文字が上限。SAM のポリシーテンプレートの展開後の
+    実サイズは template からは測れない(AWS 上の実測は IAM の読取権限が要る)ため、明示した
+    Statement だけの保守的な目安(JSON の長さ)で、上限に近づいていないことの警報にする。
+    ChangeSet の CREATE 時に CloudFormation が上限超過を検出する(= 最終の防壁)。
+    """
+    import json
+
+    for function_id in _SHADOW_READ_FUNCTIONS:
+        policies = template["Resources"][function_id]["Properties"]["Policies"]
+        explicit = [p for p in policies if isinstance(p, dict) and "Statement" in p]
+        size = len(json.dumps(explicit, ensure_ascii=False, separators=(",", ":")))
+        assert size < 6000, f"{function_id}: explicit statements = {size} chars"
