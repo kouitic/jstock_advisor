@@ -719,10 +719,12 @@ def _importers_of(target: str, own: Path) -> list[str]:
     return found
 
 
-def test_the_only_importer_is_the_record_module_so_it_is_dormant() -> None:
-    """dormant: P-b の記録の形 1 つ以外、どこからも import されない(配線は P-b3・P-b4)。"""
+def test_only_the_p_b_modules_import_it_so_it_is_dormant() -> None:
+    """dormant: P-b の記録の形・入力の組み立て・reader だけ。配線は P-b3・P-b4。"""
     assert _importers_of("rotation_observation", _MODULE_PATH) == [
-        "domain/signals/rotation_observation_record.py"
+        "domain/signals/rotation_observation_record.py",
+        "infrastructure/aws/rotation_observation_reader.py",
+        "services/rotation_observation_inputs.py",
     ]
 
 
