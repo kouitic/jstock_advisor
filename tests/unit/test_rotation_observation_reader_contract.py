@@ -481,6 +481,21 @@ def test_a_body_whose_offset_is_not_zero_is_a_read_failure_even_when_the_attribu
     assert _read().status is RecordStatus.FAILED
 
 
+def test_an_attribute_that_is_not_utc_text_fails_even_when_the_body_is_utc_and_inside(
+    tables: Any,
+) -> None:
+    """属性(文字列の範囲に使う値)と本体が食い違う = 書き手の異常。本体だけを信じない。"""
+    _put_raw(_HOLDING, "2026-10-13T23:01:00+09:00", body_stamp="2026-10-13T23:01:00+00:00")
+
+    assert _read().status is RecordStatus.FAILED
+
+
+def test_an_attribute_ending_in_z_is_accepted_as_utc(tables: Any) -> None:
+    _put_raw(_HOLDING, "2026-10-13T23:01:00Z", body_stamp="2026-10-13T23:01:00+00:00")
+
+    assert _read().status is RecordStatus.FOUND
+
+
 def test_a_body_that_disagrees_with_the_window_is_a_read_failure(tables: Any) -> None:
     _put_raw(_HOLDING, "2026-10-13T23:01:00+00:00", body_stamp="2026-10-13T21:00:00+00:00")
 
