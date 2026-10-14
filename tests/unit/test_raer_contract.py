@@ -939,6 +939,7 @@ _ALLOWED_IMPORTERS = {
     "domain/signals/allocation_inputs.py",  # #603 PR-F1(候補の RaerResult を受ける)
     "domain/signals/allocation_shadow_record.py",  # #603 PR-F2-1(RaerResult を記録へ写す)
     "domain/valuation/raer_inputs.py",  # #602 PR-G1(入力の組み立て。RaerResult を作る)
+    "services/allocation_shadow_compute.py",  # #603 PR-F2-2a(RAER を計算して候補へ渡す。dormant)
 }
 
 
