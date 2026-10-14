@@ -543,7 +543,7 @@ def _imported_modules(tree: ast.Module) -> set[str]:
 
 
 def test_nothing_in_src_imports_the_policy_loader() -> None:
-    """本 module を import してよい src は明示の一覧だけ(出荷 OFF の Shadow の枠だけが読む)。
+    """本 module を import してよい src は明示の一覧だけ(出荷 SHADOW の Shadow の枠だけが読む)。
 
     許可は PR-F1 の入力の組み立て・PR-F2 の記録と計算の組み立て・F2-2b の配線(方針の束を読む。
     設定 ON のときだけ import される)。一覧に無い handler・CLI・services からは落ちる。
@@ -557,7 +557,7 @@ def test_nothing_in_src_imports_the_policy_loader() -> None:
     assert importers == [
         "domain/signals/allocation_inputs.py",
         "domain/signals/allocation_shadow_record.py",  # #603 PR-F2-1(方針の値を記録へ写す)
-        "lambda_handlers/allocation_shadow_wiring.py",  # #603 PR-F2-2b(方針の束を読む。出荷 OFF)
+        "lambda_handlers/allocation_shadow_wiring.py",  # #603 PR-F2-2b(方針の束を読む。出荷 SHADOW)
         "services/allocation_shadow_compute.py",  # #603 PR-F2-2a(方針の束を受ける)
     ]
 

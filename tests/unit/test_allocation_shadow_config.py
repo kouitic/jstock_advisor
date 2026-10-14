@@ -31,11 +31,12 @@ def _write(tmp_path: Path, text: str) -> Path:
     return tmp_path
 
 
-def test_shipped_config_is_off_with_the_approved_time_parameters() -> None:
+def test_shipped_config_is_shadow_with_the_approved_time_parameters() -> None:
+    """R1(#128)の出荷値は SHADOW(USER の別承認 = G0)。時間のパラメータは承認済みの設計値のまま。"""
     config = load_allocation_shadow_config(_REPO_CONFIG_DIR)
 
-    assert config.mode is AllocationShadowMode.OFF
-    assert config.enabled is False
+    assert config.mode is AllocationShadowMode.SHADOW
+    assert config.enabled is True
     assert config.min_remaining_seconds == 120.0
     assert config.time_limit_seconds == 30.0
     assert config.io_timeout_seconds == 5.0
