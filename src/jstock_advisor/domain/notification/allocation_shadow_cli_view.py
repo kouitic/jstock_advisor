@@ -75,6 +75,8 @@ ALLOCATION_REASONS: Final[Mapping[str, str]] = {
     "HIGH_RISK_ALLOCATION_CAP_APPLIED": "high-risk の比率上限で制限",
     "HIGH_RISK_UNKNOWN": "high-risk の保有額が不明のため配分しない",
     "TIER_CAP_APPLIED": "価格帯の段階上限で制限",
+    # 診断用(順位ではない)。日単位の理由(UNAVAILABLE_REASONS の同名)とは別の表で、文も別
+    "RAER_NOT_COMPARABLE": "比較できない日のため評価していない(診断。順位ではない)",
 }
 UNAVAILABLE_REASONS: Final[Mapping[str, str]] = {
     "CASH_NOT_REGISTERED": "買付余力が未登録",

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import dataclasses
 import datetime as dt
 import inspect
 import json
@@ -1157,3 +1158,85 @@ def test_the_raer_axis_reason_codes_with_a_colon_are_accepted(tmp_path: Path) ->
         record["candidates"][0]["raer_out"]["reason_codes"] = [bad]
         with pytest.raises(RecordSchemaError):
             validate_items_record(record)
+
+
+# --- #603 段 4: 比較できない日の記録(候補ごとの診断行)--------------------------------------------
+
+
+def _three_axis_raer() -> RaerResult:
+    """全軸が揃わない RAER(3 軸。比較キーが別)。"""
+    axes = frozenset(sorted(_ALL_AXES)[:3])
+    return dataclasses.replace(
+        raer("40"),
+        state=RaerState.PROVISIONAL,
+        comparison_key=make_comparison_key(MODEL_VERSION, axes),
+        axes_applied=axes,
+        axes_not_applied=_ALL_AXES - axes,
+        reason_codes=("AXIS_NOT_IMPLEMENTED",),
+    )
+
+
+def _not_comparable_record(tmp_path: Path) -> dict[str, Any]:
+    bundle = decided_bundle(tmp_path)
+    candidates = [
+        CandidateRecord(
+            stock_code=code,
+            buy_action=BuyAction.BUY,
+            current_price=D("1000"),
+            sector=S.GENERAL,
+            trading_unit=None,
+            raer=value,
+        )
+        for code, value in (("0001", raer("30")), ("0002", _three_axis_raer()))
+    ]
+    inputs = assemble_allocation_inputs(
+        owner=OWNER,
+        now=_NOW,
+        candidates=candidates,
+        holdings=[
+            HoldingRecord(
+                owner=OWNER,
+                stock_code="9001",
+                shares=10000,
+                current_price=D("1000"),
+                sector=S.BANK,
+                risk=RiskObserved(flags=frozenset(), unobserved=frozenset()),
+            )
+        ],
+        cash=CashInput(CASH.amount, CASH.last_reconciled_at),
+        bundle=bundle,
+    )
+    result = inputs.optimize(bundle)
+    return build_items_record(
+        meta=META, bundle=bundle, cash=CASH, inputs=inputs, result=result, details={}
+    )
+
+
+def test_a_not_comparable_day_records_a_diagnostic_row_per_candidate(tmp_path: Path) -> None:
+    record = _not_comparable_record(tmp_path)
+
+    validate_items_record(record)
+    assert record["run"]["status"] == "UNAVAILABLE"
+    assert record["run"]["unavailable_reason"] == "RAER_NOT_COMPARABLE"  # ★ 不変 ★
+    assert record["model"]["contract_version"] == "C603-v1.3"
+    by_code = {c["stock_code"]: c for c in record["candidates"]}
+    assert sorted(by_code) == ["0001", "0002"]
+    for section in by_code.values():
+        row = section["allocation"]
+        assert row is not None
+        assert row["reason_code"] == "RAER_NOT_COMPARABLE"
+        assert row["decision"] == "NOT_ALLOCATED"
+        assert row["rank"] is None  # ★ 診断用。順位ではない ★
+        assert row["shares"] == 0 and row["amount"] == "0"
+    # 候補別の RAER・適用軸・比較キー(既に残る診断情報)も同じ記録に残る
+    assert by_code["0001"]["raer_out"]["comparison_key"] == KEY
+    assert by_code["0002"]["raer_out"]["comparison_key"] != KEY
+    assert len(by_code["0002"]["raer_out"]["applied_axes"]) == 3
+    assert len(by_code["0001"]["raer_out"]["applied_axes"]) == len(_ALL_AXES)
+
+
+def test_a_not_comparable_record_has_no_rank_anywhere_and_replays(tmp_path: Path) -> None:
+    record = _not_comparable_record(tmp_path)
+
+    assert [c["allocation"]["rank"] for c in record["candidates"]] == [None, None]
+    assert replay_items_record(record).matched is True

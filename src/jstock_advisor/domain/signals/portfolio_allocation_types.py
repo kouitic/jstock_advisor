@@ -1,4 +1,4 @@
-"""Issue #603 / PR-A: 配分(Portfolio Allocation)の型・方針の完全性(C603-v1.2)。
+"""Issue #603 / PR-A: 配分(Portfolio Allocation)の型・方針の完全性(C603-v1.3)。
 
 **純粋な型と検証だけ**である。計算(optimizer。PR-C)・閾値の決定・専用 YAML と loader(PR-E)・
 入力の組み立てと shadow 記録(PR-F)・資金入替(PR-D)は含まない。ネットワーク・ファイル・AWS・
@@ -36,7 +36,10 @@ from typing import Final
 from jstock_advisor.domain.entities.enums import BUY_FAMILY_ACTIONS, BuyAction
 from jstock_advisor.domain.valuation.raer import RaerResult, RiskFlag
 
-CONTRACT_VERSION: Final = "C603-v1.2"
+# 契約の版。規約: 『理由コード(語彙)の追加』は版を上げる(記録を読む側が『この語を持ち得る記録』を
+# 版で選別できる)/ 『記録の optional key の追加』は schema_version を据え置く。
+# v1.3 = ReasonCode に RAER_NOT_COMPARABLE を追加(比較できない日の候補ごとの診断行。#603 段 4)
+CONTRACT_VERSION: Final = "C603-v1.3"
 
 #: 方針の項目名の語彙(`AllocationPolicy.missing()` が返してよい名前)。この並びで返す
 POLICY_ITEMS: Final = (
@@ -108,12 +111,21 @@ class ReasonCode(StrEnum):
     HIGH_RISK_ALLOCATION_CAP_APPLIED = "HIGH_RISK_ALLOCATION_CAP_APPLIED"
     HIGH_RISK_UNKNOWN = "HIGH_RISK_UNKNOWN"
     TIER_CAP_APPLIED = "TIER_CAP_APPLIED"
+    #: ★ 診断用 ★(段 4)。『この日 RAER が比べられなかったので、この候補は評価していない』。
+    #: 順位ではない(rank を持てない)・配分でもない(株数・金額は 0)
+    RAER_NOT_COMPARABLE = "RAER_NOT_COMPARABLE"
 
 
 #: 順位付けに進まない(= rank を持たない)理由
-_UNRANKED_REASONS: Final = frozenset({ReasonCode.RAER_UNAVAILABLE, ReasonCode.BELOW_HURDLE})
+_UNRANKED_REASONS: Final = frozenset(
+    {ReasonCode.RAER_UNAVAILABLE, ReasonCode.BELOW_HURDLE, ReasonCode.RAER_NOT_COMPARABLE}
+)
 #: 方針が不完全のときの『順位だけの shadow』が持てる理由
 _SHADOW_REASONS: Final = frozenset({ReasonCode.POLICY_INCOMPLETE, ReasonCode.RAER_UNAVAILABLE})
+#: 比較できない日(段 4)の診断行が持てる理由。★ 順位を持たない ★(_UNRANKED_REASONS の部分集合)
+_NOT_COMPARABLE_REASONS: Final = frozenset(
+    {ReasonCode.RAER_NOT_COMPARABLE, ReasonCode.RAER_UNAVAILABLE}
+)
 
 
 # --- 検証の補助 -------------------------------------------------------------------------------
@@ -417,6 +429,12 @@ class AllocationResult:
             raise _fail("result.unavailable_reason", "an unavailable result needs a reason")
         if allocated or self.total_allocated != 0 or self.remaining_cash is not None:
             raise _fail("result", "an unavailable result holds no allocation and no remainder")
+        if reason is UnavailableReason.RAER_NOT_COMPARABLE:
+            # 診断行(順位なし・配分なし)だけを持てる。★ policy_missing は要求しない ★
+            # (比較できない日は、方針が完全でも起こる)
+            if any(a.reason_code not in _NOT_COMPARABLE_REASONS for a in self.allocations):
+                raise _fail("result.allocations", "a not-comparable day holds only its own reasons")
+            return
         if reason is not UnavailableReason.POLICY_INCOMPLETE:
             if self.allocations:
                 raise _fail("result.allocations", "only an incomplete policy keeps a shadow")

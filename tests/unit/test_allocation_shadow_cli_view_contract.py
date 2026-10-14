@@ -987,3 +987,11 @@ def test_a_plain_unreadable_string_is_still_shown_raw_as_documented() -> None:
     assert format_decimal({"a": 1}) == view.UNKNOWN_TEXT
     assert format_decimal([1]) == view.UNKNOWN_TEXT
     assert format_decimal(True) == view.UNKNOWN_TEXT
+
+
+def test_the_candidate_level_not_comparable_text_differs_from_the_day_level_one() -> None:
+    """SHOULD-3: 同じ綴りが日単位と候補ごとの表にある。文を別にして、診断行を順位と読ませない。"""
+    day = view.UNAVAILABLE_REASONS["RAER_NOT_COMPARABLE"]
+    candidate = view.ALLOCATION_REASONS["RAER_NOT_COMPARABLE"]
+    assert day != candidate
+    assert "診断" in candidate and "順位ではない" in candidate

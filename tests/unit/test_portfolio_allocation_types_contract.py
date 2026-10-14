@@ -25,6 +25,7 @@ import datetime as dt
 import itertools
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -150,7 +151,11 @@ def not_allocated(
         "cap_limited_shares": 0,
         "cash_shortfall": D("0"),
     }
-    if reason not in (pt.ReasonCode.RAER_UNAVAILABLE, pt.ReasonCode.BELOW_HURDLE):
+    if reason not in (
+        pt.ReasonCode.RAER_UNAVAILABLE,
+        pt.ReasonCode.BELOW_HURDLE,
+        pt.ReasonCode.RAER_NOT_COMPARABLE,
+    ):
         base["rank"] = 1
     base.update(over)
     return pt.CandidateAllocation(**base)  # type: ignore[arg-type]
@@ -233,12 +238,14 @@ def test_the_enums_have_exactly_the_agreed_members() -> None:
         "HIGH_RISK_ALLOCATION_CAP_APPLIED",
         "HIGH_RISK_UNKNOWN",
         "TIER_CAP_APPLIED",
+        "RAER_NOT_COMPARABLE",  # #603 段 4(診断用。順位ではない)
     }
 
 
 def test_the_contract_version_is_fixed() -> None:
-    assert pt.CONTRACT_VERSION == "C603-v1.2"
-    assert result().contract_version == "C603-v1.2"
+    # v1.3 = ReasonCode に RAER_NOT_COMPARABLE を追加(語彙の追加は版を上げる規約)
+    assert pt.CONTRACT_VERSION == "C603-v1.3"
+    assert result().contract_version == "C603-v1.3"
 
 
 def test_the_error_is_a_value_error() -> None:
@@ -1004,3 +1011,83 @@ def test_an_allocated_candidate_cannot_have_a_zero_amount_in_a_whole_result() ->
             total_allocated=D("0"),
             remaining_cash=D("768000"),
         )
+
+
+# --- #603 段 4: 比較できない日の診断行(RAER_NOT_COMPARABLE)--------------------------------
+
+
+def _not_comparable_day(
+    *rows: pt.CandidateAllocation, policy_missing: tuple[str, ...] = ()
+) -> pt.AllocationResult:
+    return pt.AllocationResult(
+        owner="owner-a",
+        status=pt.AllocationStatus.UNAVAILABLE,
+        unavailable_reason=pt.UnavailableReason.RAER_NOT_COMPARABLE,
+        allocations=tuple(rows),
+        total_allocated=D("0"),
+        remaining_cash=None,
+        policy_missing=policy_missing,
+    )
+
+
+def test_the_not_comparable_reason_is_unranked_by_both_conditions() -> None:
+    """★ 診断行は rank を持てない(rank つきは拒否)。rank なしは UNRANKED の理由だけ(双条件)★"""
+    assert pt.ReasonCode.RAER_NOT_COMPARABLE in pt._UNRANKED_REASONS
+    row = not_allocated("0002", pt.ReasonCode.RAER_NOT_COMPARABLE)
+    assert row.rank is None and row.shares == 0 and row.amount == D("0")
+    with pytest.raises(pt.AllocationContractError):
+        not_allocated("0002", pt.ReasonCode.RAER_NOT_COMPARABLE, rank=1)
+
+
+def test_a_not_comparable_day_may_keep_diagnostic_rows_even_when_the_policy_is_complete() -> None:
+    """SHOULD-1: 比較できない日は方針が完全でも起こる。policy_missing を要求しない。"""
+    result = _not_comparable_day(
+        not_allocated("0002", pt.ReasonCode.RAER_NOT_COMPARABLE),
+        not_allocated("0003", pt.ReasonCode.RAER_UNAVAILABLE),
+    )
+    assert result.policy_missing == () and len(result.allocations) == 2
+    assert _not_comparable_day().allocations == ()  # 行が 0 件の日(従来の形)も構築できる
+
+
+def test_a_not_comparable_day_may_also_name_the_missing_policy_items() -> None:
+    result = _not_comparable_day(
+        not_allocated("0002", pt.ReasonCode.RAER_NOT_COMPARABLE),
+        policy_missing=("comparison_key",),
+    )
+    assert result.policy_missing == ("comparison_key",)
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        pytest.param(lambda: allocated("0002"), id="allocated"),
+        pytest.param(
+            lambda: not_allocated("0002", pt.ReasonCode.POLICY_INCOMPLETE), id="shadow-reason"
+        ),
+        pytest.param(lambda: not_allocated("0002", pt.ReasonCode.BELOW_HURDLE), id="below-hurdle"),
+        pytest.param(
+            lambda: not_allocated("0002", pt.ReasonCode.SECTOR_UNKNOWN), id="other-reason"
+        ),
+    ],
+)
+def test_a_not_comparable_day_holds_only_its_own_reasons(row: Any) -> None:
+    with pytest.raises(pt.AllocationContractError):
+        _not_comparable_day(row())
+
+
+def test_the_other_unavailable_days_still_keep_no_rows() -> None:
+    reasons = (
+        pt.UnavailableReason.CASH_NOT_REGISTERED,
+        pt.UnavailableReason.PORTFOLIO_VALUE_UNAVAILABLE,
+    )
+    for reason in reasons:
+        with pytest.raises(pt.AllocationContractError):
+            pt.AllocationResult(
+                owner="owner-a",
+                status=pt.AllocationStatus.UNAVAILABLE,
+                unavailable_reason=reason,
+                allocations=(not_allocated("0002", pt.ReasonCode.RAER_NOT_COMPARABLE),),
+                total_allocated=D("0"),
+                remaining_cash=None,
+                policy_missing=(),
+            )
