@@ -30,7 +30,7 @@ from typer.testing import CliRunner
 from jstock_advisor.cli import available_cash as cli_module
 
 _ENV = "AWS_LAMBDA_FUNCTION_NAME"
-_GUARD = "_reject_when_aws_env_is_set"
+_GUARD = "_reject_available_cash_when_aws_env_is_set"
 _runner = CliRunner()
 _REPO = Path(__file__).resolve().parents[2]
 _MANUAL = _REPO / "docs" / "operations_manual.md"

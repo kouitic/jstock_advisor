@@ -19,7 +19,7 @@ app = typer.Typer(help="買付余力(available_cash)の参照・棚卸し更新"
 _AWS_OVERRIDE_ENV_VAR = "AWS_LAMBDA_FUNCTION_NAME"
 
 
-def _reject_when_aws_env_is_set(command: str) -> None:
+def _reject_available_cash_when_aws_env_is_set(command: str) -> None:
     """show / reconcile を、AWS_LAMBDA_FUNCTION_NAME が設定された環境で実行させない(Issue #923)。
 
     保存先は `running_on_lambda()`(この環境変数が空でない値で設定されているか)だけで決まり、
@@ -58,7 +58,7 @@ def show_available_cash(
     owner: str = typer.Option(..., "--owner", help="所有者"),
 ) -> None:
     """owner単位の現在の買付余力を表示する(未登録と0円を区別する)。"""
-    _reject_when_aws_env_is_set("show")
+    _reject_available_cash_when_aws_env_is_set("show")
     service = AvailableCashService()
     try:
         record = service.get(owner)
@@ -91,7 +91,7 @@ def reconcile_available_cash(
 
     過去の理論値との差額イベントは作らない(入力値をそのまま正とする。#589と同じ契約)。
     """
-    _reject_when_aws_env_is_set("reconcile")
+    _reject_available_cash_when_aws_env_is_set("reconcile")
     parsed_amount = _parse_decimal(amount, "買付余力")
     service = AvailableCashService()
     now = dt.datetime.now(dt.UTC)
