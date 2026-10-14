@@ -291,12 +291,10 @@ class _Loop:
                 )
                 count("WRITE_FAILED")
                 continue
-            # 総予算が尽きていれば、記録は 1 owner だけ(io_timeout が上限)許す。2 人目からは書かない
+            # 総予算が尽きていれば、記録は 1 owner だけ(io_timeout が上限)許す。2 人目からは、上の
+            # 判定(期限切れ かつ 予算超過の書込が使用済み)が計算の前に止める
             over_budget = ctx.deadline.expired()
             if over_budget:
-                if over_budget_used:
-                    count("BUDGET_EXHAUSTED", len(owners) - position)
-                    break
                 over_budget_used = True
             written = self._record_owner(resolved, computed, allow_over_budget=over_budget)
             if written is None:

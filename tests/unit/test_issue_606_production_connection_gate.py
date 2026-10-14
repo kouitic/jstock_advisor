@@ -273,6 +273,13 @@ def test_the_exemption_is_exactly_the_unconnected_modules_the_shadow_frame_reach
     assert all(why.startswith("#122 …6138622792【1】") for why in _SHADOW_FRAME_EXEMPT.values())
 
 
+def test_the_cli_root_reaches_none_of_the_exempt_modules() -> None:
+    """免除は handler の根だけ。CLI の根は 10 件のどれにも到達しない(記録を辞書で読むだけ)。"""
+    cli = _reachable_from_root(_CLI_ROOT_PREFIX)
+
+    assert not cli & set(_SHADOW_FRAME_EXEMPT)
+
+
 def test_the_token_and_prefix_nets_are_untouched_by_the_exemption() -> None:
     """★ token 6 語・prefix 1 行は 1 語も消えていない(免除は『削除』ではない)★。"""
     for token in (

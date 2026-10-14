@@ -1274,12 +1274,21 @@ def _process_single_candidate(
 def _shadow_candidate_ids(progress: BatchProgress) -> dict[str, str]:
     """finalize の ranking entries(BUY 候補)→ 銘柄コード → 推奨 ID。読めない entry は飛ばす。"""
     ids: dict[str, str] = {}
+    unreadable = 0
     for entry in progress.ranking_entries:
         try:
             _, stock_code, recommendation_id = _decode_buy_ranking_entry(entry)
         except ValueError:
+            # 自前の符号化と復号が食い違ったときだけ起きる(バグの信号なので数えて出す)
+            unreadable += 1
             continue
         ids[stock_code] = recommendation_id
+    if unreadable:
+        # 値は出さない(件数だけ)。この候補は Shadow の母数から外れる(黙って消さない)
+        logger.warning(
+            "allocation shadow: %d ranking entr(ies) could not be read and are not candidates",
+            unreadable,
+        )
     return ids
 
 

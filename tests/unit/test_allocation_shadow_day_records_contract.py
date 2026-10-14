@@ -643,6 +643,32 @@ def test_every_reason_prepare_batch_inputs_can_return_can_be_written_as_a_day_sk
     assert derived == set(_INPUT_FAILURES)  # 手書きの一覧との完全一致も併せて残す
 
 
+def test_every_reason_the_entry_precheck_can_return_can_be_written_as_a_day_skip() -> None:
+    """★ 導出の網をもう 1 か所 ★ 入口の判定(`_precheck`)の返し得る理由を AST で全数導出し ⊆ を固定。
+
+    入口の判定に理由が増えたとき、語彙の追加忘れで落ちる(取りこぼし防止)。
+    """
+    service = _COMPUTE.with_name("allocation_shadow_service.py")
+    tree = ast.parse(service.read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_precheck"
+    )
+    derived: set[str] = set()
+    for node in ast.walk(function):
+        if isinstance(node, ast.Return) and node.value is not None:
+            if isinstance(node.value, ast.Constant) and node.value.value is None:
+                continue
+            # 理由は ShadowSkipReason.X の形だけ(変数・式にしない = 導出が成り立つ前提)
+            assert isinstance(node.value, ast.Attribute), ast.dump(node.value)
+            assert getattr(node.value.value, "id", None) == "ShadowSkipReason"
+            derived.add(ShadowSkipReason[node.value.attr].value)
+
+    assert derived == {"TIME_BUDGET"}  # 空振り防止: 実際に導出されている
+    assert derived <= set(DAY_SKIP_REASONS)
+
+
 def test_the_most_likely_input_failures_can_actually_be_written() -> None:
     for reason in ("TIME_LIMIT", "COMPUTATION_FAILED", "TIME_BUDGET"):
         record = build_day_skip_record(

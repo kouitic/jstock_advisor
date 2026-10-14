@@ -461,6 +461,44 @@ def test_a_wiring_that_cannot_be_built_does_not_change_the_main_flow(
     _same_main_flow(broken, baseline)
 
 
+def _progress(entries: list[str]) -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(ranking_entries=entries)
+
+
+def test_readable_ranking_entries_become_candidates_without_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    entries = ["1|50.0|60.0|3.0|2914|rec-a", "1|40.0|60.0|3.0|7203|rec-b"]
+
+    with caplog.at_level("WARNING"):
+        ids = handler_module._shadow_candidate_ids(_progress(entries))
+
+    assert ids == {"2914": "rec-a", "7203": "rec-b"}
+    assert "could not be read" not in caplog.text
+
+
+def test_an_unreadable_ranking_entry_is_counted_in_a_warning_and_never_stops_the_others(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """読めない entry が黙って候補から消えない(件数を WARNING に出す。値は出さない)。"""
+    entries = [
+        "1|50.0|60.0|3.0|2914|rec-a",
+        "SECRET-garbage-entry",  # 区切りが足りない
+        "x|y|z|w|9999|rec-c",  # 数値として読めない
+        "1|40.0|60.0|3.0|7203|rec-b",
+    ]
+
+    with caplog.at_level("WARNING"):
+        ids = handler_module._shadow_candidate_ids(_progress(entries))
+
+    assert ids == {"2914": "rec-a", "7203": "rec-b"}  # 読めた分は落とさない
+    assert "2 ranking entr(ies) could not be read" in caplog.text
+    assert "SECRET-garbage-entry" not in caplog.text  # 値は出さない
+    assert "9999" not in caplog.text
+
+
 # --- W5 Worker 経路と handler の task 経路が残り時間を渡す --------------------------
 
 

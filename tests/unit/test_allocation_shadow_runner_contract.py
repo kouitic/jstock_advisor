@@ -780,6 +780,28 @@ def test_a_precheck_that_starts_failing_mid_run_counts_the_remaining_owners() ->
     assert index["unrecorded_reasons"] == {"BUDGET_EXHAUSTED": 3}
 
 
+def test_an_owner_whose_budget_ran_out_between_the_check_and_the_write_is_counted_not_listed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """予算が計算の後・書込の直前に尽きた(= 書かなかった)owner は索引へ載せず BUDGET_EXHAUSTED。"""
+    original = runner_module._Loop._record_owner
+
+    def starve(self: Any, ref: KeyedOwnerRef, computed: Any, *, allow_over_budget: bool) -> Any:
+        if str(ref) == str(_ref("owner-01")):
+            return False  # 書込の直前に予算が尽きた
+        return original(self, ref, computed, allow_over_budget=allow_over_budget)
+
+    monkeypatch.setattr(runner_module._Loop, "_record_owner", starve)
+    audit = _Audit()
+
+    _run(audit, _owners(3))
+
+    [index] = [r["output_values"] for r in audit.of("allocation_shadow_index")]
+    assert _ref("owner-01") not in index["owner_refs"]  # ★ 書いていない owner は載せない ★
+    assert index["recorded_owner_count"] == 2
+    assert index["unrecorded_reasons"] == {"BUDGET_EXHAUSTED": 1}
+
+
 # =================================================================================================
 # 8 再実行(先着・条件付き)
 # =================================================================================================
