@@ -31,7 +31,12 @@ from typing import Any
 import pytest
 
 from jstock_advisor.domain.entities.enums import BuyAction, BuyIndustrySector, ConfidenceLevel
-from jstock_advisor.domain.entities.identifier_ref import owner_ref
+from jstock_advisor.domain.entities.identifier_ref import (
+    KeyedReferenceRequiredError,
+    KeyMaterial,
+    keyed_owner_ref,
+    owner_ref,
+)
 from jstock_advisor.domain.signals import allocation_shadow_record as rec
 from jstock_advisor.domain.signals import portfolio_allocation_types as pt
 from jstock_advisor.domain.signals.allocation_inputs import (
@@ -101,10 +106,17 @@ def decided_bundle(tmp_path: Path) -> AllocationPolicyBundle:
     return load_allocation_policy(tmp_path, minimum_trading_unit=UNIT)
 
 
+_TEST_KEY = KeyMaterial(key_version=1, key=b"t" * 32)  # テスト用の鍵(秘密ではない)
+
+
+def _keyed(owner: str):  # type: ignore[no-untyped-def]
+    return keyed_owner_ref(owner, _TEST_KEY)
+
+
 META = RecordMeta(
     batch_id="buy-candidates-20261014",
     business_date=dt.date(2026, 10, 14),
-    owner_ref=owner_ref(OWNER),
+    owner_ref=_keyed(OWNER),
     shadow_mode="SHADOW",
     raer_model_version=MODEL_VERSION,
     elapsed_ms=1234,
@@ -174,7 +186,7 @@ def test_a_computed_day_builds_a_valid_json_serializable_record(tmp_path: Path) 
     assert record["schema_version"] == rec.SCHEMA_VERSION == 1
     assert record["record_kind"] == "allocation_shadow_items"
     assert record["business_date"] == "2026-10-14"
-    assert record["owner_ref"] == owner_ref(OWNER)
+    assert record["owner_ref"] == _keyed(OWNER)
     assert record["run"]["outcome"] == "COMPUTED"
     assert record["run"]["status"] == "ALLOCATED_SOME"
 
@@ -302,6 +314,9 @@ def test_a_missing_key_is_rejected_at_every_object_level_except_maps(tmp_path: P
         (("batch_id",), "x" * 300),
         (("owner_ref",), "owner-a"),
         (("owner_ref",), "sha256:abcd1234"),
+        (("owner_ref",), owner_ref("owner-a")),  # kv0(鍵なし)は書かない
+        (("owner_ref",), "kv1:" + "a" * 24),  # 鍵の版が無い
+        (("owner_ref",), "kv1.0:" + "a" * 24),
         (("model", "config_hash"), "ハッシュ"),
         (("cash", "available_cash"), 5000000),
         (("cash", "available_cash"), 5000000.5),
@@ -454,7 +469,7 @@ def test_sentinel_holdings_never_reach_the_record(tmp_path: Path) -> None:
     meta = RecordMeta(
         batch_id=META.batch_id,
         business_date=META.business_date,
-        owner_ref=owner_ref(sentinel_owner),
+        owner_ref=_keyed(sentinel_owner),
         shadow_mode="SHADOW",
         raer_model_version=MODEL_VERSION,
         elapsed_ms=1,
@@ -506,23 +521,29 @@ def test_the_owner_parameter_is_the_reference_type_not_a_plain_str() -> None:
         for node in cls.body
         if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
     }
-    assert annotations["owner_ref"] == "OwnerRef"
+    assert annotations["owner_ref"] == "KeyedOwnerRef"
 
 
-def test_a_plain_owner_string_is_rejected_by_the_schema(tmp_path: Path) -> None:
+@pytest.mark.parametrize("bad_ref", [OWNER, owner_ref(OWNER), "kv1:" + "a" * 24])
+def test_a_plain_or_unkeyed_owner_is_rejected_by_the_builder(tmp_path: Path, bad_ref: str) -> None:
+    """平文の owner・kv0(鍵なし)・鍵の版のない符号は、実行時にも書かせない(USER 決定 #925)。"""
     bundle, inputs, result = scenario(tmp_path)
-    plain = RecordMeta(
+    bad = RecordMeta(
         batch_id=META.batch_id,
         business_date=META.business_date,
-        owner_ref=OWNER,  # type: ignore[arg-type]
+        owner_ref=bad_ref,  # type: ignore[arg-type]
         shadow_mode="SHADOW",
         raer_model_version=MODEL_VERSION,
         elapsed_ms=1,
         read_states=META.read_states,
     )
 
-    with pytest.raises(RecordSchemaError):
-        build_items_record(meta=plain, bundle=bundle, cash=CASH, inputs=inputs, result=result)
+    with pytest.raises(KeyedReferenceRequiredError):
+        build_items_record(meta=bad, bundle=bundle, cash=CASH, inputs=inputs, result=result)
+    with pytest.raises(KeyedReferenceRequiredError):
+        build_header_record(
+            meta=bad, bundle=bundle, cash=CASH, outcome="SKIPPED", skip_reason="X_REASON"
+        )
 
 
 def test_the_raer_extras_and_inputs_are_allowlisted(tmp_path: Path) -> None:
