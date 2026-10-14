@@ -45,7 +45,9 @@ def _pad(text: str, width: int, *, right: bool = False) -> str:
 
 
 def _reason_text(reason: Reason | None) -> str:
-    return _DASH if reason is None else f"{reason.text}({reason.code})"
+    if reason is None:
+        return _DASH
+    return reason.text if reason.code == reason.text else f"{reason.text}({reason.code})"
 
 
 def _opt(value: str | None) -> str:
@@ -148,10 +150,10 @@ def _owner_lines(owner: OwnerSection, *, show_labels: bool) -> list[str]:
             f"   見込み残高(目安): {_opt(owner.expected_remaining_cash)}"
         )
     if owner.incomplete_reasons:
-        joined = "、".join(f"{r.text}({r.code})" for r in owner.incomplete_reasons)
+        joined = "、".join(_reason_text(r) for r in owner.incomplete_reasons)
         lines.append(f"  入力が完全でない理由: {joined}")
     if owner.exclusions:
-        joined = "、".join(f"{r.text}({r.code}) {n} 件" for r, n in owner.exclusions)
+        joined = "、".join(f"{_reason_text(r)} {n} 件" for r, n in owner.exclusions)
         lines.append(f"  配分の対象から除いた候補: {joined}")
     if owner.rows:
         lines.append("  ■ 購入候補(RAER の高い順)")
@@ -176,7 +178,7 @@ def _index_lines(screen: AllocationShadowScreen) -> list[str]:
         f"(鍵の版 {_opt(index.key_version)})"
     ]
     if index.unrecorded_reasons:
-        joined = "、".join(f"{r.text}({r.code}) {n} 件" for r, n in index.unrecorded_reasons)
+        joined = "、".join(f"{_reason_text(r)} {n} 件" for r, n in index.unrecorded_reasons)
         lines.append(f"  未記録の理由: {joined}")
     if screen.state is DayState.PARTIAL:
         lines.append("  ※ 再実行で後から追加された記録は、先着の索引には載りません")
@@ -189,11 +191,12 @@ def _skip_lines(screen: AllocationShadowScreen) -> list[str]:
     skip = screen.skip
     if skip is None:
         return []
-    return [
-        f"日単位の skip: {_reason_text(skip.reason)} / 鍵の取得の失敗: "
-        f"{_reason_text(skip.key_unavailable_reason)} / 記録できなかった所有者 "
-        f"{_opt(skip.unrecorded_owner_count)} 件"
-    ]
+    parts = [f"日単位の skip: {_reason_text(skip.reason)}"]
+    if skip.key_unavailable_reason is not None:  # 鍵の理由は reason = KEY_UNAVAILABLE のときだけ
+        parts.append(f"鍵の取得の失敗: {_reason_text(skip.key_unavailable_reason)}")
+    if skip.unrecorded_owner_count is not None:  # owner が分かる日だけ
+        parts.append(f"記録できなかった所有者 {skip.unrecorded_owner_count} 件")
+    return [" / ".join(parts)]
 
 
 def render_table(screen: AllocationShadowScreen, *, show_labels: bool = True) -> str:

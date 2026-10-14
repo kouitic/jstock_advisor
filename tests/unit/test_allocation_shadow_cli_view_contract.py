@@ -365,17 +365,68 @@ def test_state_3_an_index_with_no_recorded_owner_is_not_the_same_as_no_index() -
     assert DAY_STATE_TEXT[DayState.EMPTY] != DAY_STATE_TEXT[DayState.NO_INDEX]
 
 
-def test_state_4a_no_index_but_a_skip_record_names_the_key_failure() -> None:
+def test_state_4a_no_index_but_a_skip_record_names_the_reason() -> None:
     day = DayInput(_DAY, MISSING, _found(_skip_record()), {})
 
     screen = build_screen(day)
 
-    assert screen.state is DayState.NO_INDEX_KEY_FAILURE
+    assert screen.state is DayState.NO_INDEX_DAY_SKIP
     assert screen.complete is False
     assert screen.skip is not None
     assert screen.skip.key_unavailable_reason is not None
     assert screen.skip.key_unavailable_reason.code == "ACCESS_DENIED"
     assert screen.skip.unrecorded_owner_count == "2"
+
+
+@pytest.mark.parametrize("reason", list(KeyUnavailableReason))
+def test_state_4a_shows_every_key_unavailable_reason(reason: KeyUnavailableReason) -> None:
+    """書込側が記録する鍵の失敗 6 分類を、CLI が 6 通りとも表示できる(#603 F2-2b 設計 rev6)。"""
+    skip = rec.build_day_skip_record(
+        business_date=dt.date(2026, 10, 14),
+        batch_id=_BATCH,
+        shadow_mode="SHADOW",
+        reason="KEY_UNAVAILABLE",
+        key_unavailable_reason=reason,
+        unrecorded_owner_count=2,
+    )
+
+    screen = build_screen(DayInput(_DAY, MISSING, _found(skip), {}))
+
+    assert screen.state is DayState.NO_INDEX_DAY_SKIP
+    assert screen.skip is not None and screen.skip.key_unavailable_reason is not None
+    assert screen.skip.key_unavailable_reason.code == reason.value
+    assert screen.skip.key_unavailable_reason.recognized is True
+    assert screen.unparsed == 0
+    assert reason.value in render_table(screen)
+
+
+@pytest.mark.parametrize("reason", [r for r in rec.DAY_SKIP_REASONS if r != "KEY_UNAVAILABLE"])
+def test_state_4a_input_failure_day_has_no_key_line_and_never_claims_a_key_failure(
+    reason: str,
+) -> None:
+    skip = rec.build_day_skip_record(
+        business_date=dt.date(2026, 10, 14), batch_id=_BATCH, shadow_mode="SHADOW", reason=reason
+    )
+
+    screen = build_screen(DayInput(_DAY, MISSING, _found(skip), {}))
+
+    assert screen.state is DayState.NO_INDEX_DAY_SKIP
+    assert screen.complete is False
+    assert screen.skip is not None
+    assert screen.skip.reason is not None and screen.skip.reason.code == reason
+    assert screen.skip.reason.recognized is True
+    assert screen.skip.key_unavailable_reason is None
+    assert screen.skip.unrecorded_owner_count is None
+    text = render_table(screen)
+    assert reason in text
+    assert "鍵の取得の失敗" not in text  # 入力の失敗の日に鍵の話をしない
+    assert "鍵の取得に失敗" not in DAY_STATE_TEXT[DayState.NO_INDEX_DAY_SKIP]
+    assert "0 件" not in text  # 記録の件数を断定しない
+
+
+def test_every_writer_day_skip_reason_has_a_japanese_text_in_the_cli() -> None:
+    for reason in rec.DAY_SKIP_REASONS:
+        assert reason in view.SKIP_REASONS
 
 
 def test_state_4b_no_index_and_no_skip_never_says_zero_records() -> None:
@@ -987,6 +1038,159 @@ def test_a_plain_unreadable_string_is_still_shown_raw_as_documented() -> None:
     assert format_decimal({"a": 1}) == view.UNKNOWN_TEXT
     assert format_decimal([1]) == view.UNKNOWN_TEXT
     assert format_decimal(True) == view.UNKNOWN_TEXT
+
+
+# =================================================================================================
+# 理由コードの位置(サブちゃんの申し送り #605 …6160614553): 閉じた語彙以外は『不明』/ 数える
+# =================================================================================================
+
+_FREE_TEXT = "自由文 SENTINEL-free-text-9c1d"
+
+
+def _day_with_free_text_everywhere() -> DayInput:
+    record = _owner_record()
+    record["run"]["outcome"] = _FREE_TEXT
+    record["run"]["status"] = _FREE_TEXT
+    record["run"]["skip_reason"] = _FREE_TEXT
+    record["run"]["unavailable_reason"] = _FREE_TEXT
+    record["counts"]["incomplete_reasons"] = [_FREE_TEXT]
+    record["counts"]["exclusions"] = {_FREE_TEXT: 1}
+    first = record["candidates"][0]
+    first["attrs"]["buy_action"] = _FREE_TEXT
+    first["raer_out"]["state"] = _FREE_TEXT
+    first["raer_out"]["confidence"] = _FREE_TEXT
+    first["allocation"]["decision"] = _FREE_TEXT
+    first["allocation"]["reason_code"] = _FREE_TEXT
+    index = _index(unrecorded=1, reasons={_FREE_TEXT: 1})
+    skip = _skip_record()
+    skip["reason"] = _FREE_TEXT
+    skip["key_unavailable_reason"] = _FREE_TEXT
+    ref = compute_tests._ref("owner-a")
+    return DayInput(_DAY, _found(index), _found(skip), {ref: _found(record)})
+
+
+def test_free_text_in_a_reason_position_is_unknown_counted_and_never_printed() -> None:
+    screen = build_screen(_day_with_free_text_everywhere())
+
+    assert screen.complete is False  # 終了コード 3
+    # 理由コードの位置 13 か所 + 確信度 1 か所 = 14 か所(内訳は下の parametrize で 1 つずつ固定)
+    assert screen.unparsed == 14
+    for text in (render_table(screen), render_json(screen), repr(screen)):
+        assert "SENTINEL-free-text" not in text
+        assert "自由文" not in text
+    assert view.UNKNOWN_TEXT in render_table(screen)
+
+
+def test_a_well_formed_but_unknown_code_is_shown_with_the_unsupported_text_and_counted() -> None:
+    screen = build_screen(_real_day_with_reason("BRAND_NEW_CODE"))
+
+    row = screen.owners[0].rows[0]
+    assert row.reason is not None
+    assert (row.reason.code, row.reason.text) == ("BRAND_NEW_CODE", view.UNSUPPORTED_TEXT)
+    assert row.reason.recognized is False
+    assert screen.unparsed == 1
+    assert screen.complete is False
+
+
+@pytest.mark.parametrize("junk", [{"a": 1}, ["x"], 5, True, "", "lower_case", "A" * 80])
+def test_a_reason_that_is_not_a_code_is_unknown_not_dropped(junk: object) -> None:
+    record = _owner_record()
+    record["candidates"][0]["allocation"]["reason_code"] = junk
+
+    screen = build_screen(_day_with(record))
+
+    row = screen.owners[0].rows[0]
+    assert row.reason is not None and row.reason.recognized is False
+    assert row.reason.text == view.UNKNOWN_TEXT
+    assert screen.unparsed >= 1
+    assert screen.complete is False
+
+
+def test_an_absent_reason_is_simply_absent_and_counts_for_nothing() -> None:
+    record = _owner_record()
+    del record["candidates"][1]["allocation"]["reason_code"]
+
+    screen = build_screen(_day_with(record))
+
+    assert screen.owners[0].rows[1].reason is None
+    assert screen.unparsed == 0
+    assert screen.complete is True
+
+
+def test_a_code_of_the_axis_code_shape_that_is_not_in_the_table_is_unrecognised() -> None:
+    reason = view._reason(view.ALLOCATION_REASONS, "AXIS:SOMETHING")
+
+    assert reason is not None and reason.recognized is False  # 形は正しいが表に無い
+    assert reason.text == view.UNSUPPORTED_TEXT
+
+
+def _free_text_at(position: str) -> DayInput:
+    record = _owner_record()
+    index = _index()
+    skip: dict[str, Any] | None = None
+    if position == "run_outcome":
+        record["run"]["outcome"] = _FREE_TEXT
+    elif position == "run_status":
+        record["run"]["status"] = _FREE_TEXT
+    elif position == "run_skip_reason":
+        record["run"]["skip_reason"] = _FREE_TEXT
+    elif position == "run_unavailable_reason":
+        record["run"]["unavailable_reason"] = _FREE_TEXT
+    elif position == "incomplete_reason":
+        record["counts"]["incomplete_reasons"] = [_FREE_TEXT]
+    elif position == "exclusion":
+        record["counts"]["exclusions"] = {_FREE_TEXT: 1}
+    elif position == "buy_action":
+        record["candidates"][0]["attrs"]["buy_action"] = _FREE_TEXT
+    elif position == "raer_state":
+        record["candidates"][0]["raer_out"]["state"] = _FREE_TEXT
+    elif position == "confidence":
+        record["candidates"][0]["raer_out"]["confidence"] = _FREE_TEXT
+    elif position == "decision":
+        record["candidates"][0]["allocation"]["decision"] = _FREE_TEXT
+    elif position == "allocation_reason":
+        record["candidates"][0]["allocation"]["reason_code"] = _FREE_TEXT
+    elif position == "index_unrecorded_reason":
+        index = _index(unrecorded=1, reasons={_FREE_TEXT: 1})
+    elif position == "skip_reason":
+        skip = _skip_record()
+        skip["reason"] = _FREE_TEXT
+    elif position == "skip_key_reason":
+        skip = _skip_record()
+        skip["key_unavailable_reason"] = _FREE_TEXT
+    else:  # pragma: no cover
+        raise AssertionError(position)
+    ref = compute_tests._ref("owner-a")
+    skip_input = _found(skip) if skip is not None else MISSING
+    return DayInput(_DAY, _found(index), skip_input, {ref: _found(record)})
+
+
+_POSITIONS = [
+    "run_outcome",
+    "run_status",
+    "run_skip_reason",
+    "run_unavailable_reason",
+    "incomplete_reason",
+    "exclusion",
+    "buy_action",
+    "raer_state",
+    "confidence",
+    "decision",
+    "allocation_reason",
+    "index_unrecorded_reason",
+    "skip_reason",
+    "skip_key_reason",
+]
+
+
+@pytest.mark.parametrize("position", _POSITIONS)
+def test_free_text_at_each_reason_position_is_counted_once_and_not_printed(position: str) -> None:
+    screen = build_screen(_free_text_at(position))
+
+    assert screen.unparsed == 1
+    assert screen.complete is False
+    for text in (render_table(screen), render_json(screen)):
+        assert "SENTINEL-free-text" not in text
 
 
 def test_the_candidate_level_not_comparable_text_differs_from_the_day_level_one() -> None:
