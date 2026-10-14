@@ -163,6 +163,12 @@ class KeyMaterial:
     """HMAC の鍵 + 鍵の版。★ 鍵の bytes は repr・str・pickle・copy・dataclass 変換・例外に出ない ★
 
     鍵を取り出す accessor は無い(`keyed_owner_ref` だけが `_hmac` を使う)。
+
+    ★ 保護の範囲(USER の SHOULD。#925 …6159386050)★: 通常の表示・直列化・複製・例外の経路から
+    鍵が出ないことまで。**内部属性への直接アクセス**(`object.__getattribute__`・`_hmac` の呼び出し・
+    デバッガ・gc の走査)までは防止できない(同じプロセスで動くコードは鍵を読める)。鍵の本当の
+    境界は『鍵を持つのは Lambda の 2 role だけ(CLI・観測用 profile・開発者は持たない)』であり、
+    この型は誤って鍵を出力・記録・ログへ出す事故を防ぐ層である。
     """
 
     __slots__ = ("_key", "_key_version")
