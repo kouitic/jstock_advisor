@@ -193,7 +193,9 @@ def test_t3b_same_title_with_a_different_published_at_is_a_different_disclosure(
     assert len(client.sent) == 2
 
 
-# --- T4: 別の銘柄の同じ開示は互いに抑止しない(hash に銘柄が入る)--------------------------------
+# --- T4: 別の銘柄の同じ開示は互いに抑止しない(★ 分離は読取の scope〔銘柄で絞る〕による ★)--------
+# hash の構成(銘柄が入ること)の固定は T5c。T4 は『別銘柄が互いに抑止しない』という面の固定で、
+# hash に銘柄が入ることの証明ではない(hash から銘柄を外しても T4 は落ちない = 実測)。
 
 
 def test_t4_other_stock_with_the_same_title_and_time_is_not_suppressed(service_and_client) -> None:
@@ -297,6 +299,15 @@ def test_t5b_undecidable_is_checked_before_the_full_comparison(tmp_path: Path, c
     matching_hash = hashlib.sha256(f"{_STOCK}|{_PUB_A.isoformat()}|開示A".encode()).hexdigest()[:16]
     _seed_broken_and_matching_rows(tmp_path / "local_store", matching_hash=matching_hash)
     service, client = _build(tmp_path)
+
+    # ★ 前提の固定(空振り防止): 『読めなかった記録がある(undecidable)』かつ『読めた記録の中に
+    # 同じ開示がある』ことを、判定の直前に実際の読取で確かめる。fixture の引数が変わって一致する
+    # 記録が無くなると、このテスト自身が落ちる(順序の固定が無音で消えない)。
+    lookup = NotificationLogRepository(store_dir=tmp_path / "local_store").latest_by_stock_and_type(
+        _STOCK, NotificationType.IMPORTANT_DISCLOSURE
+    )
+    assert lookup.undecidable is True
+    assert matching_hash in {record.content_hash for record in lookup.records}
 
     with caplog.at_level("WARNING"):
         sent = _notify(service, "開示A", published=_PUB_A, now=_T0)
