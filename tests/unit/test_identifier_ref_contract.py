@@ -173,6 +173,7 @@ _NEW_RECORD_WRITERS = {
 _NEW_RECORD_READERS = {
     "domain/notification/allocation_shadow_cli_view.py",
     "domain/notification/allocation_shadow_cli_renderer.py",
+    "domain/notification/allocation_shadow_summary.py",  # #934 BT-A(集計。画面モデルだけを読む)
     "infrastructure/aws/allocation_shadow_reader.py",
 }
 
