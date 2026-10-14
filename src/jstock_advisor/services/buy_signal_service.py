@@ -215,6 +215,67 @@ FACTS_SCHEMA_VERSION = "v2"
 # 混ぜない。三値の扱いと同じ原則)。
 SHADOW_STATE_COMPUTED = "COMPUTED"
 
+# Issue #602 H2(2026-10-13): RAER の入力(リスクの印)の『検出の記録』。
+#
+# 目的: 買い判定が検出した 6 つのリスクの印(下の _RAER_RISK_WORDS)と、語ごとの
+# 『観測できたか』を、判定時点の事実として buy_score_input_facts へ写す。従来は安全余裕率の
+# 調整(margin_adjustments)だけが残り、(a) Fair Value の信頼度が LOW で安全余裕率が算出されない
+# 銘柄は検出が残らない、(b) 検出の仕様が『データが取れなかった項目を「該当しない」として扱う』
+# ため(下の adjustment_codes の組み立て)、『リスクなし』と『確認できなかった』を区別できなかった。
+#
+# ★ これは『既に計算済みの値を記録へ写すだけ』である。検出の規則・安全余裕率・買い判定・通知・
+# 戻り値は一切変えない(adjustment_codes の中身・順序も不変。契約テストで固定)。新しい field は
+# 足さず、既存の dict(buy_score_input_facts)へキーを 1 つ足すだけなので、rollback しても旧版は
+# 読める。版(FACTS_SCHEMA_VERSION)は上げない: 版は『読み手が必須とするキーの集合』を指し、
+# 追加の optional key では上げない(上のコメントのとおり)。このキーが無い既存の推奨は
+# 『当時は記録していなかった』を意味し、値の逆算も backfill もしない。
+#
+# 生産側(この module)は domain の raer 系 module を import できない(#606 の到達性の契約)ため、
+# 読み側(RAER の入力の組み立て module)と同じ literal を持ち、契約テストで一致を固定する。
+RAER_RISK_DETECTION_KEY = "raer_risk_detection"
+RAER_RISK_DETECTION_VERSION = 1
+_RAER_RISK_WORDS = (
+    "cyclical_industry",
+    "major_customer_dependency",
+    "temporary_earnings_boost_risk",
+    "earnings_within_3_business_days",
+    "earnings_within_7_business_days",
+    "small_cap_or_low_liquidity",
+)
+
+
+def _raer_risk_detection_facts(
+    *,
+    adjustment_codes: list[str],
+    business_days_to_earnings: int | None,
+    avg_trading_value: Decimal | None,
+    industry_classified: bool,
+    eps_observed: bool,
+) -> dict[str, object]:
+    """検出済みのリスクの印と、語ごとの観測の有無を、記録の形へ写す(値は真偽と語彙だけ)。
+
+    observed の意味(読み側の `risk_flag_view` が語へ展開する):
+      earnings_date = 次回決算までの営業日数が分かる(決算 3 / 7 営業日以内の 2 語)
+      liquidity     = 20 日平均売買代金が分かる(小型・低流動性の語)
+      industry      = 業種の文字列が取れた(= buy_industry_sector が UNKNOWN でない)。
+                      景気業種・主要顧客依存の 2 語の判定は、この分類が前提。銘柄分類〔景気型〕
+                      だけで景気業種に該当した場合は、該当した語として flags に載るが、
+                      主要顧客依存は言えない
+      eps           = 平準化 EPS と会社予想 EPS の『両方』が取れた(片方だけでは一時的な増益の
+                      リスクは不定。景気業種のときの一時的な増益の語)
+    """
+    return {
+        "version": RAER_RISK_DETECTION_VERSION,
+        "flags": [word for word in _RAER_RISK_WORDS if word in adjustment_codes],
+        "observed": {
+            "earnings_date": business_days_to_earnings is not None,
+            "liquidity": avg_trading_value is not None,
+            "industry": industry_classified,
+            "eps": eps_observed,
+        },
+    }
+
+
 # 観測用に保存する財務時系列(営業利益・営業CF・EPS)の1系列あたり保存上限
 # (直近N期のみ保存)。providerが将来取得期間を拡大してもRecommendation
 # payloadが無制限に増加しないための上限であり、以下の実際の利用要件から決定:
@@ -1428,6 +1489,20 @@ class BuySignalService:
             # このキーが無い既存RecommendationはLEGACY_UNVERSIONEDとして扱う
             # (モジュール冒頭のFACTS_SCHEMA_VERSIONコメント参照)。
             "buy_score_input_facts_schema_version": FACTS_SCHEMA_VERSION,
+            # Issue #602 H2: RAER の入力(リスクの印)の検出の記録。計算済みの値を写すだけで、
+            # 買い判定・通知には一切関与しない。失敗しても本流へ伝播させない(隔離)。
+            RAER_RISK_DETECTION_KEY: isolated_shadow_observation(
+                "raer_risk_detection",
+                lambda: _raer_risk_detection_facts(
+                    adjustment_codes=adjustment_codes,
+                    business_days_to_earnings=business_days_to_earnings,
+                    avg_trading_value=avg_trading_value,
+                    industry_classified=(buy_industry_sector != BuyIndustrySector.UNKNOWN),
+                    eps_observed=(
+                        eps_result.normalized_eps is not None and financial.forecast_eps is not None
+                    ),
+                ),
+            ),
             # Issue #698 PR-A: 株価と財務指標の分割基準の整合(判定時点の事実。UNKNOWN率・
             # 理由別の内訳を、保存済み記録から後から集計できるように残す)。
             "basis_consistency": basis.to_facts(),
