@@ -17,15 +17,20 @@ claim_stale_minutes: 5
 # Issue #508 / #837: GitHub Issue自動起票の有効/無効。falseの間はGitHub API・
 # Secrets Manager呼び出しを一切行わない(正常なスキップ。既存のLINE通知経路には
 # 一切影響しない)。
-# 出荷値 = false(Issue #837。#876で一度trueにしたが、10/12のリリースでは有効化しない:
-# USER判断 #122 issuecomment-6114810773 の【1】。新規Issueの作成にoccurrence単位の
-# gate・日あたりの上限が無く、既存Issueがclosedの間は同じ障害のsignalごとに新規Issueが
-# 立つため〔#188 issuecomment-6114701122〕)。大量起票の抑止機構の実装後に、次回の
-# リリースでtrueへ戻す(その切替は別のUSER承認 + 再deploy)。
-# Lambda Layerで配布する静的設定のため、Productionへの反映はconfigの変更 + 再deploy
-# (ChangeSetのCREATE / EXECUTEは各USERのHuman Gate)。運用手順書 32.7。
-# falseでも既存のLINE通知は変わらない。
-issue_creation_enabled: false
+# 出荷値 = true(Issue #837。有効化の準備。USER決定 #122 issuecomment-6174293468 の3)。
+# ★ この値が true で、かつ上限値(config/incident_issue_limits.yaml。USER承認の値 = 最小間隔360分・
+# 同一fingerprint 2件・全体5件・自動停止10件。#926)が決定済みの構成では、Productionに反映されると
+# 実際にGitHub Issueが自動起票される。★
+# ★ この値の変更のmerge・mainへの存在は、Productionの有効化ではない ★: Lambda Layerで配布する
+# 静的設定のため、Productionの実行時の値が変わるのはChangeSetのEXECUTE(ConfigLayerの新しい版が
+# 全関数へ反映されたとき)だけ。ただしmainに入ると次回のrelease SHAに含まれうるため、同梱するかは
+# SHA固定の承認時にUSERが判断する(ChangeSetの差分で『ConfigLayerの内容の変更にこのflagが含まれる』
+# ことを明示する)。USERの承認(ChangeSet確認後)まで、このPRはDraftのままmergeしない。
+# 運用手順書 32.7。falseでも既存のLINE通知は変わらない。
+# 過去の経緯: #876でtrueにしたが10/12のリリースでは有効化せずfalseへ戻した(新規Issueの作成に
+# occurrence単位のgate・日あたりの上限が無かったため。USER判断 #122 issuecomment-6114810773)。
+# 大量起票の抑止機構(#926)はProduction反映済み。
+issue_creation_enabled: true
 
 # GitHub Issue作成・コメント投稿の原子的claim(IncidentStateTable)が失効した
 # とみなすまでの分数。失効後はGitHub側の実在確認を先に行ってから再claimする
