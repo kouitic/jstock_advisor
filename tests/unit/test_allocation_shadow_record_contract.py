@@ -844,7 +844,13 @@ def test_nothing_in_src_imports_the_record_builder() -> None:
         for path in _PACKAGE.rglob("*.py")
         if path != _MODULE_PATH and "allocation_shadow_record" in path.read_text(encoding="utf-8")
     )
-    assert importers == ["services/allocation_shadow_compute.py"]
+    # 本文の文字列での走査なので、docstring での言及も拾う。CLI の画面モデルは
+    # 『なぜ import しないか』を docstring に書いている(import ではない)。実効の網は
+    # #606 の test_the_cli_does_not_reach_the_heavy_record_or_compute_modules(AST の推移閉包)。
+    assert importers == [
+        "domain/notification/allocation_shadow_cli_view.py",
+        "services/allocation_shadow_compute.py",
+    ]
 
 
 # --- 追加の契約(変異テストで弱かった箇所を固定する)-------------------------------------------

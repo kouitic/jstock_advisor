@@ -185,14 +185,26 @@ def test_the_new_record_writers_do_not_use_log_ref() -> None:
     assert offenders == []
 
 
+#: 名前に allocation_shadow を持つが、AuditLog へ書かない module(#605 読取専用 CLI)。
+#: 書込の経路が無いことは test_allocation_shadow_reader_contract(GetItem だけの proxy)と
+#: test_allocation_cli_contract(AST)が固定する。ここへ足すのは『読むだけ』と示せるものに限る
+_READ_ONLY_MODULES = {
+    "domain/notification/allocation_shadow_cli_view.py",
+    "domain/notification/allocation_shadow_cli_renderer.py",
+    "infrastructure/aws/allocation_shadow_reader.py",
+}
+
+
 def test_every_allocation_shadow_module_is_in_the_writer_list() -> None:
-    """名前に allocation_shadow を持つ src は、書き手の一覧に入れる(追加忘れの防止)。"""
+    """名前に allocation_shadow を持つ src は、書き手か読取専用の一覧に入れる(追加忘れの防止)。"""
     named = {
         path.relative_to(_PACKAGE).as_posix()
         for path in _PACKAGE.rglob("*.py")
         if "allocation_shadow" in path.name and path.name != "allocation_shadow_config.py"
     }
-    assert named <= _NEW_RECORD_WRITERS, sorted(named - _NEW_RECORD_WRITERS)
+    known = _NEW_RECORD_WRITERS | _READ_ONLY_MODULES
+    assert named <= known, sorted(named - known)
+    assert not (_NEW_RECORD_WRITERS & _READ_ONLY_MODULES)
 
 
 def test_the_listed_writers_that_exist_use_the_reference_function() -> None:
