@@ -235,12 +235,12 @@ def test_manual_33_2_does_not_tell_the_operator_to_initialize_production_with_th
 _PACKAGE = _REPO / "src" / "jstock_advisor"
 _SRC = _REPO / "src"
 _STORE_MODULE = "jstock_advisor.infrastructure.collection_store"
-_UNSUPPORTED = "未対応(#923 の後に別 Issue で判断。保存先は環境変数だけで決まる)"
+_UNSUPPORTED = "未対応(#953 で判断。保存先は環境変数だけで決まる)"
 
 #: ★ 完全一致の許可リスト ★: collection_store へ到達し(= 保存先が running_on_lambda() で決まる)、
 #: ガード(AWS_LAMBDA_FUNCTION_NAME の拒否)も対象を明示する option も持たない CLI と、その理由。
 #: 新しい CLI が同じ形で増えたら落ちる。1 件直すたびに 1 行消える(進捗が差分で見える)。
-#: ★ 18 件を直すことは #923 の範囲外(本テストは『見える一覧』にするだけ)★
+#: ★ 18 件を直すことは #923 の範囲外(#953 が持つ。本テストは『見える一覧』にするだけ)★
 _UNGUARDED_CLI_MODULES: dict[str, str] = {
     "analyze.py": _UNSUPPORTED,
     "audit.py": _UNSUPPORTED,
