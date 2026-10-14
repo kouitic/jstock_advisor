@@ -160,6 +160,7 @@ def test_no_holding_reference_is_provided_until_a_record_needs_it() -> None:
 _NEW_RECORD_WRITERS = {
     "services/allocation_shadow_service.py",
     "domain/signals/allocation_shadow_record.py",
+    "services/allocation_shadow_compute.py",  # #603 PR-F2-2a(計算の組み立て)
 }
 
 

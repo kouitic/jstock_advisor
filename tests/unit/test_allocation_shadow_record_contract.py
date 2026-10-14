@@ -838,13 +838,13 @@ def test_the_error_classes_are_built_in_one_place_each() -> None:
 
 
 def test_nothing_in_src_imports_the_record_builder() -> None:
-    """dormant: F2-2(殻・配線)が書込むまで、どこからも import されない。"""
+    """dormant: F2-2b(配線)が書込むまで、importer は計算の組み立て(F2-2a)だけ。"""
     importers = sorted(
         path.relative_to(_PACKAGE).as_posix()
         for path in _PACKAGE.rglob("*.py")
         if path != _MODULE_PATH and "allocation_shadow_record" in path.read_text(encoding="utf-8")
     )
-    assert importers == []
+    assert importers == ["services/allocation_shadow_compute.py"]
 
 
 # --- 追加の契約(変異テストで弱かった箇所を固定する)-------------------------------------------
@@ -1127,3 +1127,21 @@ def test_a_datetime_cannot_stand_in_for_the_business_date(tmp_path: Path) -> Non
 
     with pytest.raises(RecordSchemaError):
         build_items_record(meta=bad, bundle=bundle, cash=CASH, inputs=inputs, result=result)
+
+
+def test_the_raer_axis_reason_codes_with_a_colon_are_accepted(tmp_path: Path) -> None:
+    """RaerResult.reason_codes は全体の `CODE` と軸ごとの `AXIS:CODE`(to_raer_result の形)を持つ。
+
+    F2-2a の結合で、許可する形が `CODE` だけだと実際の RAER の記録を組み立てられないことが分かった。
+    """
+    record = build(tmp_path)
+    record["candidates"][0]["raer_out"]["reason_codes"] = [
+        "AXES_BELOW_MINIMUM",
+        "COMPANY_QUALITY:COVERAGE_BELOW_MINIMUM",
+    ]
+
+    validate_items_record(record)  # 通る
+    for bad in ("COMPANY_QUALITY:", ":X", "a:b", "X:Y:Z", "X Y", "日本語:X", "X:Y\n"):
+        record["candidates"][0]["raer_out"]["reason_codes"] = [bad]
+        with pytest.raises(RecordSchemaError):
+            validate_items_record(record)
