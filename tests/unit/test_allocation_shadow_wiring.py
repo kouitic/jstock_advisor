@@ -5,7 +5,7 @@ handler の側から固定する。
 
   W1  呼び出しは finalize の完了記録(`mark_completion_finalize_completed`)の後で、実行権を取得した
       1 起動だけが呼ぶ(token なし・finalize 失敗・batch_id なしでは呼ばない)
-  W2  既定(出荷 config = OFF)では、戻り値・保存・LINE 通知・監査記録が Shadow 無しと完全に同一
+  W2  OFF(明示の設定。出荷 config は SHADOW)では、戻り値・保存・通知・監査記録が Shadow 無しと同一
       (Shadow の入口を差し替えた場合とも同一)
   W3  Shadow が例外を出しても、戻り値・通知・完了処理は変わらない
   W4  SHADOW でも、本流の結果は OFF と同一で、差は Shadow の監査記録 1 件だけ。残り時間が 120 秒

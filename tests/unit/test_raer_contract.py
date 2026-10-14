@@ -911,7 +911,7 @@ def test_reachability_helper_follows_chains_and_relative_imports(tmp_path: Path)
 
 
 def test_the_new_module_is_reachable_from_handlers_only_through_the_shadow_wiring() -> None:
-    """RAER が handler・CLI から到達できる入口は、出荷 OFF の Shadow の配線だけ(#603 PR-F2-2b)。
+    """RAER が handler・CLI から到達できる入口は、出荷 SHADOW の Shadow の配線だけ(#603 PR-F2-2b)。
 
     承認の記録 = #122 issuecomment-6138622792【1】(本番 BUY 候補バッチ内で RAER・配分を算出できる)。
     配線の module を『辿らない』ようにすると、他の経路からは到達しない(= 入口はそこだけ)。

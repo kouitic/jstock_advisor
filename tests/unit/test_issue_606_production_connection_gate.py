@@ -213,7 +213,7 @@ def test_unconnected_modules_exist_so_the_check_is_not_vacuous() -> None:
         assert any(m == prefix or m.startswith(prefix + ".") for m in known), prefix
 
 
-#: ★ Shadow の枠(出荷 OFF)が handler から到達してよい『未接続の名前』の module = 完全一致の免除 ★
+#: ★ Shadow の枠(出荷 SHADOW)が handler から到達してよい『未接続の名前』の module = 完全一致の免除★
 #: (#603 PR-F2-2b)。根拠は ★ #122 issuecomment-6138622792【1. 最優先目標】のみ ★:
 #: 完了条件『本番BUY候補バッチ内でShadow計算が実行できる』『RAER・資金配分が算出できる』『既存の購入
 #: 判断・通知に影響しない』と、末尾『承認済み仕様に収まる限り、追加のHuman Gateは不要』。
@@ -314,7 +314,7 @@ def test_a_synthetic_unapproved_module_is_caught_and_is_not_exempt(module: str) 
     assert [m for m in _unconnected({module}) if m not in _SHADOW_FRAME_EXEMPT] == [module]
 
 
-#: 配分系(名前に allocation を含む)の module のうち、handler の根から到達してよいもの = 出荷 OFF の
+#: 配分系(名前に allocation を含む)の module で、handler の根から到達してよいもの = 出荷 SHADOW の
 #: Shadow の枠(Q')と、その配線(#603 PR-F2-2b)だけ。★ 完全一致 ★(#948 の形を維持)。
 #: ★ `_SHADOW_FRAME_EXEMPT`(免除。raer・expected_return 系を含む 10 件)とは別の集合 ★:
 #: ここは『名前に allocation を含む到達 module』の完全一致で、免除と重なるが同一ではない
@@ -351,7 +351,7 @@ _ALLOCATION_MODULES_REACHABLE_FROM_CLI = [
 
 
 def test_the_only_allocation_modules_reachable_from_handlers_are_the_off_shadow_frame() -> None:
-    """handler の根から到達できる配分系 = 出荷 OFF の Shadow の枠(Q')とその配線だけ(完全一致)。"""
+    """handler の根から到達できる配分系 = 出荷 SHADOW の枠(Q')とその配線だけ(完全一致)。"""
     reached = _reachable_from_root(_HANDLER_ROOT_PREFIX)
     assert sorted(m for m in reached if "allocation" in m) == (
         _ALLOCATION_MODULES_REACHABLE_FROM_HANDLERS
