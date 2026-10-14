@@ -21,6 +21,9 @@ Secrets Manager の Secret を 1 回読み、`KeyMaterial`(取れなければ `K
 ## 秘密の扱い
 * boto3 の呼び出しは `get_secret_value` だけ(allowlist の proxy。IAM も同じ 1 action)
 * 鍵・ARN・account・Secret の名前・例外のメッセージを、ログ・例外・repr に出さない
+* 保持するのは `KeyMaterial` だけで、取得した文字列・辞書は保持しない。★ ただしメモリからの消去は
+  保証しない ★(CPython の `del`・再代入は解放・零化を保証せず、`str` は不変で零化できない)。
+  実効の境界は『鍵を読める role を 2 つに限る』こと(infra/template.yaml。#947)
 * ログは失敗 1 回につき 1 行の固定の印(template の MetricFilter が数える)。
   成功・キャッシュ命中では出さない
 """

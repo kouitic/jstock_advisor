@@ -475,27 +475,48 @@ _LEAK_SCENARIOS: list[tuple[str, Callable[[], tuple[SecretsManagerKeyProvider, A
 
 
 @pytest.mark.parametrize(("name", "build"), _LEAK_SCENARIOS, ids=[s[0] for s in _LEAK_SCENARIOS])
-def test_no_secret_appears_in_logs_results_or_reprs(
+def test_no_secret_appears_on_any_surface(
     caplog: pytest.LogCaptureFixture, name: str, build: Callable[[], Any]
 ) -> None:
+    """★ 面ごとに測る ★(面を連結すると、1 つの面が空でも通る)。各面は『空でない』ことも確かめる。
+
+    canary は架空の固定値(実在の鍵・ARN・account ではない)。
+    """
     provider, _, _ = build()
     with caplog.at_level(logging.DEBUG):
         result = provider.get()
         result_again = provider.get()
-    texts = [
-        caplog.text,
-        repr(provider),
-        str(provider),
-        repr(result),
-        str(result),
-        repr(result_again),
-    ]
+    failed = isinstance(result, KeyUnavailable)
+    records = [r for r in caplog.records if r.name == module.__name__]
+    surfaces: dict[str, str] = {
+        "log_text": caplog.text,
+        "log_messages": " | ".join(r.getMessage() for r in records),
+        "log_args": " | ".join(str(r.args) for r in records),
+        "log_exception": " | ".join(f"{r.exc_info} {r.exc_text}" for r in caplog.records),
+        "repr_provider": repr(provider),
+        "str_provider": str(provider),
+        "repr_result": repr(result),
+        "str_result": str(result),
+        "repr_result_again": repr(result_again),
+    }
+    # 空振り防止: 面ごとに、その面が実際に何かを持っていること
+    assert surfaces["repr_provider"] == "SecretsManagerKeyProvider()"
+    assert surfaces["repr_result"].startswith(("KeyUnavailable(", "KeyMaterial("))
+    assert surfaces["str_result"] and surfaces["repr_result_again"]
+    if failed:
+        # 失敗はキャッシュされないので、2 回の get() が 2 行(1 回につき 1 行)
+        assert len(records) == 2
+        assert "ALLOCATION_SHADOW_KEY_UNAVAILABLE" in surfaces["log_messages"]
+        assert "ALLOCATION_SHADOW_KEY_UNAVAILABLE" in surfaces["log_text"]
+        assert surfaces["log_args"].count("reason") == 0  # 引数は理由コードの語だけ(中身は下で測る)
+        assert surfaces["log_exception"].count("None None") == 2  # 例外の情報を持たない
+    else:
+        assert records == []  # 成功・キャッシュ命中はログを出さない
     for record in caplog.records:
-        texts += [record.getMessage(), str(record.args), str(record.exc_info), str(record.exc_text)]
         assert record.exc_info is None  # 例外のスタックを出さない
-    blob = "\n".join(texts)
-    for secret in (CANARY, ARN, ACCOUNT, SECRET_NAME, "AbCdEf"):
-        assert secret not in blob, (name, secret)
+    for surface_name, text in surfaces.items():
+        for secret in (CANARY, ARN, ACCOUNT, SECRET_NAME, "AbCdEf"):
+            assert secret not in text, (name, surface_name, secret)
 
 
 def test_the_provider_repr_has_no_arn() -> None:

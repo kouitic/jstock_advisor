@@ -6111,6 +6111,8 @@ Condition `SecretResourcePolicyIsEnabled`(= SecretResourcePolicyEnabled=true)に
 ```
 ログの印(1 回の失敗につき 1 行。値・ARN は出ない): `ALLOCATION_SHADOW_KEY_UNAVAILABLE_CONFIG reason=<コード>` / `..._ANOMALY reason=<コード>`
 Shadow の記録 = その日は『日単位の skip』になるだけ。買い判定・通知・本番の配分には影響しない
+★ 1 回の失敗で、その日の Shadow は記録 0 件になる ★(再試行をせず、最初の失敗で打ち切るため。翌日は正常に戻り得る)。
+  Alarm が 1 件鳴っても『継続障害』とは限らない。続くかは翌日の記録の有無で見る
 
 設定の不備(Alarm = 1 時間に 1 件以上)
   NOT_CONFIGURED  環境変数の ARN が未設定・空・形が不正(template の不備。template は Secret の ARN を必ず渡す)
@@ -6123,6 +6125,8 @@ Shadow の記録 = その日は『日単位の skip』になるだけ。買い�
   TIMEOUT         Secrets Manager への接続・読取が 2 秒 / 3 秒を超えた(再試行はしない。翌日以降の実行で再取得)
   MALFORMED       値が仕様に合わない(ちょうど {key_version, key}・版 1〜999・英数字 64 文字以上)
                   -> ★ Secret の値を手で書き換えていないか ★(39.2 の 3)。別の Secret を指していないか
+                  手で入れ替える場合の条件: キーはちょうど 2 つ({"key_version": 整数, "key": 文字列})・
+                  key は英数字だけで 64 文字以上(記号を混ぜると MALFORMED になる = 意図した fail-closed)
   ERROR           上記以外(throttling・接続不能・想定外)。件数が続くときだけ調査する
 ```
 
