@@ -26,8 +26,8 @@ UNKNOWN  RECORD_MISSING            その保有の記録が無い
 UNKNOWN  OUTSIDE_WINDOW            記録の評価時刻が保有バッチの時間窓の外(同日の手動実行を拾わない)
 UNKNOWN  CATEGORY_UNKNOWN          outcome category が語彙(下)に無い(未知は ELIGIBLE に倒さない)
 UNKNOWN  EVALUATION_NOT_COMPLETED  category = review / data_insufficient / failed
-UNKNOWN  ENGINE_UNKNOWN            担当エンジンが None・未知の値(fail-closed)
 UNKNOWN  ENGINE_NOT_AUTHORITATIVE  担当エンジン = HOLDING_DECISION_SCORE(SHADOW は根拠にしない)
+UNKNOWN  ENGINE_UNKNOWN            担当エンジンが None・未知の値(fail-closed)
 UNKNOWN  EVALUATION_NOT_COMPLETED  旧 SELL・利確のどちらかが ran = False
 UNKNOWN  RECOMMENDATION_MISSING    記録が指す recommendation_id を引けない
 UNKNOWN  TYPE_UNCLASSIFIED         保有側に現れない型(BUY 系)・保有単位でない型・未知の値
