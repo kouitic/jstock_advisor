@@ -193,6 +193,8 @@ def test_invalid_entries_are_ignored_not_trusted(path: Path) -> None:
     )
 
     assert load_labels(path) == {_PREFIX: "ok"}
+    # 捨てた行は黙って消さず、件数を返す(CLI が stderr へ出す)
+    assert labels.load_labels_counting_dropped(path) == ({_PREFIX: "ok"}, 4)
 
 
 def test_a_broken_file_is_not_overwritten_by_a_set(path: Path) -> None:

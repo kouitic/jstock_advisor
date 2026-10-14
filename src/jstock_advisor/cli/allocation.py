@@ -32,6 +32,7 @@ from jstock_advisor.cli.allocation_labels import (
     LabelError,
     default_labels_path,
     load_labels,
+    load_labels_counting_dropped,
     remove_label,
     set_label,
 )
@@ -218,10 +219,13 @@ def _build_source(selection: BackendSelection) -> RecordSource:
 
 def _load_labels_or_none() -> dict[str, str]:
     try:
-        return load_labels()
+        labels, dropped = load_labels_counting_dropped()
     except LabelError:
         typer.echo("ラベルのファイルを読めないため、表示名なしで表示します", err=True)
         return {}
+    if dropped:
+        typer.echo(f"ラベルのファイルの {dropped} 行は形が不正なため無視しました", err=True)
+    return labels
 
 
 @app.command("today")

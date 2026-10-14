@@ -5,7 +5,8 @@
 ## read-only の保証(operations_manual 18節。名前だけで read-only と判断しない)
 
 * boto3 の client は **allowlist の proxy**(`GetItemOnlyClient`)で包む。許可するのは `get_item`
-  だけで、それ以外の属性アクセスは例外にする(write 系・scan・query を構造的に呼べない)
+  だけで、それ以外の属性アクセスは例外にする(write 系・scan・query を『誤って呼ぶ事故を防ぐ層』。
+  実装の内部属性〔`_client`〕への直接アクセスまでは防げない。実際の境界は IAM の読取専用 role)
 * 書込系のメソッドを持つ `DynamoDbCollectionStore` は使わない。項目の decode は
   `{"audit_id", "data"(JSON 文字列)}` の形を自前で読む
 * 失敗は固定の種別(`ReadFailure`)だけを送出する。値・表名・audit_id・例外の文面を持たない

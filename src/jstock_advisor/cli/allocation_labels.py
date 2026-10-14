@@ -73,9 +73,14 @@ def _validate_name(name: str) -> str:
 
 def load_labels(path: Path | None = None) -> dict[str, str]:
     """ラベルを読む。無ければ空。形が不正なら LabelError(固定の文言)。"""
+    return load_labels_counting_dropped(path)[0]
+
+
+def load_labels_counting_dropped(path: Path | None = None) -> tuple[dict[str, str], int]:
+    """ラベルを読み、(有効なラベル, 捨てた行の件数)を返す。捨てる = 16 進でない key・空の値など。"""
     target = _check_path(path or default_labels_path())
     if not target.exists():
-        return {}
+        return {}, 0
     try:
         raw = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -91,7 +96,7 @@ def load_labels(path: Path | None = None) -> dict[str, str]:
     for key, value in labels.items():
         if isinstance(key, str) and _PREFIX.match(key) and isinstance(value, str) and value:
             result[key] = value
-    return result
+    return result, len(labels) - len(result)
 
 
 def _write(target: Path, labels: dict[str, str]) -> None:

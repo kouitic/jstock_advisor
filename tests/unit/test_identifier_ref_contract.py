@@ -164,6 +164,17 @@ _NEW_RECORD_WRITERS = {
 }
 
 
+#: 名前に allocation_shadow を持つ『読み手』の module(#605 読取専用 CLI)。AuditLog へは書かない
+#: (_NEW_RECORD_WRITERS には入れない。その集合は『書く module』の定義)。
+#: 書込の経路が無いことは test_allocation_shadow_reader_contract(GetItem だけの proxy)と
+#: test_allocation_cli_contract(AST)が固定する。ここへ足すのは『読むだけ』と示せるものに限る
+_NEW_RECORD_READERS = {
+    "domain/notification/allocation_shadow_cli_view.py",
+    "domain/notification/allocation_shadow_cli_renderer.py",
+    "infrastructure/aws/allocation_shadow_reader.py",
+}
+
+
 def _imports_or_calls_log_ref(path: Path) -> bool:
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
@@ -176,23 +187,14 @@ def _imports_or_calls_log_ref(path: Path) -> bool:
     return False
 
 
-def test_the_new_record_writers_do_not_use_log_ref() -> None:
+def test_the_new_record_writers_and_readers_do_not_use_log_ref() -> None:
+    """読み手も log_ref(owner の平文へ解く経路)を使わない。網は書き手と読み手の和集合で測る。"""
     offenders = []
-    for relative in sorted(_NEW_RECORD_WRITERS):
+    for relative in sorted(_NEW_RECORD_WRITERS | _NEW_RECORD_READERS):
         path = _PACKAGE / relative
         if path.exists() and _imports_or_calls_log_ref(path):
             offenders.append(relative)
     assert offenders == []
-
-
-#: 名前に allocation_shadow を持つが、AuditLog へ書かない module(#605 読取専用 CLI)。
-#: 書込の経路が無いことは test_allocation_shadow_reader_contract(GetItem だけの proxy)と
-#: test_allocation_cli_contract(AST)が固定する。ここへ足すのは『読むだけ』と示せるものに限る
-_READ_ONLY_MODULES = {
-    "domain/notification/allocation_shadow_cli_view.py",
-    "domain/notification/allocation_shadow_cli_renderer.py",
-    "infrastructure/aws/allocation_shadow_reader.py",
-}
 
 
 def test_every_allocation_shadow_module_is_in_the_writer_list() -> None:
@@ -202,9 +204,9 @@ def test_every_allocation_shadow_module_is_in_the_writer_list() -> None:
         for path in _PACKAGE.rglob("*.py")
         if "allocation_shadow" in path.name and path.name != "allocation_shadow_config.py"
     }
-    known = _NEW_RECORD_WRITERS | _READ_ONLY_MODULES
+    known = _NEW_RECORD_WRITERS | _NEW_RECORD_READERS
     assert named <= known, sorted(named - known)
-    assert not (_NEW_RECORD_WRITERS & _READ_ONLY_MODULES)
+    assert not (_NEW_RECORD_WRITERS & _NEW_RECORD_READERS)
 
 
 def test_the_listed_writers_that_exist_use_the_reference_function() -> None:

@@ -284,7 +284,7 @@ def test_a_real_day_prints_no_owner_plaintext_and_no_holding_identifier(tmp_path
         assert forbidden not in text
     assert "9001" not in text  # 保有の銘柄(候補ではない)は出さない
     assert "owner-a" not in text.replace(display_ref(parts["refs"][0]), "")
-    assert "0001" in text  # 候補の銘柄は出る(空振りでない)
+    assert "0001" in render_table(screen)  # 候補の銘柄は表に出る(空振りでない。面を特定)
 
 
 def test_the_total_of_unparsed_items_is_shown_once_in_the_table() -> None:

@@ -8,8 +8,10 @@
 * ★ LENIENT に読む: どんな辞書(型・キーを崩した入力)でも**例外を送出しない**。解釈できない項目は
   『不明』として数え、黙って省かない(`unparsed`)。未知の schema_version は『対応していない記録の版』
 * ★ 記録に無い値を作らない・補完しない・丸めない: 金額・RAER は記録の 10 進数の文字列をそのまま
-  整形する(桁区切りだけ)。10 進数として読めない値は生の文字列を出す。『残余資金』だけは、記録された
-  金額を配分の順に差し引いた目安(記録された値の引き算のみ。読めない値があれば出さない)
+  整形する(桁区切りだけ)。10 進数として読めない文字列は生の文字列を出し、文字列でも数値でもない値
+  (dict / list 等)は『不明』へ畳んで数える。例外は記録された値から作る次の 2 つだけ:
+  『残余資金』= 記録された金額を配分の順に差し引いた目安(引き算のみ。読めない値があれば出さない)/
+  配分しなかった候補の『必要資金』= 記録された上限後の株数 × 現在価格(掛け算のみ。目安)
 * ★ 鍵・符号の計算を持たない: 索引の符号(kv1)を検査して使うだけ(`require_keyed`)。owner の平文は
   扱わない
 * ★ 索引の 6 状態を区別して、黙って 0 件にしない: 完全 / 一部未記録 / 記録 0 件 /
@@ -343,17 +345,36 @@ def _decimal(value: object) -> Decimal | None:
 
 
 def format_decimal(value: object) -> str | None:
-    """10 進数の文字列 → 桁区切りの文字列(丸めない)。読めなければ生の文字列。None は None。"""
+    """10 進数の文字列 → 桁区切り(丸めない)。読めない文字列はそのまま、文字列でない値は『不明』。"""
     if value is None:
         return None
     number = _decimal(value)
     if number is None:
-        return value if isinstance(value, str) else repr(value)
+        if isinstance(value, str):
+            return value
+        # 数値(int / float)の repr は害がない。dict / list / その他の構造は記録の中身を
+        # 表示面へ出さず『不明』へ畳む(数えるのは _opaque_values)
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return repr(value)
+        return UNKNOWN_TEXT
     text = format(number, "f")
     sign = "-" if text.startswith("-") else ""
     body = text.lstrip("-")
     whole, _, frac = body.partition(".")
     return f"{sign}{_group(whole)}{'.' + frac if frac else ''}"
+
+
+def _opaque_values(*values: object) -> int:
+    """金額・値の欄に入っていた『文字列でも数値でもない』値の数(dict / list / bool など)。
+
+    表示面には出さず(format_decimal が『不明』へ畳む)、unparsed として数える(黙って省かない)。
+    """
+    return sum(
+        1
+        for value in values
+        if value is not None
+        and (isinstance(value, bool) or not isinstance(value, str | int | float))
+    )
 
 
 def format_yen(value: object) -> str | None:
@@ -512,11 +533,19 @@ def _decode_owner(
     rows: list[CandidateRow] = []
     unparsed = 0
     left = cash_value
+    unparsed += _opaque_values(cash.get("available_cash"), portfolio.get("portfolio_value"))
     for raw in _list(record.get("candidates")):
         row, left = _candidate_row(raw, left)
         rows.append(row)
         if not row.readable:
             unparsed += 1
+        else:
+            candidate = _dict(raw)
+            unparsed += _opaque_values(
+                _dict(candidate.get("allocation")).get("amount"),
+                _dict(candidate.get("allocation")).get("cash_shortfall"),
+                _dict(candidate.get("raer_out")).get("value"),
+            )
     allocated = sum(1 for r in rows if r.decision is not None and r.decision.code == "ALLOCATED")
     not_allocated = sum(
         1 for r in rows if r.decision is not None and r.decision.code == "NOT_ALLOCATED"
@@ -683,13 +712,23 @@ def _build(day: DayInput, labels: Mapping[str, str]) -> AllocationShadowScreen:
             missing.append(ref)
     recorded = _count(record.get("recorded_owner_count"))
     unrecorded = _count(record.get("unrecorded_owner_count"))
+    attempted = _count(record.get("attempted_owner_count"))
+    # 索引の件数が互いに整合しているときだけ『完全』と言える(書込側は attempted = recorded +
+    # unrecorded、recorded = 載せた符号の数を保証する。壊れた・別経路の索引はここで PARTIAL)
+    consistent = (
+        recorded is not None
+        and unrecorded is not None
+        and attempted is not None
+        and attempted == recorded + unrecorded
+        and recorded == len(_list(record.get("owner_refs")))
+    )
     if recorded == 0 and not refs:
         state = DayState.EMPTY
-    elif (unrecorded or 0) > 0 or over_cap > 0 or recorded is None or unrecorded is None:
+    elif (unrecorded or 0) > 0 or over_cap > 0 or not consistent or missing:
         state = DayState.PARTIAL
     else:
         state = DayState.COMPLETE
-    complete = state is DayState.COMPLETE and not missing and unparsed == 0
+    complete = state is DayState.COMPLETE and unparsed == 0
     return AllocationShadowScreen(
         business_date=day.business_date,
         state=state,

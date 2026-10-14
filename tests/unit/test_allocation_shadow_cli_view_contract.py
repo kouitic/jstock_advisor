@@ -527,10 +527,9 @@ def test_a_value_that_is_not_a_finite_decimal_is_shown_as_the_raw_string(raw: st
     assert format_decimal(raw) == raw
 
 
-def test_none_is_none_and_non_strings_are_shown_raw_not_guessed() -> None:
+def test_none_is_none_and_numbers_are_shown_raw_not_guessed() -> None:
     assert format_decimal(None) is None
     assert format_decimal(12.5) == "12.5"
-    assert format_decimal(True) == "True"
 
 
 def test_amounts_are_the_recorded_strings_and_the_remaining_cash_is_a_plain_subtraction() -> None:
@@ -881,3 +880,110 @@ def test_an_unexpected_failure_inside_the_build_still_gives_a_screen(
     assert screen.state is DayState.UNSUPPORTED
     assert screen.complete is False
     assert screen.unparsed == 1
+
+
+# =================================================================================================
+# レビュー指摘(#948 MUST-2 / MUST-3 / SHOULD-2): 『完全』と言ってよい条件・解釈できない値
+# =================================================================================================
+
+_SENTINEL = "SENTINEL-OWNER-NAME-7f3a"
+
+
+def test_every_day_state_has_a_heading() -> None:
+    """状態を足して文言を忘れると、表示のときに KeyError で落ちる(網羅を固定)。"""
+    assert set(DAY_STATE_TEXT) == set(DayState)
+
+
+def test_a_missing_items_record_is_never_complete_and_the_heading_agrees() -> None:
+    """索引は整合しているが項目つきの記録が無い → 見出しも『すべて』と言わない(終了コード 3)。"""
+    ref = compute_tests._ref("owner-a")
+    screen = build_screen(DayInput(_DAY, _found(_index([ref])), MISSING, {ref: MISSING}))
+
+    assert screen.state is DayState.PARTIAL
+    assert screen.complete is False
+    assert DAY_STATE_TEXT[DayState.COMPLETE] not in render_table(screen)
+
+
+@pytest.mark.parametrize(
+    ("attempted", "recorded", "unrecorded"),
+    [
+        (5, 1, 0),  # 試行 5 件なのに記録 1 + 未記録 0(4 件が消えている)
+        (1, 1, 1),  # 試行が和より小さい
+        (None, 1, 0),  # 試行の件数が読めない
+        ("1", 1, 0),  # 件数が整数でない
+        (True, 1, 0),  # bool は件数ではない
+    ],
+)
+def test_an_index_whose_counts_contradict_each_other_is_never_complete(
+    attempted: object, recorded: int, unrecorded: int
+) -> None:
+    ref = compute_tests._ref("owner-a")
+    index = _index([ref])
+    index["attempted_owner_count"] = attempted
+    index["recorded_owner_count"] = recorded
+    index["unrecorded_owner_count"] = unrecorded
+    screen = build_screen(DayInput(_DAY, _found(index), MISSING, {ref: _found(_owner_record())}))
+
+    assert screen.state is DayState.PARTIAL
+    assert screen.complete is False
+    assert DAY_STATE_TEXT[DayState.COMPLETE] not in render_table(screen)
+
+
+def test_the_recorded_count_must_match_the_number_of_listed_references() -> None:
+    ref = compute_tests._ref("owner-a")
+    index = _index([ref], recorded=2)  # 載せた符号は 1 件なのに recorded = 2
+    index["attempted_owner_count"] = 2
+    screen = build_screen(DayInput(_DAY, _found(index), MISSING, {ref: _found(_owner_record())}))
+
+    assert screen.state is DayState.PARTIAL
+    assert screen.complete is False
+
+
+def test_a_consistent_index_with_every_record_is_still_complete() -> None:
+    """対の確認: 整合した索引 + すべての記録 = 完全(上の厳格化が過剰でないこと)。"""
+    screen = build_screen(_day_with(_owner_record()))
+
+    assert screen.state is DayState.COMPLETE
+    assert screen.complete is True
+
+
+@pytest.mark.parametrize(
+    "where",
+    ["cash", "portfolio", "amount", "shortfall", "raer"],
+)
+@pytest.mark.parametrize("opaque", [{"owner": _SENTINEL}, [_SENTINEL], True, object()])
+def test_a_value_that_is_neither_text_nor_number_is_unknown_counted_and_never_printed(
+    where: str, opaque: object
+) -> None:
+    owner = _owner_record()
+    candidate = owner["candidates"][0]
+    if where == "cash":
+        owner["cash"]["available_cash"] = opaque
+    elif where == "portfolio":
+        owner["portfolio"]["portfolio_value"] = opaque
+    elif where == "amount":
+        candidate["allocation"]["amount"] = opaque
+    elif where == "shortfall":
+        candidate["allocation"]["cash_shortfall"] = opaque
+    else:
+        candidate["raer_out"]["value"] = opaque
+
+    screen = build_screen(_day_with(owner))
+
+    assert screen.unparsed >= 1  # 数える(黙って省かない)
+    assert screen.complete is False  # 終了コード 3
+    table = render_table(screen)
+    assert view.UNKNOWN_TEXT in table  # 『不明』と表示する
+    for text in (table, render_json(screen), repr(screen)):
+        assert _SENTINEL not in text  # 記録に入っていた構造を表示面へ出さない
+        assert "{'owner'" not in text
+
+
+def test_a_plain_unreadable_string_is_still_shown_raw_as_documented() -> None:
+    """文字列は(約束どおり)そのまま出す。畳むのは文字列でも数値でもない値だけ。"""
+    assert format_decimal("abc") == "abc"
+    assert format_decimal(12.5) == "12.5"
+    assert format_decimal(7) == "7"
+    assert format_decimal({"a": 1}) == view.UNKNOWN_TEXT
+    assert format_decimal([1]) == view.UNKNOWN_TEXT
+    assert format_decimal(True) == view.UNKNOWN_TEXT

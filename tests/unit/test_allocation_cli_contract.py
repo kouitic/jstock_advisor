@@ -83,7 +83,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AWS_LAMBDA_FUNCTION_NAME", raising=False)
     monkeypatch.delenv("AWS_PROFILE", raising=False)
     monkeypatch.setattr(cli, "_today_jst", lambda: dt.date(2026, 10, 14))
-    monkeypatch.setattr(cli, "load_labels", lambda: {})
+    monkeypatch.setattr(cli, "load_labels_counting_dropped", lambda: ({}, 0))
     monkeypatch.setattr(
         cli, "_default_calendar", lambda: BusinessCalendar(frozenset(), frozenset())
     )
@@ -436,7 +436,9 @@ def test_the_json_output_is_pure_on_stdout_and_hides_labels_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     digest = compute_tests._ref("owner-a").split(":")[1]
-    monkeypatch.setattr(cli, "load_labels", lambda: {digest[:8]: "sentinel-表示名-zz"})
+    monkeypatch.setattr(
+        cli, "load_labels_counting_dropped", lambda: ({digest[:8]: "sentinel-表示名-zz"}, 0)
+    )
     _use(monkeypatch, _complete_source())
 
     result = _today(*_LOCAL, "--format", "json")
@@ -451,7 +453,9 @@ def test_with_labels_adds_the_names_to_the_json_only_when_asked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     digest = compute_tests._ref("owner-a").split(":")[1]
-    monkeypatch.setattr(cli, "load_labels", lambda: {digest[:8]: "sentinel-表示名-zz"})
+    monkeypatch.setattr(
+        cli, "load_labels_counting_dropped", lambda: ({digest[:8]: "sentinel-表示名-zz"}, 0)
+    )
     _use(monkeypatch, _complete_source())
 
     parsed = json.loads(_today(*_LOCAL, "--format", "json", "--with-labels").stdout)
@@ -461,7 +465,9 @@ def test_with_labels_adds_the_names_to_the_json_only_when_asked(
 
 def test_the_table_shows_the_label_and_the_sharing_notice(monkeypatch: pytest.MonkeyPatch) -> None:
     digest = compute_tests._ref("owner-a").split(":")[1]
-    monkeypatch.setattr(cli, "load_labels", lambda: {digest[:8]: "sentinel-表示名-zz"})
+    monkeypatch.setattr(
+        cli, "load_labels_counting_dropped", lambda: ({digest[:8]: "sentinel-表示名-zz"}, 0)
+    )
     _use(monkeypatch, _complete_source())
 
     result = _today(*_LOCAL)
@@ -477,16 +483,28 @@ def test_the_help_says_that_the_table_contains_labels() -> None:
 def test_an_unreadable_label_file_does_not_stop_the_display(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def broken() -> dict[str, str]:
+    def broken() -> tuple[dict[str, str], int]:
         raise LabelError("x")
 
-    monkeypatch.setattr(cli, "load_labels", broken)
+    monkeypatch.setattr(cli, "load_labels_counting_dropped", broken)
     _use(monkeypatch, _complete_source())
 
     result = _today(*_LOCAL)
 
     assert result.exit_code == 0
     assert "表示名なし" in result.stderr
+
+
+def test_dropped_label_lines_are_reported_on_stderr_not_silently_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "load_labels_counting_dropped", lambda: ({}, 2))
+    _use(monkeypatch, _complete_source())
+
+    result = _today(*_LOCAL)
+
+    assert result.exit_code == 0
+    assert "2 行は形が不正なため無視しました" in result.stderr
 
 
 def test_the_preamble_names_the_backend_and_the_table_for_dynamodb(

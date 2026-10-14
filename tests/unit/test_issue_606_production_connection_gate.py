@@ -223,7 +223,13 @@ def test_no_handler_or_cli_reaches_an_unconnected_module() -> None:
 
 
 #: 配分系の module のうち、handler の根から到達してよいもの = 出荷 OFF の Shadow の枠(Q')だけ。
-#: ★ F2-2b(配線)は、この集合へ行を足すだけ(CLI の集合には触れない)★
+#: ★ F2-2b(配線)で handler から `allocation_shadow_compute` へ到達させると、この集合は
+#: 2 → 8 件(6 行の追加)になり、★ 鳴る `_UNCONNECTED_NAME_TOKENS` が 6 語
+#: (allocation_inputs / allocation_policy / allocation_shadow_record / expected_return /
+#: portfolio_allocation / raer)★、さらに ★ `_UNCONNECTED_PREFIXES` の
+#: `domain.valuation.expected_return` にも到達する ★(独立レビューの実測。#605 …6160204670)。
+#: ★『行を足すだけ』では CI は通らない。prefix の除外は上の規則どおり『接続を許す変更 =
+#: USER の承認の記録(Issue 番号)』を要する ★。CLI の集合には触れない
 _ALLOCATION_MODULES_REACHABLE_FROM_HANDLERS = [
     "jstock_advisor.domain.signals.allocation_shadow_config",
     "jstock_advisor.services.allocation_shadow_service",
