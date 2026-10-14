@@ -231,12 +231,15 @@ def test_t6_target_functions_use_the_implicit_sam_role(name: str) -> None:
 # 追加のみ(既存の項目の変更・削除なし)の固定: 配線後のenv keyとStatementのSid集合(リテラル)。
 _EXPECTED_ENV_KEYS = {
     "BuyCandidatesFunction": [
+        # #925 kv1: owner の符号の鍵の Secret の ARN(意図して追加)
+        "ALLOCATION_SHADOW_REF_KEY_SECRET_ARN",
         "BUY_CANDIDATE_QUEUE_URL",
         "BUY_CANDIDATE_SQS_DISPATCH_ENABLED",
         "CANDIDATE_UNIVERSE_CACHE_BUCKET",
         "INCIDENT_NOTIFICATION_TOPIC_ARN",
     ],
     "BuyCandidateWorkerFunction": [
+        "ALLOCATION_SHADOW_REF_KEY_SECRET_ARN",
         "CANDIDATE_UNIVERSE_CACHE_BUCKET",
         "INCIDENT_NOTIFICATION_TOPIC_ARN",
     ],
@@ -279,6 +282,8 @@ _EXPECTED_STATEMENT_SIDS = {
         "PublishIncidentNotification",
         # #602 O1: 購入側 Shadow の買付余力の読取(GetItem のみ)。意図して追加
         "AvailableCashReadOnly",
+        # #925 kv1: 鍵の Secret 1 つの GetSecretValue だけ。意図して追加
+        "OwnerRefKeyReadOnly",
     ],
     "BuyCandidateWorkerFunction": [
         "DynamoDbCrudAccess",
@@ -286,6 +291,7 @@ _EXPECTED_STATEMENT_SIDS = {
         "CandidateUniverseCacheReadForJpxShadow",
         "PublishIncidentNotification",
         "AvailableCashReadOnly",
+        "OwnerRefKeyReadOnly",
     ],
     "HoldingsWatchlistFunction": [
         "DynamoDbCrudAccess",
@@ -323,8 +329,8 @@ _EXPECTED_STATEMENT_SIDS = {
 }
 # Policiesのエントリ数(SAMのpolicy templateを含む。配線で+1)
 _EXPECTED_POLICY_ENTRIES = {
-    "BuyCandidatesFunction": 7,
-    "BuyCandidateWorkerFunction": 4,
+    "BuyCandidatesFunction": 8,
+    "BuyCandidateWorkerFunction": 5,
     "HoldingsWatchlistFunction": 5,
     "HoldingsWatchlistWorkerFunction": 2,
     "WatchlistDispatcherFunction": 5,

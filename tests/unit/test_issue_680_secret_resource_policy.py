@@ -51,6 +51,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TEMPLATE_PATH = _REPO_ROOT / "infra" / "template.yaml"
 
 _RESOURCE_POLICY_TYPE = "AWS::SecretsManager::ResourcePolicy"
+_KEY_SECRET_RESOURCE_POLICY = "AllocationShadowOwnerRefKeyResourcePolicy"  # #925 kv1
 
 _SENSITIVE_ACTIONS = frozenset(
     {
@@ -220,11 +221,13 @@ def test_admin_and_deploy_principal_arn_have_placeholder_defaults() -> None:
 
 
 def test_all_resource_policies_are_gated_by_the_same_condition() -> None:
-    """全5つのresource policyが同一Condition(SecretResourcePolicyIsEnabled)で
+    """全6つのresource policyが同一Condition(SecretResourcePolicyIsEnabled)で
     gateされている(1つでも無条件作成なら検知する)。
     """
     names = _resource_policy_names()
-    assert set(names) == set(_SECRET_RESOURCE_TO_ARN_PARAM)
+    # 5 つ(外部の Secret。ARN は Parameter)+ #925 kv1 の鍵の Secret(template 内の Secret。
+    # 専用の契約テスト test_infra_owner_ref_key_secret.py が allow-list の完全一致を固定する)
+    assert set(names) == set(_SECRET_RESOURCE_TO_ARN_PARAM) | {_KEY_SECRET_RESOURCE_POLICY}
     for name in names:
         assert _resources()[name]["Condition"] == "SecretResourcePolicyIsEnabled"
 
