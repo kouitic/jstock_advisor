@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 from jstock_advisor.cli import (
     allocation,
+    allocation_summary,
     analyze,
     audit,
     available_cash,
@@ -63,6 +64,7 @@ app.add_typer(judgment_safety_shadow.app, name="judgment-safety-shadow")
 app.add_typer(migrate.app, name="migrate")
 app.add_typer(weekly_aggregate.app, name="weekly-aggregate")
 app.add_typer(allocation.app, name="allocation")
+allocation_summary.register(allocation.app)  # jstock allocation summary(#934 BT-A PR-2)
 
 
 @app.callback()
