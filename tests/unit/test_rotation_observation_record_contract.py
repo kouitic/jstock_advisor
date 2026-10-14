@@ -163,6 +163,16 @@ def test_no_key_contains_a_forbidden_word_at_any_depth() -> None:
                 assert word not in key.lower(), (status, key, word)
 
 
+def test_the_forbidden_word_list_keeps_the_identifier_and_asset_words() -> None:
+    """一覧の中身を固定する(1 語消えても気づけない穴を塞ぐ)。
+
+    ★ 完全一致にしない ★(語を足すのは安全側)。
+    """
+    required = {"owner", "holding_id", "stock_code", "recommendation_id", "amount"}
+
+    assert required <= set(FORBIDDEN_KEY_WORDS)
+
+
 def test_a_sentinel_in_the_inputs_never_reaches_the_record() -> None:
     """識別子・推奨の値は集計の前に捨てる。入力に混ぜた目印が、記録のどこにも出ない。"""
     serialized = json.dumps(_values(), ensure_ascii=False)
