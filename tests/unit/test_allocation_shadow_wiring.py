@@ -65,6 +65,9 @@ _HANDLER_PATH = (
 _STOCK = "2914"
 _BATCH = "batch-603"
 _SHADOW = AllocationShadowConfig(mode=AllocationShadowMode.SHADOW)
+# R1(#128)で出荷 config は SHADOW になった。OFF の意味(本流と同一・時計を読まない・
+# 配線を組まない)を、明示の OFF 設定で固定し続ける(config が欠落・不正のときの縮退先も OFF)
+_OFF = AllocationShadowConfig(mode=AllocationShadowMode.OFF)
 _PLENTY_OF_TIME = 300_000
 # 同じ test の中で差し替えた後に本物へ戻せるよう、先に控えておく
 _REAL_ENTRY = handler_module.observe_allocation_shadow
@@ -112,7 +115,7 @@ def _drive(
     """_process_single_candidate を acquire_results の回数だけ走らせ、外から観測できる結果を返す。
 
     shadow_entry     handler の `observe_allocation_shadow` を差し替える(None なら本物)
-    shadow_config    本物の入口が読む設定を差し替える(None なら出荷 config = OFF)
+    shadow_config    本物の入口が読む設定を差し替える(None なら出荷 config = SHADOW)
     """
     _patch_snapshot(monkeypatch)
     audit = audit or _RecordingAuditService()
@@ -271,17 +274,19 @@ def test_shadow_is_not_called_without_a_batch_id(
     assert run["events"] == []
 
 
-# --- W2 既定(OFF)では本流が完全に同一 ---------------------------------------------------------
+# --- W2 OFF では本流が完全に同一(出荷は SHADOW。OFF は明示の設定で固定する)-----------------------
 
 
-def test_shipped_off_is_identical_to_having_no_shadow_at_all(
+def test_off_is_identical_to_having_no_shadow_at_all(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(svc, "_default_cash_getter", _tripwire)
     baseline = _drive(  # 入口が何もしない = Shadow が存在しない世界
         monkeypatch, tmp_path / "base", shadow_entry=lambda **kw: False
     )
-    shipped = _drive(monkeypatch, tmp_path / "shipped")  # 出荷 config(OFF)を読む本物の入口
+    shipped = _drive(  # OFF の設定を読む本物の入口
+        monkeypatch, tmp_path / "shipped", shadow_config=_OFF
+    )
 
     _same_main_flow(shipped, baseline)
     assert shipped["audit_shadow"] == []  # OFF は監査記録を 1 件も足さない
@@ -289,12 +294,14 @@ def test_shipped_off_is_identical_to_having_no_shadow_at_all(
     assert shipped["results"][0] is not None
 
 
-def test_shipped_off_does_not_read_the_clock_or_remaining_time(
+def test_off_does_not_read_the_clock_or_remaining_time(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(svc, "_default_cash_getter", _tripwire)
 
-    run = _drive(monkeypatch, tmp_path, remaining_ms=_tripwire)  # 読んだら失敗する
+    run = _drive(  # 読んだら失敗する
+        monkeypatch, tmp_path, shadow_config=_OFF, remaining_ms=_tripwire
+    )
 
     assert run["audit_shadow"] == []
     assert run["events"] == ["finalize", "mark"]
@@ -406,11 +413,13 @@ def test_validation_and_dry_run_write_no_shadow_record(
     assert run["audit_shadow"] == []
 
 
-def test_shipped_off_never_builds_the_wiring_or_touches_a_repository_or_the_key(
+def test_off_never_builds_the_wiring_or_touches_a_repository_or_the_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """出荷 OFF では、配線の組み立て(repository・鍵の provider)に 1 度も入らない。"""
-    run = _drive(monkeypatch, tmp_path, build_runner=_tripwire)  # 呼ばれたら失敗する
+    """OFF では、配線の組み立て(repository・鍵の provider)に 1 度も入らない。"""
+    run = _drive(  # 呼ばれたら失敗する
+        monkeypatch, tmp_path, shadow_config=_OFF, build_runner=_tripwire
+    )
 
     assert run["audit_shadow"] == []
     assert run["events"] == ["finalize", "mark"]

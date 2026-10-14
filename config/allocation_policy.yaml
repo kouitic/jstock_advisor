@@ -6,7 +6,7 @@
 #
 # ★ このファイルは『設定の置き場』であり、有効化の入口ではない。mode / enabled の類のキーを持たない。
 #   どこからも import されない(dormant)。Production の判断・通知・保存を変えない。
-#   Shadow を動かす入口は config/allocation_shadow.yaml(出荷は OFF)であり、本ファイルではない。
+#   Shadow を動かす入口は config/allocation_shadow.yaml(出荷は SHADOW。R1)であり、本ファイルではない。
 #
 # 項目:
 #   policy_id               記録に残す方針の名前(承認済みの『標準的』の組)

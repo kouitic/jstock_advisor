@@ -144,11 +144,13 @@ def test_allocation_shadow_mode_has_no_active_member() -> None:
     ]
 
 
-def test_the_shipped_allocation_shadow_config_is_off() -> None:
-    """出荷 config は OFF。SHADOW にするのは USER の別承認 + IAM の反映の後(本テストを更新する)。"""
+def test_the_shipped_allocation_shadow_config_is_shadow_and_never_active() -> None:
+    """出荷 config は SHADOW(R1。USER の別承認 = G0。#128)。★ ACTIVE へ進める値は存在しない ★
+    (mode の値は OFF / SHADOW のみ = 上のテスト)。SHADOW でも判定・通知・保存・完了処理は変えない
+    (本流から隔離された観測だけ。契約テストが固定)。"""
     text = (_SHIPPED_CONFIG_DIR / "allocation_shadow.yaml").read_text(encoding="utf-8")
-    assert re.search(r'^mode:\s*"OFF"\s*$', text, flags=re.MULTILINE)
-    assert load_allocation_shadow_config(_SHIPPED_CONFIG_DIR).enabled is False
+    assert re.search(r'^mode:\s*"SHADOW"\s*$', text, flags=re.MULTILINE)
+    assert load_allocation_shadow_config(_SHIPPED_CONFIG_DIR).enabled is True
 
 
 def test_runtime_config_mode_is_referenced_only_by_the_approved_modules() -> None:
@@ -1109,7 +1111,8 @@ def test_the_raer_coefficients_file_is_not_an_entry_point_for_enabling_anything(
     """raer_coefficients.yaml は承認済みの係数だけ。有効化の入口(mode / enabled の類)を持たない。
 
     許可リストへ足したことは『接続を許す』ことではない(運用手順書 37.5)。loader はどこからも
-    import されない(dormant)。出荷の Shadow の入口は allocation_shadow.yaml(出荷 OFF)のまま。
+    import されない(dormant)。Shadow の入口は allocation_shadow.yaml だけ(出荷は SHADOW。R1 = #128。
+    USER の別承認 G0。本ファイルが入口にならないことは、上の語の検査が固定する)。
     """
     assert _A_128_CONFIG_FILES["raer_coefficients.yaml"] == "COEFFICIENT_VALUES_ONLY"
     data = yaml.safe_load((_SHIPPED_CONFIG_DIR / "raer_coefficients.yaml").read_text("utf-8"))
@@ -1118,14 +1121,14 @@ def test_the_raer_coefficients_file_is_not_an_entry_point_for_enabling_anything(
     entrance_words = {"on", "off", "mode", "enable", "enabled", "active", "shadow", "dry", "switch"}
     assert not [key for key in keys if set(key.split("_")) & entrance_words]
     shadow = (_SHIPPED_CONFIG_DIR / "allocation_shadow.yaml").read_text(encoding="utf-8")
-    assert re.search(r'^mode:\s*"?OFF"?\s*(#.*)?$', shadow, re.MULTILINE)
+    assert re.search(r'^mode:\s*"?SHADOW"?\s*(#.*)?$', shadow, re.MULTILINE)
 
 
 def test_the_policy_values_file_is_not_an_entry_point_for_enabling_anything() -> None:
     """allocation_policy.yaml は閾値だけ。有効化の入口(mode / enabled の類)を持たない。
 
     許可リストへ足したことは『接続を許す』ことではない。有効にできる入口は allocation_shadow.yaml
-    (出荷 OFF。上のテスト)だけで、本ファイルの loader はどこからも import されない
+    (出荷 SHADOW。上のテスト)だけで、本ファイルの loader はどこからも import されない
     (`test_no_handler_or_cli_reaches_an_unconnected_module`)。
     """
     assert _A_128_CONFIG_FILES["allocation_policy.yaml"] == "POLICY_VALUES_ONLY"
