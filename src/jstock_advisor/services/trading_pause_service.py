@@ -42,8 +42,14 @@ _INCIDENT_FAILURE_TYPE = "FETCH_FAILED"
 _INCIDENT_TOPIC_ENV = "INCIDENT_NOTIFICATION_TOPIC_ARN"
 # reason_codeはenvelope内にliteralで書く(#745のAST完全性ガードが読む)。利用者向けの「内容」文は
 # incident_message.py::IncidentContent(PROVISIONAL)に登録する。
-# LINE webhookの同期の応答の経路。通知の発行が応答を待たせる上限(接続・読取のtimeout。再試行なし)。
+# LINE webhookの同期の応答の経路で、通知の発行が応答を待たせる上限の根拠(サブちゃんSHOULD-1):
+#   ・LINE webhook関数のTimeoutは30秒(infra/template.yaml)。通知の待ちはその1割(3.0秒)以内に収める
+#   ・boto3は接続(connect)と読取(read)を順に待ち、各々に同じ秒数を設定する。再試行は無い
+#     (total_max_attempts: 1)ため、最悪の待ちは 接続 + 読取 = 2 × 設定値
+#   ・1 instance(= 1回のLINEリクエスト)につき最大1回しか試みない(失敗・timeoutでも再試行しない)
+#   → 1.5秒 × 2 = 最悪3.0秒。値を変えるときは、契約テスト(最悪の待ち ≦ Timeoutの1割)が一緒に動く
 _PUBLISH_TIMEOUT_SECONDS = 1.5
+_PUBLISH_WORST_CASE_SECONDS = 2 * _PUBLISH_TIMEOUT_SECONDS
 
 
 class TradingPauseAlreadyInitializedError(Exception):

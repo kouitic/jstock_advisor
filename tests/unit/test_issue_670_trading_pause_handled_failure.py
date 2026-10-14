@@ -35,6 +35,7 @@ fixtureは架空値のみ。Production・AWSへは触れない。
 
 from __future__ import annotations
 
+import ast
 import datetime as dt
 import json
 import logging
@@ -61,6 +62,7 @@ from jstock_advisor.lambda_handlers import incident_notifier_handler
 from jstock_advisor.services import incident_envelope_publisher
 from jstock_advisor.services import trading_pause_service as mod
 from jstock_advisor.services.trading_pause_service import TradingPauseService
+from tests.support.iam_contract_helpers import resources
 
 _NOW = dt.datetime(2026, 10, 14, 9, 0, tzinfo=dt.UTC)
 _TOPIC_ENV = "INCIDENT_NOTIFICATION_TOPIC_ARN"
@@ -292,12 +294,16 @@ def test_c6_the_publish_is_called_with_a_bounded_timeout(
 
     _service(store_dir).is_buy_sell_paused(_NOW)
 
-    assert seen == [{"timeout_seconds": 1.5}]  # リテラルで固定(LINE webhookの同期応答のため短い)
+    assert seen == [{"timeout_seconds": mod._PUBLISH_TIMEOUT_SECONDS}]  # 名前つきの定数を参照
 
 
-def test_c6_the_bound_is_well_below_the_lambda_timeout() -> None:
-    """LINE webhook関数のTimeoutは30秒。通知の待ちの上限は、その1割より十分小さい。"""
-    assert 0 < mod._PUBLISH_TIMEOUT_SECONDS <= 3.0
+def test_c6_the_worst_case_wait_is_within_a_tenth_of_the_lambda_timeout() -> None:
+    """★ 根拠つきの定数(サブちゃんSHOULD-1)★ 最悪の待ち(接続 + 読取)は、LINE webhook関数の
+    Timeout(templateから読む。値をコピーしない)の1割以内。値を変えるとこのテストが一緒に動く。"""
+    timeout = float(resources()["LineWebhookFunction"]["Properties"]["Timeout"])
+    assert timeout == 30  # 前提の確認(変わったら、根拠を見直す合図)
+    assert mod._PUBLISH_WORST_CASE_SECONDS == 2 * mod._PUBLISH_TIMEOUT_SECONDS
+    assert 0 < mod._PUBLISH_WORST_CASE_SECONDS <= timeout * 0.1
 
 
 class _FakeSns:
@@ -486,3 +492,74 @@ def test_the_notice_fingerprint_is_distinct_from_the_other_handled_failures() ->
         error_message="HOLDINGS_WATCHLIST_KILL_SWITCH_FETCH_FAILED",
     )
     assert compute_fingerprint(this) != compute_fingerprint(other)
+
+
+# =============================================================================
+# C4 の前提: 「instance ごと = LINE の1リクエストごと」(サブちゃんSHOULD-2)
+# =============================================================================
+
+_HANDLER = Path(__file__).resolve().parents[2] / (
+    "src/jstock_advisor/lambda_handlers/line_webhook_handler.py"
+)
+
+
+def _calls_inside_functions(tree: ast.Module, name: str) -> tuple[int, int]:
+    """name(...) の呼び出しを、(関数の中, 関数の外 = module 直下・class 本体・既定引数)で数える。"""
+    inside = outside = 0
+
+    def walk(node: ast.AST, in_function: bool) -> None:
+        nonlocal inside, outside
+        if isinstance(node, ast.Call):
+            func = node.func
+            called = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if called == name:
+                if in_function:
+                    inside += 1
+                else:
+                    outside += 1
+        for child in ast.iter_child_nodes(node):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                # 既定引数・デコレータは定義時(= module 読込時)に評価される = 関数の外
+                body_ids = {id(n) for stmt in node.body for n in ast.walk(stmt)}
+                walk(child, in_function or id(child) in body_ids)
+            else:
+                walk(child, in_function)
+
+    walk(tree, False)
+    return inside, outside
+
+
+def test_c4_the_router_is_built_per_request_not_at_module_level() -> None:
+    """★ 重複抑止の粒度の前提 ★ dedup は TradingPauseService の instance ごと。その instance は、
+    handler の中で build_line_event_router() が ConversationService() → TradingPauseService() を
+    新しく作ることで『1回のLINEリクエストごと』になっている。将来、router を module 直下へ移す
+    (warm コンテナで使い回す)最適化が入ると、dedup が『コンテナの寿命の間 1 回』に変わり、
+    本物の障害が何時間も通知されなくなる。その変更をこのテストが止める。"""
+    tree = ast.parse(_HANDLER.read_text(encoding="utf-8"))
+
+    inside, outside = _calls_inside_functions(tree, "build_line_event_router")
+
+    assert inside >= 1  # 呼び出しが存在する(名前の変更で素通りしない)
+    assert outside == 0  # module 直下・class 本体・既定引数・デコレータには無い
+
+
+def test_c4_the_router_guard_detects_a_module_level_call() -> None:
+    """検査そのものの確認: module 直下の呼び出しを数えられる。"""
+    tree = ast.parse(
+        "router = build_line_event_router()\n\n"
+        "def handler():\n    return build_line_event_router()\n"
+    )
+    assert _calls_inside_functions(tree, "build_line_event_router") == (1, 1)
+    tree = ast.parse("def handler(r=build_line_event_router()):\n    return 1\n")
+    assert _calls_inside_functions(tree, "build_line_event_router") == (0, 1)
+
+
+def test_c4_the_trading_pause_service_is_created_in_the_service_constructor_not_at_import() -> None:
+    """ConversationService の構成時(= router の構築時)にだけ TradingPauseService が作られる。"""
+    path = Path(mod.__file__).resolve().parents[1] / "services" / "conversation_service.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+
+    inside, outside = _calls_inside_functions(tree, "TradingPauseService")
+
+    assert inside >= 1
+    assert outside == 0
