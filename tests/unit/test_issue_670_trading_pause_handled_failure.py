@@ -15,11 +15,11 @@ TradingPauseService.is_buy_sell_paused() が、設定の取得に失敗して安
   C8  共通契約(#665)は加法のみ: timeout_seconds未指定の既存の呼び出し元は従来と完全に同じ
 ```
 
-## ★ 「内容」行の文言は PROVISIONAL(暫定)
+## 「内容」行の文言は USER が確定した文言
 
-「内容」文の文言について、USERの承認は無い(USERが承認したのは、暫定の文面で実装してよく、deploy前に
-USERが文面を承認する、という進め方のみ)。本テストが固定するのは「その member が解決される」ことと
-「暫定であることがソースに明記されていること」であり、文言そのものが最終であるとは主張しない。
+「内容」文は、USER が確定した文言(#122 の USER_DECISION_RECORD 2026-10-15。案2の修正版)を一字一句
+固定する。以前の暫定(PROVISIONAL)の文言と、その注記は解消した。本テストは、文言そのもの・
+『ご自身で設定した一時停止ではありません』の明示・暫定の注記が残っていないことを固定する。
 
 ## 検査していない範囲
 
@@ -432,21 +432,22 @@ def test_the_job_resolves_to_the_existing_display_name() -> None:
     assert IncidentJob.LINE_WEBHOOK.value == "LINE の応答"
 
 
-def test_the_content_sentence_is_marked_provisional_in_the_source() -> None:
-    """★ 「内容」文が暫定(USER の承認なし)であることが、ソースに明記されている。"""
+def test_the_content_sentence_is_marked_as_user_confirmed_in_the_source() -> None:
+    """★ 「内容」文が USER の確定した文言であり、暫定(PROVISIONAL)の注記が残っていない。"""
     source = Path(incident_message.__file__).read_text(encoding="utf-8")
     member_line = source.index("LINE_WEBHOOK_TRADING_PAUSE_CONFIG_FETCH_FAILED = ")
     preceding = source[max(0, member_line - 900) : member_line]
 
-    assert "PROVISIONAL" in preceding
-    assert "USERの承認は無い" in preceding
+    assert "PROVISIONAL" not in preceding
+    assert "USERの承認は無い" not in preceding
+    assert "USER が確定した文言" in preceding
 
 
 def test_the_content_says_it_is_a_technical_failure_not_an_intentional_pause() -> None:
-    """意図的な一時停止ではなく、技術的な取得失敗による安全側の停止であることが文面で分かる。"""
+    """意図的な一時停止ではなく、技術的な読み込みの失敗による停止であることが文面で分かる。"""
     sentence = IncidentContent.LINE_WEBHOOK_TRADING_PAUSE_CONFIG_FETCH_FAILED.value
-    assert "取得できなかった" in sentence
-    assert "安全側" in sentence
+    assert "読み込めなかった" in sentence
+    assert "ご自身で設定した一時停止ではありません" in sentence
 
 
 def test_the_line_body_shows_the_display_name_and_the_content_without_internal_names(
@@ -676,3 +677,43 @@ def test_c7_every_cli_construction_of_the_service_opts_out_of_notifications() ->
                 node.lineno,
             )
     assert constructions >= 3  # 検査が空振りでない
+
+
+# =============================================================================
+# 確定した通知文言(USER 決定 #122 2026-10-15。案2の修正版。一字一句この文言)
+# =============================================================================
+
+_CONFIRMED_CONTENT = (
+    "売買登録の停止設定を読み込めなかったため、売買登録を停止しています。"
+    "ご自身で設定した一時停止ではありません。"
+)
+
+
+def test_the_content_sentence_is_exactly_the_user_confirmed_wording() -> None:
+    """★ USER が確定した文言を一字一句固定する(句点を含む 2 文)。"""
+    content = IncidentContent.LINE_WEBHOOK_TRADING_PAUSE_CONFIG_FETCH_FAILED
+    assert content.value == _CONFIRMED_CONTENT
+    assert resolve_incident_content(_REASON).value == _CONFIRMED_CONTENT
+
+
+def test_the_sentence_says_explicitly_that_it_is_not_an_intentional_pause() -> None:
+    """★『意図した停止ではない』ことを明示する語を固定する(技術的な失敗と意図した停止の区別)。"""
+    value = IncidentContent.LINE_WEBHOOK_TRADING_PAUSE_CONFIG_FETCH_FAILED.value
+    assert "ご自身で設定した一時停止ではありません" in value  # 意図した停止でない
+    assert "読み込めなかった" in value  # 原因 = 設定を読めなかったこと
+    assert "売買登録を停止しています" in value  # 止まっていること
+    assert "安全側" not in value  # 内部の用語を使わない(利用者に意味が伝わりにくい)
+
+
+def test_the_rendered_line_message_carries_the_confirmed_sentence() -> None:
+    notice = IncidentNotice(
+        job=IncidentJob.LINE_WEBHOOK,
+        occurred_at=_NOW,
+        failure_class=FailureClass.HANDLED_FAILURE,
+        content=IncidentContent.LINE_WEBHOOK_TRADING_PAUSE_CONFIG_FETCH_FAILED,
+    )
+
+    message = build_incident_message(notice)
+
+    assert f"内容: {_CONFIRMED_CONTENT}" in message.split("\n")
+    assert "対象: LINE の応答" in message.split("\n")
