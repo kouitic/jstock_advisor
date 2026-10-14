@@ -175,6 +175,15 @@ _NEW_RECORD_READERS = {
 }
 
 
+#: 名前に allocation_shadow を持つ『鍵の provider』の module(#925 kv1)。書き手でも読み手でもない。
+#: AuditLog へは書かず、記録も読まない(Secrets Manager の鍵を読むだけ)。
+#: (_NEW_RECORD_WRITERS・_NEW_RECORD_READERS には入れない。それぞれ『書く』『読む』module の定義)。
+#: 記録の層へ触れないことは下の test_the_key_providers_touch_no_record_layer が固定する
+_NEW_RECORD_KEY_PROVIDERS = {
+    "infrastructure/aws/allocation_shadow_key_provider.py",
+}
+
+
 def _imports_or_calls_log_ref(path: Path) -> bool:
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
@@ -187,26 +196,49 @@ def _imports_or_calls_log_ref(path: Path) -> bool:
     return False
 
 
-def test_the_new_record_writers_and_readers_do_not_use_log_ref() -> None:
-    """読み手も log_ref(owner の平文へ解く経路)を使わない。網は書き手と読み手の和集合で測る。"""
+_ALL_SHADOW_MODULES = _NEW_RECORD_WRITERS | _NEW_RECORD_READERS | _NEW_RECORD_KEY_PROVIDERS
+
+
+def test_the_new_record_writers_readers_and_key_providers_do_not_use_log_ref() -> None:
+    """読み手・鍵の provider も log_ref(owner の平文へ解く経路)を使わない。網は 3 集合の和集合。"""
     offenders = []
-    for relative in sorted(_NEW_RECORD_WRITERS | _NEW_RECORD_READERS):
+    for relative in sorted(_ALL_SHADOW_MODULES):
         path = _PACKAGE / relative
         if path.exists() and _imports_or_calls_log_ref(path):
             offenders.append(relative)
     assert offenders == []
 
 
-def test_every_allocation_shadow_module_is_in_the_writer_list() -> None:
-    """名前に allocation_shadow を持つ src は、書き手か読取専用の一覧に入れる(追加忘れの防止)。"""
+def test_every_allocation_shadow_module_is_in_one_of_the_lists() -> None:
+    """名前に allocation_shadow を持つ src は、書き手・読取専用・鍵の provider のどれかへ入れる。"""
     named = {
         path.relative_to(_PACKAGE).as_posix()
         for path in _PACKAGE.rglob("*.py")
         if "allocation_shadow" in path.name and path.name != "allocation_shadow_config.py"
     }
-    known = _NEW_RECORD_WRITERS | _NEW_RECORD_READERS
-    assert named <= known, sorted(named - known)
+    assert named <= _ALL_SHADOW_MODULES, sorted(named - _ALL_SHADOW_MODULES)
+    # 3 集合は互いに素(1 つの module が書き手かつ読み手、などの曖昧さを作らない)
     assert not (_NEW_RECORD_WRITERS & _NEW_RECORD_READERS)
+    assert not (_NEW_RECORD_WRITERS & _NEW_RECORD_KEY_PROVIDERS)
+    assert not (_NEW_RECORD_READERS & _NEW_RECORD_KEY_PROVIDERS)
+
+
+def test_the_key_providers_touch_no_record_layer() -> None:
+    """鍵の provider は、AuditLog・repository・DynamoDB・記録の module を import しない。"""
+    forbidden = ("audit", "repository", "dynamodb", "allocation_shadow_record", "owner_ref")
+    for relative in sorted(_NEW_RECORD_KEY_PROVIDERS):
+        path = _PACKAGE / relative
+        assert path.exists(), relative  # 空振り防止(一覧に載せた module が実在する)
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        imported = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                imported.append(node.module)
+                imported += [alias.name for alias in node.names]
+            elif isinstance(node, ast.Import):
+                imported += [alias.name for alias in node.names]
+        offenders = sorted(m for m in imported if any(word in m.lower() for word in forbidden))
+        assert offenders == [], (relative, offenders)
 
 
 def test_the_listed_writers_that_exist_use_the_reference_function() -> None:
