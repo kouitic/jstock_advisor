@@ -71,10 +71,29 @@ def duplicated_store_dirs(paths: Sequence[Path]) -> list[Path]:
     return duplicated
 
 
+def _assign_default_store_dir(base: Path) -> Path:
+    """`tmp_path` を使わないテストへ、既定の store のパス(基底の配下・一意)を割り当てる。
+
+    ★ 重複を割り当てたら、そのテストの setup をその場で失敗させる(記録には残す)★。
+    セッション終了時の検査(`pytest_sessionfinish`)は、pytest-xdist では worker の中で動くため
+    worker が書き換えた終了コードが controller へ伝わらない(実測: trial/xdist-967 で、番号を定数に
+    して重複させた `-n 2` の run が成功した)。テストの失敗は worker から controller へ伝わるので、
+    xdist でも失敗として現れるのはこの『その場の失敗』である。
+    """
+    store_dir = base / "default_store" / f"t{next(_store_dir_counter)}"
+    duplicated = store_dir in _assigned_store_dirs
+    _assigned_store_dirs.append(store_dir)
+    if duplicated:
+        raise AssertionError(f"default store dir assigned to more than one test: {store_dir}")
+    return store_dir
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """★ 一意性の検査(Issue #967)★。
 
     同じセッションで同じ既定の store のパスを 2 つのテストが使っていたら失敗にする。
+    ★ 単独のプロセスの実行の最後の網である。pytest-xdist では worker の終了コードが controller へ
+    伝わらない(上の `_assign_default_store_dir` の説明)ため、xdist の実行ではその場の失敗が本体 ★。
     """
     duplicated = duplicated_store_dirs(_assigned_store_dirs)
     if duplicated:
@@ -117,10 +136,7 @@ def _isolated_default_store_dir(
     if "tmp_path" in request.fixturenames:
         store_dir = request.getfixturevalue("tmp_path") / "local_store"
     else:
-        store_dir = (
-            tmp_path_factory.getbasetemp() / "default_store" / f"t{next(_store_dir_counter)}"
-        )
-        _assigned_store_dirs.append(store_dir)
+        store_dir = _assign_default_store_dir(tmp_path_factory.getbasetemp())
     monkeypatch.setattr(json_store, "DEFAULT_STORE_DIR", store_dir)
     yield store_dir
 

@@ -166,6 +166,24 @@ def test_the_session_finish_check_fails_the_session_only_on_a_duplicate(
     assert session.exitstatus == int(pytest.ExitCode.TESTS_FAILED)
 
 
+def test_assigning_a_duplicate_default_store_dir_fails_on_the_spot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★ xdist でも効く失敗 ★: 重複したパスの割り当ては、割り当てた時点で失敗する(記録にも残す)。
+
+    セッション終了時の検査は xdist では worker の終了コードが controller へ伝わらない(実測)。
+    """
+    module = _conftest()
+    monkeypatch.setattr(module, "_assigned_store_dirs", [])
+    monkeypatch.setattr(module, "_store_dir_counter", iter([0, 1, 1]))
+    first = module._assign_default_store_dir(tmp_path)
+    second = module._assign_default_store_dir(tmp_path)
+    assert first != second
+    with pytest.raises(AssertionError, match="more than one test"):
+        module._assign_default_store_dir(tmp_path)
+    assert module._assigned_store_dirs == [first, second, second]
+
+
 def test_zz_the_session_so_far_has_no_duplicate_default_store() -> None:
     """同じセッションの、これまでの全ての割り当てに重複が無い(一意性。これが最後のテスト)。"""
     module = _conftest()
