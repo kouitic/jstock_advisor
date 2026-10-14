@@ -648,3 +648,85 @@ def test_the_module_calls_only_get_secret_value_on_the_client() -> None:
     }
     assert not called & forbidden
     assert "get_secret_value" in called
+
+
+# --- fail-closed: 期限が切れた後に失敗した日は、古い鍵へ落ちない(USER 決定 #122 …6138622792【3】)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "reason"),
+    [
+        (_client_error("AccessDeniedException"), R.ACCESS_DENIED),
+        (_client_error("ResourceNotFoundException"), R.NOT_FOUND),
+        (TimeoutError(), R.TIMEOUT),
+        (_client_error("ThrottlingException"), R.ERROR),
+        (RuntimeError("boom"), R.ERROR),
+        (_ok("not json"), R.MALFORMED),  # 応答が仕様に合わない(呼び出し自体は成功)
+        (_ok(json.dumps({"key_version": 1, "key": "short"})), R.MALFORMED),
+    ],
+)
+def test_after_the_ttl_a_failure_never_falls_back_to_the_expired_key(
+    outcome: Any, reason: R
+) -> None:
+    """★ 成功 → 期限切れ → 失敗 ★ の組合せ。『取れないなら前のを使えばいい』を許さない。
+
+    入ると、回転で捨てたはずの鍵で符号が作られる(最も入り込みやすい善意のバグ)。
+    """
+    clock = Clock()
+    provider, client, _ = _provider(_ok(), monotonic=clock, cache_ttl_seconds=900.0)
+    first = provider.get()
+    assert isinstance(first, KeyMaterial)  # 1 回目は成功してキャッシュされる
+    client.outcome = outcome
+    clock.now += 900.1  # 期限切れ
+    result = provider.get()
+    assert result == KeyUnavailable(reason)
+    assert not isinstance(result, KeyMaterial)
+    assert len(client.calls) == 2  # 期限後は必ず再取得を試みた(キャッシュで済ませていない)
+
+
+def test_the_expired_key_is_not_resurrected_by_a_later_failure_either() -> None:
+    clock = Clock()
+    provider, client, _ = _provider(_ok(), monotonic=clock)
+    assert isinstance(provider.get(), KeyMaterial)
+    client.outcome = TimeoutError()
+    clock.now += 1000.0
+    assert provider.get() == KeyUnavailable(R.TIMEOUT)
+    assert provider.get() == KeyUnavailable(R.TIMEOUT)  # 2 回続けても古い鍵は返らない
+    client.outcome = _ok()
+    assert isinstance(provider.get(), KeyMaterial)  # 回復したら新しい成功が返る
+
+
+# --- ログの失敗で契約を破らない -----------------------------------------------------------------
+
+
+def test_get_never_raises_even_when_the_logging_machinery_is_broken() -> None:
+    """壊れた record factory(異常な構成)でも、get() は例外を送出しない。"""
+    original = logging.getLogRecordFactory()
+
+    def broken_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        raise RuntimeError("broken logging")
+
+    logging.setLogRecordFactory(broken_factory)
+    try:
+        assert SecretsManagerKeyProvider(secret_arn="not-an-arn").get() == KeyUnavailable(
+            R.NOT_CONFIGURED
+        )
+        provider, _, _ = _provider(_client_error("AccessDeniedException"))
+        assert provider.get() == KeyUnavailable(R.ACCESS_DENIED)
+        provider, _, _ = _provider(RuntimeError("x"))
+        assert provider.get() == KeyUnavailable(R.ERROR)
+    finally:
+        logging.setLogRecordFactory(original)
+
+
+def test_get_never_raises_even_when_a_log_filter_raises() -> None:
+    class Broken(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            raise RuntimeError("broken filter")
+
+    broken = Broken()
+    module.logger.addFilter(broken)
+    try:
+        assert SecretsManagerKeyProvider(secret_arn=None).get() == KeyUnavailable(R.NOT_CONFIGURED)
+    finally:
+        module.logger.removeFilter(broken)

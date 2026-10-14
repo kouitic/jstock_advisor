@@ -186,10 +186,13 @@ def _parse(response: object) -> KeyMaterial | None:
 
 def _unavailable(reason: KeyUnavailableReason) -> KeyUnavailable:
     """固定の印を 1 行だけ出して、理由コードを返す(ARN・値・例外のメッセージを出さない)。"""
-    if reason in CONFIG_ISSUE_REASONS:
-        logger.error("%s reason=%s", CONFIG_ISSUE_MARKER, reason.value)
-    else:
-        logger.warning("%s reason=%s", ANOMALY_MARKER, reason.value)
+    try:
+        if reason in CONFIG_ISSUE_REASONS:
+            logger.error("%s reason=%s", CONFIG_ISSUE_MARKER, reason.value)
+        else:
+            logger.warning("%s reason=%s", ANOMALY_MARKER, reason.value)
+    except Exception:  # noqa: BLE001 - ログの失敗(壊れた record factory・Filter)で契約を破らない
+        pass
     return KeyUnavailable(reason)
 
 
@@ -263,3 +266,4 @@ def shared_key_provider(secret_arn: str | None) -> SecretsManagerKeyProvider:
     if provider is None:
         provider = _SHARED.setdefault(secret_arn, SecretsManagerKeyProvider(secret_arn=secret_arn))
     return provider
+
