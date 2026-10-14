@@ -24,6 +24,7 @@ import copy
 import datetime as dt
 import inspect
 import json
+import re
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -93,12 +94,17 @@ def raer(value: str = "20") -> RaerResult:
     )
 
 
+def _policy_with_key(directory: Path, comparison_key: str | None) -> AllocationPolicyBundle:
+    text = (_REPO / "config" / "allocation_policy.yaml").read_text(encoding="utf-8")
+    value = "null" if comparison_key is None else f'"{comparison_key}"'
+    text, count = re.subn(r"(?m)^comparison_key:.*$", f"comparison_key: {value}", text)
+    assert count == 1
+    (directory / "allocation_policy.yaml").write_text(text, encoding="utf-8")
+    return load_allocation_policy(directory, minimum_trading_unit=UNIT)
+
+
 def decided_bundle(tmp_path: Path) -> AllocationPolicyBundle:
-    shipped = _REPO / "config"
-    text = (shipped / "allocation_policy.yaml").read_text(encoding="utf-8")
-    text = text.replace("comparison_key: null", f'comparison_key: "{KEY}"')
-    (tmp_path / "allocation_policy.yaml").write_text(text, encoding="utf-8")
-    return load_allocation_policy(tmp_path, minimum_trading_unit=UNIT)
+    return _policy_with_key(tmp_path, KEY)
 
 
 META = RecordMeta(
@@ -639,9 +645,9 @@ def test_a_skip_reason_must_be_a_code_not_free_text(tmp_path: Path) -> None:
         )
 
 
-def test_the_shipped_policy_records_a_ranking_only_unavailable_day() -> None:
-    """出荷の方針(comparison_key = null)の日は、算出不能(POLICY_INCOMPLETE)として記録される。"""
-    shipped = load_allocation_policy(_REPO / "config", minimum_trading_unit=UNIT)
+def test_an_undecided_key_records_a_ranking_only_unavailable_day(tmp_path: Path) -> None:
+    """比較の鍵が未決(comparison_key = null)の日は、算出不能(POLICY_INCOMPLETE)として記録される。"""
+    shipped = _policy_with_key(tmp_path, None)
     inputs = assemble_allocation_inputs(
         owner=OWNER,
         now=_NOW,

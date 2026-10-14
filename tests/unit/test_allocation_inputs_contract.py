@@ -29,6 +29,8 @@ import ast
 import datetime as dt
 import itertools
 import random
+import re
+import tempfile
 from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
@@ -155,18 +157,32 @@ def hold(code: str = "9001", **over: Any) -> HoldingRecord:
 _BUNDLE_CACHE: dict[str, AllocationPolicyBundle] = {}
 
 
+def _policy_with_key(directory: Path, comparison_key: str | None) -> AllocationPolicyBundle:
+    """出荷の方針の comparison_key だけを差し替えた版(出荷の config は不変)。None は未決(null)。"""
+    text = (_REPO / "config" / "allocation_policy.yaml").read_text(encoding="utf-8")
+    value = "null" if comparison_key is None else f'"{comparison_key}"'
+    text, count = re.subn(r"(?m)^comparison_key:.*$", f"comparison_key: {value}", text)
+    assert count == 1
+    (directory / "allocation_policy.yaml").write_text(text, encoding="utf-8")
+    return load_allocation_policy(directory, minimum_trading_unit=UNIT)
+
+
+_UNDECIDED_DIR: list[Path] = []
+
+
 def bundle(
     tmp_path: Path | None = None, comparison_key: str | None = None
 ) -> AllocationPolicyBundle:
-    """出荷の方針(PR-E)。comparison_key を決めた版は、一時の config から読む(出荷は不変)。"""
-    shipped = _REPO / "config"
+    """鍵を決めた版は一時の config から読む(出荷は不変)。鍵を渡さない版は未決(null)の方針。
+
+    #602 PR-G2 で出荷の方針へ鍵を設定したため、未決の日を確かめるテストは null の版を使う。
+    """
     if comparison_key is None:
-        return load_allocation_policy(shipped, minimum_trading_unit=UNIT)
+        if not _UNDECIDED_DIR:
+            _UNDECIDED_DIR.append(Path(tempfile.mkdtemp(prefix="undecided_policy_")))
+        return _policy_with_key(_UNDECIDED_DIR[0], None)
     assert tmp_path is not None
-    text = (shipped / "allocation_policy.yaml").read_text(encoding="utf-8")
-    text = text.replace("comparison_key: null", f'comparison_key: "{comparison_key}"')
-    (tmp_path / "allocation_policy.yaml").write_text(text, encoding="utf-8")
-    return load_allocation_policy(tmp_path, minimum_trading_unit=UNIT)
+    return _policy_with_key(tmp_path, comparison_key)
 
 
 def run(
@@ -778,7 +794,7 @@ def test_the_outputs_are_frozen() -> None:
 # --- 結合: assemble -> optimize_allocation(承認資料 B のとおりの結果)----------------------------
 
 
-def test_the_shipped_policy_has_no_comparison_key_so_nothing_is_allocated() -> None:
+def test_an_undecided_comparison_key_allocates_nothing() -> None:
     result = run([cand()], holdings=[hold()]).optimize(bundle())
 
     assert result.status is pt.AllocationStatus.UNAVAILABLE
