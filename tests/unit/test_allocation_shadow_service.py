@@ -151,11 +151,22 @@ def test_off_touches_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     assert recorded is False
 
 
-def test_shipped_config_is_off_so_default_entry_touches_nothing(
+def test_default_entry_loads_the_config_and_an_off_config_touches_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """shadow_config を渡さない本番の呼び方 = 出荷 config(OFF)を読んで、何もせず戻る。"""
+    """shadow_config を渡さない本番の呼び方は、config を読み込む入口を通る。出荷値が SHADOW に
+    なった(R1)ため、読み込みを OFF の設定へ差し替え(= 出荷値に依存しない)、OFF なら何もせず
+    戻ることを固定する。★ 出荷 config を読んだまま tripwire を置くと、tripwire の例外が入口の
+    隔離 try/except に飲まれて False が返り『空振りで PASS』になる(サブちゃん #956 の MUST)。
+    そのため読み込みの呼び出しも数える ★"""
     monkeypatch.setattr(svc, "_default_cash_getter", _tripwire)
+    loads: list[int] = []
+
+    def _load_off() -> AllocationShadowConfig:
+        loads.append(1)
+        return _OFF
+
+    monkeypatch.setattr(svc, "load_allocation_shadow_config", _load_off)
 
     recorded = observe_allocation_shadow(
         batch_id=_BATCH,
@@ -168,6 +179,7 @@ def test_shipped_config_is_off_so_default_entry_touches_nothing(
     )
 
     assert recorded is False
+    assert loads == [1]  # 出荷値に依らず、config の読み込みの入口を通った(空振りではない)
 
 
 def test_off_writes_no_extra_audit_record() -> None:
@@ -395,13 +407,15 @@ def test_off_makes_zero_aws_or_socket_calls(monkeypatch: pytest.MonkeyPatch) -> 
     ):
         monkeypatch.setattr(target, attr, tripwire(f"{getattr(target, '__name__', '')}.{attr}"))
 
-    # shadow_config を渡さない = 本番の呼び方(出荷 config = OFF を読む)
+    # R1(#128)で出荷 config は SHADOW。OFF の設定を明示して渡す(出荷 config を読むと、tripwire の
+    # 例外が入口の隔離 try/except に飲まれて False が返り『空振りで PASS』になる = #956 の MUST)
     recorded = observe_allocation_shadow(
         batch_id=_BATCH,
         now=_NOW,
         execution_context=_NORMAL,
         audit_service=_TripwireAudit(),  # type: ignore[arg-type]
         remaining_time_ms=_tripwire,
+        shadow_config=_OFF,
         wiring_factory=_tripwire,
     )
 
