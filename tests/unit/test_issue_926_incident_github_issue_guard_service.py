@@ -461,11 +461,11 @@ def test_undecided_limits_still_allow_comments_on_an_open_issue(secret_arn, conf
     assert github.creations == 1 and github.comments == 1
 
 
-def test_the_default_limits_are_the_shipped_undecided_file(secret_arn, config, github) -> None:
+def test_the_default_limits_are_the_shipped_user_approved_file(secret_arn, config, github) -> None:
     line_row(_FP_A)
-    run(secret_arn, config, None)  # limits を渡さない = 出荷の専用 YAML(全項目 null)を読む
-    assert github.requests == []
-    assert state()["github_issue_last_denied_reason"] == "LIMITS_UNDECIDED"
+    run(secret_arn, config, None)  # limits を渡さない = 出荷の専用 YAML(USER 承認の値)を読む
+    assert github.creations == 1  # 決定済みの値(360 / 2 / 5 / 10)で起票できる
+    assert "github_issue_last_denied_reason" not in state()
 
 
 # --- 失敗時の返却・claim の解放

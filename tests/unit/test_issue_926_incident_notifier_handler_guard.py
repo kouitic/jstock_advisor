@@ -19,7 +19,10 @@ from moto import mock_aws
 
 from jstock_advisor.config.loader import load_config
 from jstock_advisor.domain.notification import incident_issue_guard as guard
-from jstock_advisor.domain.notification.incident_issue_limits import IncidentIssueLimits
+from jstock_advisor.domain.notification.incident_issue_limits import (
+    IncidentIssueLimits,
+    undecided_limits,
+)
 from jstock_advisor.infrastructure.aws import incident_state_tracker as tracker
 from jstock_advisor.infrastructure.github import client as github_client_module
 from jstock_advisor.lambda_handlers import incident_notifier_handler as handler_module
@@ -287,9 +290,11 @@ def test_an_unexpected_guard_bug_leaves_the_line_path_untouched(
     assert line.incidents == 1
 
 
-def test_with_undecided_shipped_limits_the_line_path_is_unchanged_and_no_issue_is_created(
-    env, line, github
+def test_with_undecided_limits_the_line_path_is_unchanged_and_no_issue_is_created(
+    env, line, github, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # limits を差し替えない = 出荷の専用 YAML(全項目 null)。LINE は通常どおり、GitHub は呼ばない
+    # 上限値を未決定(全項目 null)へ差し替える(出荷値は USER 承認の決定済みの値)。
+    # LINE は通常どおり、GitHub は呼ばない
+    monkeypatch.setattr(service, "load_incident_issue_limits", undecided_limits)
     assert handler_module.handler(_event(_alarm("alarm-one")), None) == {"processed": 1}
     assert line.incidents == 1 and github.requests == 0

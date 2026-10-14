@@ -1,6 +1,8 @@
 """Issue #926: incident の GitHub Issue 起票の上限値(専用 YAML と専用 loader)の契約テスト。
 
-出荷値は全項目 null = 未決定(USER が決める値)。未決定・読めない・不正な設定は、すべて『未決定』
+出荷値は USER が承認した値(#122 2026-10-15。最小間隔 360 分 / fingerprint あたり 2 /
+全体 5 / 自動停止 10)。
+未決定(null)・読めない・不正な設定は、すべて『未決定』
 へ縮退する
 (= 新規 Issue を作らない fail-closed)。loader は例外を送出しない(LINE の経路を落とさない)。
 S-13(config/models.py・loader の AppConfig)へ field を足さない。
@@ -51,22 +53,51 @@ def _decided_yaml(**over: object) -> str:
 # --- 出荷値 --------------------------------------------------------------------------------
 
 
-def test_the_shipped_file_exists_and_every_value_is_undecided() -> None:
+_APPROVED = {
+    "new_issue_min_interval_minutes": 360,
+    "new_issue_limit_per_fingerprint": 2,
+    "new_issue_limit_global": 5,
+    "auto_stop_denied_threshold": 10,
+}
+
+
+def test_the_shipped_file_has_exactly_the_user_approved_values() -> None:
+    """★ 出荷値は USER が承認した値(#122 の USER_DECISION_RECORD 2026-10-15)。null ではない。"""
     assert _SHIPPED.is_file()
     loaded = load_incident_issue_limits()
-    assert loaded == undecided_limits()
-    assert all(getattr(loaded, name) is None for name in _FIELDS)
-    assert loaded.missing() == _FIELDS
-    assert not loaded.is_decided()
+    assert loaded.is_decided()
+    assert loaded.missing() == ()
+    assert {name: getattr(loaded, name) for name in _FIELDS} == _APPROVED
+    assert loaded != undecided_limits()
 
 
-def test_the_shipped_file_names_exactly_the_four_values() -> None:
+def test_the_shipped_file_names_exactly_the_four_values_and_they_are_real_positive_integers() -> (
+    None
+):
     import yaml
 
     data = yaml.safe_load(_SHIPPED.read_text(encoding="utf-8"))
-    assert set(data) == {"version", *_FIELDS}
+    assert set(data) == {"version", *_FIELDS}  # キーの集合は不変(意味論を変えない)
     assert data["version"] == 1
-    assert all(data[name] is None for name in _FIELDS)
+    for name in _FIELDS:
+        value = data[name]
+        assert value is not None
+        assert type(value) is int  # 真偽値・文字列・小数ではない
+        assert value > 0
+    assert {name: data[name] for name in _FIELDS} == _APPROVED
+
+
+def test_with_the_shipped_issue_creation_flag_off_the_approved_limits_do_not_create_anything() -> (
+    None
+):
+    """★ 上限値が決定済みでも、出荷の issue_creation_enabled が false の間は起票されない
+    (有効化は別の USER 承認。flag を true にする変更はこの変更に含まれない)。"""
+    import yaml
+
+    notification = yaml.safe_load(
+        (_SHIPPED.parent / "incident_notification.yaml").read_text(encoding="utf-8")
+    )
+    assert notification["issue_creation_enabled"] is False
 
 
 # --- 決定済みの値 --------------------------------------------------------------------------

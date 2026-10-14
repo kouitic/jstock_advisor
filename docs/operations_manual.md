@@ -5739,7 +5739,9 @@ docs/user_manager_collaboration_protocol.md §8)であり、本節はそれを�
 4 手動停止                   LINE への通知は出ない(実行した人が分かっているため)
 5 再開                       手動のみ。自動では再開しない
 6 制御項目の読取に失敗した    GitHub へ書かない(fail-closed)。LINE は通常どおり
-7 出荷値                     上限値は全項目 null(未決定)。決定されるまで、新規 Issue は作られない(OPEN の Issue へのコメントは続く)。
+7 出荷値                     上限値は USER が承認した値(2026-10-15。最小間隔 360 分 / fingerprint あたり 2 件 / 全体 5 件 / 自動停止 10 件)。
+                             ★ ただし新規 Issue は、config/incident_notification.yaml の issue_creation_enabled が true の間だけ作られる(出荷値 false = 作られない。有効化は別の USER 承認)。
+                             上限値が未決定(null・読めない・不正)の間は、flag が true でも新規 Issue は作られない(OPEN の Issue へのコメントは続く)。
                              この状態は『停止』ではない
 ```
 
@@ -5966,7 +5968,7 @@ WINDOW=$(TZ=JST-9 date +%F)   # 今日(JST)の窓の id。TZ=Asia/Tokyo へ置�
 1 38.3 で github_issue_kill_switch = false(または項目に kill_switch の属性が無い)ことを確認する(再開の成否はこれだけで決まる)
 2 再開の直後に incident の signal が来ていない場合は、何も起きない(正常)。新規 Issue も、抑止の記録も、変わらない
 3 signal が来た場合の、正常な抑止の状態(いずれも『再開が失敗した』ではない):
-   上限値が未決定(出荷値の null のまま。38.7)   新規 Issue は作られない(OPEN の Issue へのコメントは続く)。fingerprint の行に LIMITS_UNDECIDED が残る
+   上限値が未決定(null・読めない・不正な設定。出荷値は決定済み。38.7)   新規 Issue は作られない(OPEN の Issue へのコメントは続く)。fingerprint の行に LIMITS_UNDECIDED が残る
    fingerprint 単位の抑止                        同じ発生 = SAME_OCCURRENCE / 最小間隔の内 = MIN_INTERVAL / その窓の fingerprint あたりの上限 = FINGERPRINT_LIMIT。
                                                  この抑止は kill switch の再停止の入力にならない
    全体の上限(同日中の再開)                     GLOBAL_LIMIT。上限を超えた試行として数えられ、しきい値に達すれば再び自動停止する(上記)

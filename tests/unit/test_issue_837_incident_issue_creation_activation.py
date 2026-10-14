@@ -18,12 +18,13 @@ true にする(その切替は別の USER 承認)。
     (b') 有効の config(テスト側で明示的に true にする)と配線があれば、GitHub Issue を 1 件作成し、
         出荷 config の label を付ける(有効化したときの経路が壊れていないことの固定)。
         ★ Issue #926 以降は、新規起票の上限値(config/incident_issue_limits.yaml)が決定済みで
-        あることが条件になる。出荷値は全項目 null(未決定)のため、このテストは上限値を
-        決定済みの値へ差し替える
-    (b2) 有効の config(テスト側で明示的に true にする)と配線が揃っていても、上限値が未決定のまま
-        (出荷値)なら、新規 Issue を作らない(GitHub を一切呼ばない)。LINE は送られ、状態に
-        抑止の理由(LIMITS_UNDECIDED)を残す。(b)(出荷 flag = false)と合わせて、有効化の前提が
-        『flag を true にする』と『上限値を決める』の 2 つであることを固定する
+        あることが条件になる。出荷値は USER 承認の決定済みの値(#122 2026-10-15)だが、このテストは
+        起票を妨げない値へ差し替えて経路を確かめる
+    (b2) 有効の config(テスト側で明示的に true にする)と配線が揃っていても、上限値が未決定
+        (テスト側で全項目 null へ差し替える)なら、新規 Issue を作らない(GitHub を一切呼ばない)。
+        LINE は送られ、状態に抑止の理由(LIMITS_UNDECIDED)を残す。
+        ★ 出荷の上限値は決定済み(USER 承認)なので、出荷の flag = false が新規起票を止めている
+        唯一の条件(= (b))★
     (c) 有効の config でも、配線が無ければ GitHub を一切呼ばず、LINE も送られる
         (配線されていない環境では、状態に CONFIGURATION_ERROR を記録するだけで安全にスキップする)
     (d) LINE の通知(送った文面・件数・handler の戻り値・状態の SENT)は、flag が false のときと
@@ -54,7 +55,10 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 from moto import mock_aws
 
 from jstock_advisor.config.loader import load_config
-from jstock_advisor.domain.notification.incident_issue_limits import IncidentIssueLimits
+from jstock_advisor.domain.notification.incident_issue_limits import (
+    IncidentIssueLimits,
+    undecided_limits,
+)
 from jstock_advisor.infrastructure.aws import incident_state_tracker as tracker
 from jstock_advisor.infrastructure.github import client as github_client_module
 from jstock_advisor.lambda_handlers import incident_notifier_handler as handler_module
@@ -307,7 +311,13 @@ def test_with_an_enabled_config_and_undecided_limits_no_issue_is_created_and_lin
     fake = _install_urlopen(monkeypatch, [])
     message = _alarm_message()
 
-    # limits を差し替えない = 出荷の専用 YAML(全項目 null = 未決定)がそのまま使われる
+    # 上限値を未決定(全項目 null)へ差し替える。出荷値は USER が承認した値(#122 2026-10-15)
+    # に決定済みのため、『未決定のときに起票しない』経路は明示的に作る
+    monkeypatch.setattr(
+        incident_github_issue_service,
+        "load_incident_issue_limits",
+        lambda: undecided_limits(),
+    )
     result = handler_module.handler(_sns_event(message), None)
 
     assert result == {"processed": 1}
