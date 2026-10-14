@@ -3521,6 +3521,19 @@ class LineNotificationService:
         (個別銘柄の売買判断通知ではなく、適時開示の存在を知らせる事実通知の
         ため)。
 
+        ★ Issue #902: 重複の判定は**その銘柄・IMPORTANT_DISCLOSUREの送信記録の全件**
+        との比較である(以前は直近1件とだけ比べていたため、同じ銘柄に一致する開示が
+        2件以上あると、A→B→Aのように実行のたびに交互に再送された)。**比較する範囲は
+        通知記録が残っている期間**であり、記録のTTL(NOTIFICATION_LOG_RETENTION_DAYS =
+        730日。IMPORTANT_DISCLOSUREはTTL免除ではない)がそのまま窓になる。
+        `disclosure_check_service._LOOKBACK_DAYS`(7日)は「どの開示を取得するか」の範囲で、
+        この比較の範囲ではない。content_hashに公開日時とタイトルが入るため、730日前に
+        同じhashが成立するのは同一の開示であり、「同一開示は再送しない」という既存の契約の
+        とおりである。
+
+        ★ 順序は挙動で固定されている: `lookup.undecidable`(過去の記録を読めなかった)を
+        **先に**確認し、読めなかったときは全件比較へ進まず送らない(#279)。
+
         ★ Issue #109: 以前ここには「呼び出し元のdisclosure_check_handler.pyは
         execution_modeを扱わず常にNORMALで動くため、VALIDATIONの分岐へ到達する
         ことはない」と書かれていたが、**同Issueでhandlerがexecution_modeを読む
@@ -3547,9 +3560,10 @@ class LineNotificationService:
                 lookup.skipped,
             )
             return False
-        latest = lookup.latest
-        if latest is not None and latest.content_hash == content_hash:
+        # Issue #902: 比較相手は直近1件ではなく、読めた送信記録の全件。
+        if any(record.content_hash == content_hash for record in lookup.records):
             return False
+        latest = lookup.latest  # claim identityのprev(同時実行の二重送信防止)にだけ使う
 
         name_part = f" {stock_name}" if stock_name else ""
         lines = [
