@@ -1883,6 +1883,20 @@ Resources:
               Action: sns:Publish
               Resource:
                 - !Ref IncidentNotificationTopic
+        # Issue #602(#128 R1。USER 承認 = #122 issuecomment-6138462304【4】O1 案): 購入側 Shadow
+        # (Q')が owner 単位の買付余力を読むための、GetItem だけ。
+        # 付与先は Shadow が動く 2 関数(BuyCandidatesFunction / BuyCandidateWorkerFunction。
+        # 後者は前者の処理を import して呼ぶ)。PutItem・UpdateItem・DeleteItem・Scan・Query・
+        # BatchGetItem・index は付けない(call graph の実測: AvailableCashRepository.get →
+        # get_item 1 回。書込・列挙なし)。上の共有 Statement(DynamoDbCrudAccess)には混ぜず、
+        # 専用 Statement にする。Shadow が OFF の間(出荷の既定)は呼ばれない。
+        - Statement:
+            - Sid: AvailableCashReadOnly
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource:
+                - !GetAtt AvailableCashTable.Arn
       # Issue #318: _fanout.dispatch_async(InvocationType="Event")による
       # 自己呼び出しと、Reconcilerからの完了リカバリ呼び出しが**非同期**である。
       # 既定は「2回再試行/最大6時間」で、行き先が無いため失敗は静かに消えていた。
@@ -2045,6 +2059,20 @@ Resources:
               Action: sns:Publish
               Resource:
                 - !Ref IncidentNotificationTopic
+        # Issue #602(#128 R1。USER 承認 = #122 issuecomment-6138462304【4】O1 案): 購入側 Shadow
+        # (Q')が owner 単位の買付余力を読むための、GetItem だけ。
+        # 付与先は Shadow が動く 2 関数(BuyCandidatesFunction / BuyCandidateWorkerFunction。
+        # 後者は前者の処理を import して呼ぶ)。PutItem・UpdateItem・DeleteItem・Scan・Query・
+        # BatchGetItem・index は付けない(call graph の実測: AvailableCashRepository.get →
+        # get_item 1 回。書込・列挙なし)。上の共有 Statement(DynamoDbCrudAccess)には混ぜず、
+        # 専用 Statement にする。Shadow が OFF の間(出荷の既定)は呼ばれない。
+        - Statement:
+            - Sid: AvailableCashReadOnly
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource:
+                - !GetAtt AvailableCashTable.Arn
       Events:
         BuyCandidateQueue:
           Type: SQS

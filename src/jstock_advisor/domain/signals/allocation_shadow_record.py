@@ -883,9 +883,14 @@ def index_audit_id(business_date: dt.date) -> str:
     return f"{INDEX_ID_PREFIX}:{_date_text(business_date)}"
 
 
-def day_skip_audit_id(batch_id: str) -> str:
-    """日単位の skip の決定的な audit_id(owner を持たない)。"""
-    return f"{DAY_SKIP_ID_PREFIX}:{_ident_text(batch_id, 'batch_id')}"
+def day_skip_audit_id(business_date: dt.date) -> str:
+    """日単位の skip の決定的な audit_id(索引と対称。日付で引ける。owner を持たない)。
+
+    CLI が batch_id を知らなくても『鍵が取れず 1 件も記録が無い日』の理由を読めるように、key は
+    業務日だけ(batch_id は本文に残す)。同じ日に 2 つの batch が失敗した場合は先着が残る
+    (索引と同じ割り切り)。
+    """
+    return f"{DAY_SKIP_ID_PREFIX}:{_date_text(business_date)}"
 
 
 def items_audit_id(business_date: dt.date, owner_ref: KeyedOwnerRef) -> str:
