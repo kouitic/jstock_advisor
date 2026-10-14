@@ -201,6 +201,31 @@ def test_each_metric_filter_counts_one_fixed_marker_on_the_buy_log_group(
     assert transformation["MetricNamespace"] == _NAMESPACE
 
 
+def test_the_worker_log_group_gets_the_filters_before_the_fan_out_can_be_enabled(
+    template: dict[str, Any],
+) -> None:
+    """★ fan-out(BuyCandidateSqsDispatchEnabled)を有効にすると、処理が Worker へ移る ★。
+
+    Worker の log group は有効になるまで存在しないので、今は MetricFilter を付けない(付けると
+    ChangeSet が失敗する)。『既定が true になったのに Worker 側の MetricFilter が無い』= 観測が
+    全く出なくなる状態を、この契約テストで防ぐ(手順書 39.4 の読み落とし防止)。
+    """
+    default = template["Parameters"]["BuyCandidateSqsDispatchEnabled"]["Default"]
+    worker_group = {"Sub": "/aws/lambda/${BuyCandidateWorkerFunction}"}
+    covered = {
+        resource["Properties"]["FilterPattern"]
+        for resource in template["Resources"].values()
+        if resource.get("Type") == "AWS::Logs::MetricFilter"
+        and resource["Properties"]["LogGroupName"] == worker_group
+    }
+    if default == "false":
+        assert covered == set()  # 存在しない log group へは付けない
+    else:
+        assert covered == {f'"{marker}"' for marker, _ in _FILTERS.values()}, (
+            "fan-out が既定で有効なのに、Worker の log group の MetricFilter が無い"
+        )
+
+
 def test_the_two_markers_are_distinct_and_neither_contains_the_other() -> None:
     markers = [marker for marker, _ in _FILTERS.values()]
     assert len(set(markers)) == 2

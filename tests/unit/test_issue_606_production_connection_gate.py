@@ -715,8 +715,11 @@ _A_925_KEY_TOKENS: frozenset[str] = frozenset(
         "AllocationShadowKeyConfigIssueFilter",
         "AllocationShadowOwnerRefKeyResourcePolicy",
         "AllocationShadowOwnerRefKeyV1",
-        # Secret の Name / Alarm の名前の一部(`-` 区切りの小文字)
-        "allocation",
+        # `-` 区切りの名前(Secret の Name・Alarm の名前)。`-` を含めて 1 つの語と数える。
+        # 『allocation』だけを許可すると、将来の `allocation-…` の名前が黙って通るため全体で固定する
+        "-allocation-shadow-key-anomaly",
+        "-allocation-shadow-key-config-issue",
+        "allocation-shadow-owner-ref-key-v1",
     }
 )
 _KEY_SECRET_ID = "AllocationShadowOwnerRefKeyV1"
@@ -733,7 +736,9 @@ _KEY_RESOURCE_TYPES = frozenset(
 _SWITCH_WORDS = frozenset(
     {"mode", "enabled", "enable", "active", "activate", "on", "off", "switch", "toggle", "flag"}
 )
-_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_]*(?:allocation|expected_?return|raer)\w*", re.IGNORECASE)
+_TOKEN_PATTERN = re.compile(
+    r"[A-Za-z0-9_-]*(?:allocation|expected[_-]?return|raer)[\w-]*", re.IGNORECASE
+)
 
 
 def _template_document() -> dict:  # type: ignore[type-arg]
@@ -757,6 +762,23 @@ def test_the_template_has_only_the_approved_128_feature_words() -> None:
     """
     template = (_REPO / "infra" / "template.yaml").read_text(encoding="utf-8")
     assert set(_TOKEN_PATTERN.findall(template)) == set(_A_925_KEY_TOKENS)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Name: allocation-shadow-items-table",  # `-` 区切りの小文字(許可した語に吸収されない)
+        "TableName: !Sub ${AWS::StackName}-allocation-shadow-items",
+        "AllocationShadowItemsTable:",  # CamelCase
+        "ALLOCATION_SHADOW_ITEMS_TABLE: x",  # 全大文字
+        "expected-return-store",
+        "raer-coefficients",
+    ],
+)
+def test_the_scan_catches_a_new_name_in_every_spelling(text: str) -> None:
+    """走査は、許可した語に似た新しい名前を、`-` 区切り・CamelCase・全大文字のどれでも捕まえる。"""
+    found = set(_TOKEN_PATTERN.findall(text))
+    assert found and not found <= _A_925_KEY_TOKENS
 
 
 def test_the_approved_words_are_the_key_secret_and_its_observation_not_an_entry_point() -> None:
