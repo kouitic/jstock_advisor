@@ -696,7 +696,7 @@ def test_the_module_reads_no_clock_and_does_no_io() -> None:
 
 
 def test_only_the_observation_modules_import_the_module() -> None:
-    """dormant: P-b の観測(rotation_observation・その記録の形)だけが import する。配線は P-b4。"""
+    """dormant: P-b の観測の module だけが import する(型・記録の形・組み立て・reader)。"""
     importers = [
         path.relative_to(_PACKAGE).as_posix()
         for path in sorted(_PACKAGE.rglob("*.py"))
@@ -706,5 +706,8 @@ def test_only_the_observation_modules_import_the_module() -> None:
 
     assert importers == [
         "domain/signals/rotation_observation.py",
+        "domain/signals/rotation_observation_reads.py",
         "domain/signals/rotation_observation_record.py",
+        "infrastructure/aws/rotation_observation_reader.py",
+        "services/rotation_observation_inputs.py",
     ]

@@ -211,6 +211,10 @@ _UNCONNECTED_NAME_TOKENS = (
     # ★ 接続を許す変更ではなく、網を広げる変更 ★
     # (運用手順書 §37.5 が USER の承認を要求するのは『接続を許す変更』)
     "signals.rotation_",
+    # rotation_observation: P-b2 の reader(infrastructure)・入力の組み立て(services)・
+    # P-b3 の runner の名前。`signals.rotation_` は domain の名前しか捕らえないため、
+    # 名前の語でも網に入れる(SUBU 設計レビュー)
+    "rotation_observation",
 )
 
 
@@ -323,6 +327,25 @@ def test_the_rotation_token_is_not_vacuous_and_not_too_broad() -> None:
     assert "jstock_advisor.domain.signals.rotation_observation" in named
     # 既存の接続済み module を巻き込んでいない(網は rotation_ で始まる名前だけ)
     assert all(m.rsplit(".", 1)[-1].startswith("rotation_") for m in named)
+
+
+def test_the_observation_modules_outside_the_signals_package_are_in_the_net_by_name() -> None:
+    """★ services・infrastructure の rotation_observation_* も、名前だけで網に入る ★。"""
+    for module in (
+        "jstock_advisor.services.rotation_observation_inputs",
+        "jstock_advisor.services.rotation_observation_runner",  # P-b3(予定)
+        "jstock_advisor.infrastructure.aws.rotation_observation_reader",
+    ):
+        assert _is_unconnected_name(module), module
+    assert "rotation_observation" in _UNCONNECTED_NAME_TOKENS
+
+
+def test_the_observation_token_is_not_vacuous_and_not_too_broad() -> None:
+    named = sorted(m for m in _module_files() if "rotation_observation" in m)
+
+    assert "jstock_advisor.services.rotation_observation_inputs" in named
+    assert "jstock_advisor.infrastructure.aws.rotation_observation_reader" in named
+    assert all(m.rsplit(".", 1)[-1].startswith("rotation_observation") for m in named)
 
 
 def test_a_synthetic_rotation_module_reached_from_a_handler_is_caught() -> None:
