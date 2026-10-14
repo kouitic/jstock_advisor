@@ -277,12 +277,15 @@ _EXPECTED_STATEMENT_SIDS = {
         None,
         "CandidateUniverseCacheReadForJpxShadow",
         "PublishIncidentNotification",
+        # #602 O1: 購入側 Shadow の買付余力の読取(GetItem のみ)。意図して追加
+        "AvailableCashReadOnly",
     ],
     "BuyCandidateWorkerFunction": [
         "DynamoDbCrudAccess",
         "DynamoDbReadOnlyAccess",
         "CandidateUniverseCacheReadForJpxShadow",
         "PublishIncidentNotification",
+        "AvailableCashReadOnly",
     ],
     "HoldingsWatchlistFunction": [
         "DynamoDbCrudAccess",
@@ -320,8 +323,8 @@ _EXPECTED_STATEMENT_SIDS = {
 }
 # Policiesのエントリ数(SAMのpolicy templateを含む。配線で+1)
 _EXPECTED_POLICY_ENTRIES = {
-    "BuyCandidatesFunction": 6,
-    "BuyCandidateWorkerFunction": 3,
+    "BuyCandidatesFunction": 7,
+    "BuyCandidateWorkerFunction": 4,
     "HoldingsWatchlistFunction": 5,
     "HoldingsWatchlistWorkerFunction": 2,
     "WatchlistDispatcherFunction": 5,
