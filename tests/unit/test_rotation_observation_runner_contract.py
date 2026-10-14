@@ -547,6 +547,17 @@ def test_ports_must_be_the_ports_bundle() -> None:
     assert ports
 
 
+def test_the_default_batch_id_follows_the_injected_scheduled_time() -> None:
+    """予定時刻を変えたら、導出する batch_id も変わる(08:00 固定の写しを持たない)。"""
+    ports, batch, *_ = _ports()
+    observer = make_rotation_observer(
+        ports, last_run_time=dt.time(10, 0), scheduled_time=dt.time(9, 0)
+    )
+    observe_rotation(SHADOW, dt.datetime(2026, 10, 15, 9, 30, tzinfo=_JST), observer)
+    assert batch.calls == [schedule.holdings_batch_id(_DAY, dt.time(9, 0))]
+    assert batch.calls == ["holdings-watchlist-20261015T090000"]
+
+
 def test_the_default_batch_id_is_the_scheduler_derived_one() -> None:
     ports, batch, *_ = _ports()
     observe_rotation(SHADOW, _MIDDLE, _observer(ports))
