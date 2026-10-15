@@ -774,9 +774,9 @@ _REVIEWED_INCIDENT_CONTENT_LABELS = {
     "HOLDINGS_WATCHLIST_KILL_SWITCH_FETCH_FAILED": (
         "通知設定を取得できなかったため、投資判断の通知を止めた状態で処理を続けています"
     ),
-    # Issue #670(HF-5): ★ PROVISIONAL(暫定の文言。USERの承認なし)。deploy前にUSERの確認が要る。
+    # Issue #670(HF-5): USERが確定した文言(#122 2026-10-15。一字一句)。
     "LINE_WEBHOOK_TRADING_PAUSE_CONFIG_FETCH_FAILED": (
-        "売買登録の一時停止の設定を取得できなかったため、安全側で売買登録を停止しています"
+        "売買登録の停止設定を読み込めなかったため、売買登録を停止しています。ご自身で設定した一時停止ではありません。"
     ),
     "CLOUDWATCH_ALARM": "システムの監視アラームが検知されました",
     "OTHER": "技術的な問題を検知しました",
