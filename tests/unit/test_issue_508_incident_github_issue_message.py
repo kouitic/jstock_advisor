@@ -103,8 +103,8 @@ def test_notice_rejects_non_bool_is_ongoing() -> None:
 # --- allowlist: 禁止する値が本文に現れないこと(反証つき) ------------------------
 
 _FORBIDDEN_VALUES = (
-    "arn:aws:lambda:ap-northeast-1:970547364058:function:jstock-advisor-buy-candidates",
-    "970547364058",  # account ID
+    "arn:aws:lambda:ap-northeast-1:123456789012:function:jstock-advisor-buy-candidates",
+    "123456789012",  # account ID
     "req-12345-abcde",  # request ID風
     "Traceback (most recent call last)",  # stack trace風
     "ValueError: invalid literal",  # exception message風
@@ -138,7 +138,7 @@ def test_comment_body_contains_no_forbidden_values() -> None:
 def test_allowlist_check_itself_is_not_vacuous() -> None:
     """★ 検査自体の確認(#501と同じ観点): 禁止する値を実際に本文へ混入させると、
     このテストの手法(単純なin検査)が確実に検知することを固定する。"""
-    poisoned_body = build_incident_issue_body(_notice()) + "\narn:aws:iam::970547364058:role/x"
+    poisoned_body = build_incident_issue_body(_notice()) + "\narn:aws:iam::123456789012:role/x"
     with pytest.raises(AssertionError):
         for forbidden in _FORBIDDEN_VALUES:
             assert forbidden not in poisoned_body
@@ -192,11 +192,11 @@ def test_resolve_incident_failure_stage_falls_back_to_other_for_unknown_string()
     """★ F1の直接固定: 未知の内部文字列(将来の新設含む)は、値そのものではなく
     OTHERへ丸められ、生文字列はPUBLIC repositoryへ一切現れない。"""
     resolved = resolve_incident_failure_stage(
-        "some-未来-new_stage-arn:aws:iam::970547364058:role/x"
+        "some-未来-new_stage-arn:aws:iam::123456789012:role/x"
     )
     assert resolved is IncidentFailureStage.OTHER
     assert "arn:aws" not in resolved.value
-    assert "970547364058" not in resolved.value
+    assert "123456789012" not in resolved.value
 
 
 def test_resolve_incident_failure_stage_falls_back_to_other_for_non_string() -> None:

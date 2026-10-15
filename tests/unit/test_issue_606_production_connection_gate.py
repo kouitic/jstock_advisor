@@ -396,15 +396,22 @@ _ALLOCATION_MODULES_REACHABLE_FROM_HANDLERS = [
     "jstock_advisor.services.allocation_shadow_runner",
     "jstock_advisor.services.allocation_shadow_service",
 ]
-#: CLI の根から到達してよい配分系の module(#605 最小 CLI。読取専用。5 件の完全一致)。
+#: CLI の根から到達してよい配分系の module(#605 最小 CLI + #934 の集計の副コマンド。読取専用。
+#: 7 件の完全一致)。5 → 7 の追加 = cli.allocation_summary と、それが数える
+#: domain.notification.allocation_shadow_summary。★ 『接続を許す変更』ではない ★(読取専用・GetItem
+#: だけ・本番の判断/通知/表示へ未接続)。根拠 = R1 の完了条件 4『CLI から計算結果を確認できる』
+#: (#122 …6138622792【1】)・#605 / F-78・集計の内容は USER 指示 #934 …6167918059 / …6168329925。
+#: 承認不要の判断 = #934 …6169731888 の 1 節(サブちゃんの設計レビュー …6168788054 と一致)。
 #: ★ 重い `allocation_shadow_record`(配分・RAER の module を推移的に import する)・
 #: `allocation_shadow_compute` は含めない = CLI は記録を辞書として読むだけ ★。
 #: handler の網(_UNCONNECTED_NAME_TOKENS)は外していない
 _ALLOCATION_MODULES_REACHABLE_FROM_CLI = [
     "jstock_advisor.cli.allocation",
     "jstock_advisor.cli.allocation_labels",
+    "jstock_advisor.cli.allocation_summary",
     "jstock_advisor.domain.notification.allocation_shadow_cli_renderer",
     "jstock_advisor.domain.notification.allocation_shadow_cli_view",
+    "jstock_advisor.domain.notification.allocation_shadow_summary",
     "jstock_advisor.infrastructure.aws.allocation_shadow_reader",
 ]
 
@@ -418,7 +425,7 @@ def test_the_only_allocation_modules_reachable_from_handlers_are_the_off_shadow_
 
 
 def test_the_only_allocation_modules_reachable_from_the_cli_are_the_read_only_ones() -> None:
-    """CLI の根から到達できる配分系 = 読取専用の CLI の 5 module だけ(完全一致)。"""
+    """CLI の根から到達できる配分系 = 読取専用の CLI の 7 module だけ(完全一致)。"""
     reached = _reachable_from_root(_CLI_ROOT_PREFIX)
     assert sorted(m for m in reached if "allocation" in m) == _ALLOCATION_MODULES_REACHABLE_FROM_CLI
 
