@@ -485,6 +485,10 @@ def test_nothing_imports_the_new_handler_and_the_cli_reaches_none_of_the_table()
 def test_exit_architecture_is_reached_from_the_new_handler_only_via_capital_rotation() -> None:
     """P の閉包は `capital_rotation`(型)経由で exit_architecture の一部へも到達する(7 件の内)。
 
+    ★ 本テストが固定するのは exit_architecture だけ ★。同じ `capital_rotation` 経由で届く RAER・
+    配分・期待リターンの module は、`test_raer_contract.py` の
+    `test_the_rotation_observation_handler_reaches_raer_only_through_capital_rotation` が固定する。
+
     ★ 経由は `capital_rotation` だけ ★(C0 の契約テストが、package を import する src の完全一致
     〔`capital_rotation` と受け手〕を固定している)。P の handler 自体は package を import しない。
     """

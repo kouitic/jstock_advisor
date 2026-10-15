@@ -920,6 +920,11 @@ def test_the_rotation_observation_handler_reaches_raer_only_through_capital_rota
     承認の記録 = USER 決定 #604 …6195577714(P-b4 の A1)。P は観測の記録を作るだけで、RAER を
     計算しない(`capital_rotation` を import するのは入替元の適格性の型のため)。
     `capital_rotation` の辺を除くと RAER・配分・期待リターンのどれにも到達しない = 道は 1 本。
+
+    ★ 本テストが固定するのは RAER・配分・期待リターンの 3 つだけ ★(網羅ではない)。P の handler が
+    `capital_rotation` 経由で届く `exit_architecture` の module は、#606 の gate の
+    `test_exit_architecture_is_reached_from_the_new_handler_only_via_capital_rotation` と
+    C0 の契約テストが固定している(片方だけ読んで『全部固定済み』と誤解しない)。
     """
     known = _module_files(_SRC)
     assert _ROTATION_OBSERVATION_HANDLER in known and _CAPITAL_ROTATION in known
