@@ -15,7 +15,8 @@
     選択に使う強さは (b) の降格の前の値
   5 ★ 勝者にだけ降格 (b) ★(現行の profit_taking.py と同じ順序): 緩和要因 -> 監視の下限 ->
     origin 別の床 -> タイミング層 -> 監視の下限 -> origin 別の最終の床。決算直前は降格として
-    持たない(現行は ceiling の利用可否 = E2 の入力側の gate。Arbiter が二重に降格しない)
+    持たない(現行のエンジン本体には『決算直前の降格』が無い。決算直前の売却の置き換えは
+    サービス層の既存の処理で、Arbiter はそれを降格として持たない)
   6 trace: 選ばれなかった候補・上限・降格を suppressed に理由つきで残す
 
 候補の出所と強さ
@@ -47,7 +48,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 
 from jstock_advisor.domain.exit_architecture.decision import (
     ALLOWED_ROOTS_BY_KIND,
@@ -176,12 +177,35 @@ def _down(strength: Strength, steps: int) -> Strength:
 # ---------------------------------------------------------------------------
 
 
+class ProposalSource(StrEnum):
+    """候補の出所(売り側)。LAYER = 層の評価が出した候補 / LEGACY_ENGINE = 現行エンジンの経路の候補。
+
+    ★ 値を定義するだけ(#878 PR-3b-0)★。`build_candidates` はこの値を見ない = 既存の判定結果は
+    1 つも変わらない。LEGACY_ENGINE の候補を層の確定性のゲートとどう扱うか(売却判断の意味論)は、
+    配線する PR(PR-3b-1 か 3c)で、実際に通る経路の中で検証しながら USER の 1 行確認を受ける
+    (ここでは決めない)。
+    ★ 名前について ★: 買い側の `domain/entities/enums.py` に、別の意味・別の値域
+    (WATCHLIST / HOLDING / BOTH)の `CandidateSource` が既にある(参照元 22 file)。
+    同名の取り違えを避けるため `ProposalSource` とした。
+    """
+
+    LAYER = "LAYER"
+    LEGACY_ENGINE = "LEGACY_ENGINE"
+
+
 @dataclass(frozen=True)
 class CandidateProposal:
-    """層の評価(adapter。PR-3)が出す候補。claimed_strength は資格の上限 (a) の前の主張。
+    """候補。adapter(PR-3)が、層の評価または現行エンジンの経路から出す。
+
+    claimed_strength は資格の上限 (a) の前の主張。
 
     evidence      この候補を支える根拠(USER_DIRECTIVE の root は入れられない)
     input_groups  依存する L0 の入力グループ(信頼性が使えない / DEGRADED の入力を判定する)
+    source        候補の出所(既定 LAYER)。★ 比較・hash に含める ★(出所が違う 2 つの候補を『同じ』と
+                  見なさない。将来 判断に効く値のため、観測用の `compare=False` にはしない)。
+                  現時点では `build_candidates` が見ない(値の定義だけ。ProposalSource の docstring)
+                  ★ この module は `.source` を読まない ★(証拠の `source` を読まない契約の網)。
+                  型は mypy が見る。値は契約テストが固定
     """
 
     trigger_kind: TriggerKind
@@ -190,6 +214,7 @@ class CandidateProposal:
     layer: ExitLayer
     evidence: tuple[Evidence, ...] = ()
     input_groups: frozenset[str] = frozenset()
+    source: ProposalSource = ProposalSource.LAYER
 
     def __post_init__(self) -> None:
         if self.trigger_kind not in ORIGIN_OF_TRIGGER:
@@ -585,7 +610,7 @@ def apply_softening(
       4 タイミング層 = 上昇トレンドで 1 段降格(FUNDAMENTAL_CRITICAL_RISK と hard_overvalued は除く)
       5 監視の下限(2 回目)= タイミング層でHOLDに落とさない
       6 origin 別の最終の床(2 回目)= 緩和 + タイミングの合計でも PARTIAL 未満にしない
-    決算直前は降格として持たない(現行は E2 の入力側の gate = ceiling の利用可否)。
+    決算直前は降格として持たない(エンジン本体には無い。サービス層の既存の置き換え)。
     """
     if winner.origin in SOFTENING_EXEMPT_ORIGINS:
         return winner.strength, ()
@@ -747,6 +772,7 @@ __all__ = [
     "Candidate",
     "CandidateProposal",
     "Origin",
+    "ProposalSource",
     "SofteningFacts",
     "apply_softening",
     "arbitrate",

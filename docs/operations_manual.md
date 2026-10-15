@@ -6273,7 +6273,8 @@ jstock allocation detail --backend dynamodb --aws-region ap-northeast-1 --confir
 追加の項目  保有評価額・方針の値(記録の policy の節の値だけ。config は読まない)・経過時間と読取の状態も出す(USER の回答 #605 …6190430543)。訂正されたら定数 1 つで切り替える
 ```
 
-★ 出力は利用者の端末だけで確認する(Issue・PR・コメントなどの公開面へ貼らない。銘柄・金額・所有者の表示名を含みうる)。投資判断・LINE の通知に使わない。
+★ 出力は利用者の端末だけで確認する(Issue・PR・コメントなどの公開面へ貼らない。銘柄・金額・所有者の表示名を含みうる)。Shadow の試験結果であり実際の投資判断ではない(表の末尾と JSON の `notices` の両方に 2 つの注意を出す)。投資判断・LINE の通知に使わない。
+★ 記録の値だけを表示する(USER の指示 #122 …6195577047): `today` の導出値 2 つ(残余資金の目安・配分しなかった候補の必要資金)は詳細では出さない。
 ・設計・実装: Issue #605(追加 CLI 設計 rev1〜rev3)/ 閉包: 記録の module(allocation_shadow_record・shadow_compute)・方針の config(allocation_policy_config)を import しない(#606 の CLI の根に免除は無い)
 
 
