@@ -1153,7 +1153,7 @@ def test_the_timing_layer_lowers_by_the_policy_steps_only_in_an_uptrend() -> Non
 
 
 def test_the_arbiter_adds_no_downgrade_of_its_own_for_the_earnings_window() -> None:
-    """決算直前は降格として持たない(現行は E2 の入力側の gate = ceiling の利用可否)。
+    """決算直前は降格として持たない(現行のエンジン本体には無く、サービス層の既存の置き換え)。
     Arbiter が二重に降格しない(現行の売却比率・action を変えない)。"""
     near = dataclasses.replace(
         _fe1_layers(),
