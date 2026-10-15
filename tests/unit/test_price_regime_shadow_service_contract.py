@@ -149,8 +149,9 @@ def test_insufficient_facts_are_carried_as_undetermined() -> None:
 def test_missing_facts_give_none_even_with_thresholds(caplog: pytest.LogCaptureFixture) -> None:
     """facts が無い(None)のは『正常な None』: ★ WARNING を 1 行も出さない ★。
 
-    """facts が無い(None)のは『正常な None』: ★ WARNING を 1 行も出さない ★。
-    通るようになると、保有の件数ぶんの WARNING が出る(サブちゃんの変異 M3)。ログの有無で区別する。
+    例外の経路(広い except)も None を返すため、戻り値だけでは区別できない。guard が外れて
+    例外の経路を通るようになると、保有の件数ぶんの WARNING が出る(サブちゃんの変異 M3)。
+    ログの有無で区別する。
     """
     with caplog.at_level("DEBUG"):
         result = observe_price_regime_shadow(
