@@ -10,8 +10,10 @@
 
 * ★ 記録に無い値を作らない・補完しない・丸めない・計算し直さない ★: 寄与度・土台・配分の金額は
   記録の 10 進数の文字列をそのまま(桁区切りだけ)整形する。寄与の合計・順位・残余を再計算しない。
-  例外は `today` と同じ 2 つ(『残余資金』の目安・配分しなかった候補の『必要資金』)で、これらは
-  `allocation_shadow_cli_view` の行をそのまま使う
+  ★ `today` の行が持つ 2 つの導出値(『残余資金』の目安 = 記録の金額の引き算・配分しなかった候補の
+  『必要資金』 = 株数 × 現在価格の掛け算)は、詳細では出さない ★(USER の指示 #122 …6195577047:
+  記録されている値を表示するだけで、CLI 側の再計算・推定・補完は禁止)。必要資金は配分した候補の
+  記録の金額だけ
 * ★ LENIENT かつ『生の値が画面へ出ない』★: どんな辞書(型・キー・値の形を崩した入力)でも例外を
   送出しない。allowlist のキーだけを読み、値は形(10 進数・コード・語・識別子・真偽・日付)を
   検査して、形が合うものだけを出す。合わないもの(未知の型・自由文・構造・巨大な値)は『不明』へ畳み、
@@ -86,6 +88,13 @@ _MAX_LIST: Final = 64  # 画面に出す要素の上限(超えた分は件数だ
 _SHOWN_NUMBER: Final = re.compile(r"^-?[0-9]{1,3}(,[0-9]{3})*(\.[0-9]+)?$|^-?[0-9]+(\.[0-9]+)?$")
 _SHOWN_YEN: Final = re.compile(r"^-?[0-9]{1,3}(,[0-9]{3})*(\.[0-9]+)?円$|^-?[0-9]+(\.[0-9]+)?円$")
 _SHOWN_INT: Final = re.compile(r"^[0-9]{1,18}$")
+_SHOWN_AT: Final = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}(:[0-9]{2}(\.[0-9]{1,6})?)?"
+    r"(Z|[+-][0-9]{2}:[0-9]{2})?)?$"
+)
+
+#: 『配分した』を表す記録の判断コード(書込側の閉じた語彙。契約テストが CandidateDecision と結ぶ)
+_ALLOCATED: Final = "ALLOCATED"
 
 YES_TEXT: Final = "はい"
 NO_TEXT: Final = "いいえ"
@@ -161,6 +170,11 @@ class OwnerDetail:
     policy: PolicyDetail | None = None
     run: tuple[DetailValue | DetailMap, ...] = ()  # 経過時間・読取の状態
     unparsed: int = 0
+    # 所有者の見出し: 記録された値だけ(買付余力・基準日時・ポートフォリオ評価額)。
+    # 『見込み残高(目安)』『配分 / 見送りの件数』は導出(引き算・行から数えた値)なので出さない
+    available_cash: str | None = None
+    last_reconciled_at: str | None = None
+    portfolio_value: str | None = None
 
 
 @dataclass(frozen=True)
@@ -328,11 +342,14 @@ def _clean_row(row: CandidateRow) -> tuple[CandidateRow, int]:
     )
     seq, bad_seq = _shown(_SHOWN_INT, row.seq if row.seq != "-" else None)
     raer, bad_raer = _shown(_SHOWN_NUMBER, row.raer_value)
+    allocated = row.decision is not None and row.decision.code == _ALLOCATED
     rank, bad_rank = _shown(_SHOWN_INT, row.rank)
     shares, bad_shares = _shown(_SHOWN_INT, row.shares)
-    required, bad_required = _shown(_SHOWN_YEN, row.required_funds)
+    # 必要資金は『配分した候補の記録の金額』だけ(配分しなかった候補の値は today が計算した導出値)
+    required, bad_required = _shown(_SHOWN_YEN, row.required_funds if allocated else None)
     shortfall, bad_shortfall = _shown(_SHOWN_YEN, row.shortfall)
-    remaining, bad_remaining = _shown(_SHOWN_YEN, row.remaining_cash)
+    # 残余資金は today が記録の金額を引き算した目安 = 導出値。詳細では出さない
+    remaining, bad_remaining = None, 0
     confidence = row.confidence
     bad_confidence = 0
     if (
@@ -493,23 +510,38 @@ def _owner_detail(section: OwnerSection, items: Any) -> OwnerDetail:
     base = OwnerDetail(ref=section.ref, display_ref=section.display_ref, label=section.label)
     if section.status is not OwnerStatus.OK:
         return base
+    # 買付余力・評価額の『読めない値』は画面モデル側(screen.unparsed)が数え済み = 二重に数えない
+    cash, _ = _shown(_SHOWN_YEN, section.available_cash)
+    reconciled, bad_at = _shown(_SHOWN_AT, section.last_reconciled_at)
+    portfolio, _ = _shown(_SHOWN_YEN, section.portfolio_value)
+    base = replace(
+        base,
+        available_cash=cash,
+        last_reconciled_at=reconciled,
+        portfolio_value=portfolio,
+        unparsed=bad_at,
+    )
     record = items.record if items is not None and items.state is RecordState.FOUND else None
     if not isinstance(record, dict) or record.get("record_kind") != ITEMS_KIND:
-        return replace(base, unparsed=1)
+        return replace(base, unparsed=base.unparsed + 1)
     try:
         raws = _list(record.get("candidates"))
         if len(raws) != len(section.rows):
-            return replace(base, unparsed=1)
+            return replace(base, unparsed=base.unparsed + 1)
         candidates = tuple(
             _candidate_detail(row, raw) for row, raw in zip(section.rows, raws, strict=True)
         )
         policy = _policy(record)
         run, bad_run = _run(record)
         return replace(
-            base, candidates=candidates, policy=policy, run=run, unparsed=policy.unparsed + bad_run
+            base,
+            candidates=candidates,
+            policy=policy,
+            run=run,
+            unparsed=base.unparsed + policy.unparsed + bad_run,
         )
     except Exception:  # noqa: BLE001 - どんな辞書でも例外を出さない(読めなければ『不明』)
-        return replace(base, unparsed=1)
+        return replace(base, unparsed=base.unparsed + 1)
 
 
 def build_detail_screen(day: DayInput, labels: Mapping[str, str] | None = None) -> DetailScreen:

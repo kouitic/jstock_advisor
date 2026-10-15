@@ -175,7 +175,6 @@ def _candidate_lines(candidate: CandidateDetail, *, include_optional: bool) -> l
         funds = f"{funds}(不足 {row.shortfall})"
     lines.append(
         f"    配分: 株数 {_opt(row.shares)} / 必要資金 {funds}"
-        f" / 残余資金 {_opt(row.remaining_cash)}"
         + " / "
         + _pairs_line(candidate.allocation, include_optional=include_optional)
     )
@@ -190,6 +189,10 @@ def _owner_lines(
     lines = [f"■ 所有者: {title}"]
     if status is not None and status is not OwnerStatus.OK:
         return [*lines, f"  ★ 詳細を表示できません(状態: {status.value})"]
+    lines.append(
+        f"  買付余力: {_opt(owner.available_cash)} / 基準日時: {_opt(owner.last_reconciled_at)}"
+        f" / ポートフォリオ評価額: {_opt(owner.portfolio_value)}"
+    )
     if include_optional and owner.policy is not None:
         lines.append("  方針: " + _pairs_line(owner.policy.values, include_optional=True))
     if include_optional and owner.run:
@@ -205,6 +208,14 @@ def _owner_title_of(owner: OwnerDetail, *, show_labels: bool) -> str:
     if show_labels and owner.label:
         return f"{owner.label}({owner.display_ref})"
     return owner.display_ref
+
+
+NOTICE_NO_PUBLIC_SURFACE: Final = (
+    "この出力は利用者の端末だけで確認してください(Issue・PR などの公開面へ貼らない)"
+)
+NOTICE_NOT_INVESTMENT_ADVICE: Final = "これは Shadow の試験結果であり、実際の投資判断ではありません"
+# 表の末尾・JSON の `notices` の両方が使う(USER の確定 #122: 出力方法によらず 2 つとも明記する)
+NOTICES: Final = (NOTICE_NO_PUBLIC_SURFACE, NOTICE_NOT_INVESTMENT_ADVICE)
 
 
 def render_detail_table(
@@ -242,7 +253,7 @@ def render_detail_table(
         lines.append("")
         lines.append(f"★ 解釈できなかった項目: 合計 {detail.unparsed} 件({UNKNOWN_TEXT})")
     lines.append("")
-    lines.append("※ この出力は利用者の端末だけで確認してください(Issue・PR などの公開面へ貼らない)")
+    lines.extend(f"※ {notice}" for notice in NOTICES)
     if show_labels and any(owner.label for owner in detail.owners):
         lines.append(LABEL_NOTICE)
     return "\n".join(lines) + "\n"
@@ -291,6 +302,9 @@ def detail_to_dict(
             "display_ref": owner.display_ref,
             "status": (statuses[owner.ref].value if owner.ref in statuses else None),
             "unparsed": owner.unparsed,
+            "available_cash": owner.available_cash,
+            "last_reconciled_at": owner.last_reconciled_at,
+            "portfolio_value": owner.portfolio_value,
             "candidates": [
                 _candidate_json(c, include_optional=include_optional) for c in owner.candidates
             ],
@@ -308,6 +322,7 @@ def detail_to_dict(
     return {
         "schema_version": OUTPUT_SCHEMA_VERSION,
         "disclaimer": DISCLAIMER,
+        "notices": list(NOTICES),
         "business_date": screen.business_date,
         "state": screen.state.value,
         "state_text": DAY_STATE_TEXT[screen.state],
