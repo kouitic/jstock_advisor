@@ -193,8 +193,8 @@ def test_c4_the_buy_side_categories_are_unchanged() -> None:
     assert source.resolve_notification_category(plain_watch) is NotificationCategory.NOT_NOTIFIABLE
 
 
-# 移す前(main)の実装と全組合せ(RecommendationType × buy_action × watch_type × signal = 1800 通り)を
-# 突き合わせて差が 0 であることを確認した上で、buy_action なしの分類を表として固定する。
+# 移す前(main)の実装と、値域の直積(RecommendationType × buy_action × watch_type × signal =
+# 2,520 通り)を突き合わせて差が 0 であることを確認した上で、buy_action なしの分類を表として固定する。
 _GOLDEN_CATEGORY: dict[str, str] = {
     "BUY": "OTHER",
     "WATCH_BUY": "OTHER",

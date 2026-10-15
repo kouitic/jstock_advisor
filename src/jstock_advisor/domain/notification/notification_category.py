@@ -7,7 +7,7 @@ LINE 通知の service を import すると LINE 送信・永続化の closure �
 接続ゲートに反する。そのため、依存が domain.entities と notification_intent だけの
 本 module へ**そのまま**移した(判定ロジックは 1 文字も変えていない)。
 
-line_notification_service.py は本 module から import して使う(旧名での再公開はしない)。
+line_notification_service.py は本 module から import して使う(定義は持たない)。
 LINE 通知・監査・サマリ・観測のいずれも、本 module の関数だけを呼ぶこと(重複実装の禁止)。
 """
 
