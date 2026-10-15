@@ -46,6 +46,9 @@ _V2_OWNER_MODULE_TO_TABLES: dict[str, tuple[str, ...]] = {
     "jstock_advisor.infrastructure.aws.baseline_pointer": (
         "InvestmentThesisBaselinePointersTableV2",
     ),
+    # #604 P-b4 A2: 資金入替の観測 P の ports が保有の表(V2)の論理名をハードコードする
+    # (Scan の対象。1 表だけ。Scan 権限は P の Role だけ)
+    "jstock_advisor.services.rotation_observation_ports": ("HoldingsTableV2",),
 }
 
 # 全Lambda Function(AWS::Serverless::Function論理ID)一覧。テンプレートに
@@ -63,6 +66,7 @@ _ALL_FUNCTIONS = frozenset(
         "LineWebhookFunction",
         "MonthlyReviewFunction",
         "QuarterlyReviewFunction",
+        "RotationObservationFunction",  # #604 P-b4 A2
         "WatchlistBatchReconcilerFunction",
         "WatchlistDispatcherFunction",
         "WatchlistTerminalFailureHandlerFunction",

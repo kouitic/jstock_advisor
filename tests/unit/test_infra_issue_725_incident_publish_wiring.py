@@ -55,6 +55,8 @@ _OTHERS = (
     "IncidentNotifierFunction",
     "MonthlyReviewFunction",
     "QuarterlyReviewFunction",
+    # #604 P-b4 A2: 資金入替の観測 P。失敗は Errors Alarm(既存の Topic)で届く(envelope は使わない)
+    "RotationObservationFunction",
     "WeeklyReviewFunction",
 )
 _ALL_FUNCTIONS = sorted([*_TARGETS, _RECONCILER, *_OTHERS])
@@ -192,14 +194,14 @@ def test_t4_reconciler_wiring_is_unchanged() -> None:
 # --- T5 -------------------------------------------------------------------------
 
 
-def test_t5_the_template_has_exactly_these_fifteen_functions() -> None:
-    """15関数という総数を固定する。新しい関数が追加されたら、このテストが落ちて、
+def test_t5_the_template_has_exactly_these_sixteen_functions() -> None:
+    """16関数という総数を固定する。新しい関数が追加されたら、このテストが落ちて、
     publish_incident_envelope()を経由するかの判断(8対象への追加か、対象外か)を要求する。"""
     actual = sorted(
         name for name, r in resources().items() if r["Type"] == "AWS::Serverless::Function"
     )
     assert actual == _ALL_FUNCTIONS
-    assert len(actual) == 15
+    assert len(actual) == 16
 
 
 @pytest.mark.parametrize("name", _OTHERS)

@@ -951,6 +951,10 @@ _KNOWN_TEMPLATE_PARAMETERS: frozenset[str] = frozenset(
         "LineChannelSecretSecretArn",
         "LineCredentialRotationVersion",
         "LineUserIdSecretArn",
+        # #604 P-b4 A2: 資金入替の観測 P の Scheduler の State(既定 DISABLED。#604 …6195577714)。
+        # ENABLED は別の ChangeSet・別の承認(P の mode = config の SHADOW とは別の 2 つ目の gate)。
+        # 既定・許可値は test_infra_issue_604_rotation_observation.py が固定する
+        "RotationObservationScheduleState",
         "SecretResourcePolicyEnabled",
         "TablePrefix",
         "WatchlistReservedConcurrentExecutions",

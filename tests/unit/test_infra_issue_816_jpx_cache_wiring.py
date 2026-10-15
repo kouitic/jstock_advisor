@@ -81,6 +81,11 @@ _DECLARATION: dict[str, tuple[bool, str]] = {
     "WeeklyReviewFunction": (False, "BuySignalService も StockDisplayNameResolver も構築しない"),
     "MonthlyReviewFunction": (False, "BuySignalService も StockDisplayNameResolver も構築しない"),
     "QuarterlyReviewFunction": (False, "BuySignalService も StockDisplayNameResolver も構築しない"),
+    # #604 P-b4 A2: 資金入替の観測 P(読取専用 + AuditLog。JPX キャッシュは使わない)
+    "RotationObservationFunction": (
+        False,
+        "BuySignalService も StockDisplayNameResolver も構築しない",
+    ),
 }
 
 

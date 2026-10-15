@@ -6330,3 +6330,73 @@ TIME_BUDGET                   Lambda の残り時間が足りない・不明
 ```
 
 ・設計・実装: Issue #603(設計 rev5・rev6。設計レビュー PASS)/ #925(符号 kv1)/ #605(CLI)/ #606(接続 gate)
+
+
+## 42. 資金入替の観測 P(Issue #604 P-b4。#128 R2。2026-10-16追加)
+
+### 42.1 これは何か・出荷の状態
+
+資金入替の観測 P は、保有バッチ(営業日 08:00 JST)の完了後に、各保有が『入替元になれるか』を数え、AuditLog へ
+**日の集計を 1 件 / 日**残す Lambda である。読取専用の観測で、判定・通知・売却・購入・表示・LINE のどこにも接続しない。
+記録は件数と状態だけ(所有者・保有 ID・銘柄コード・数量・金額・Recommendation ID を持たない)。
+
+★ **出荷は『何も動かない』状態**(USER 決定 #604 …6195577714): ①Scheduler の State = `DISABLED`(Parameter
+`RotationObservationScheduleState` の既定)②mode = `OFF`(`config/rotation_observation.yaml`。引用符つきの `"OFF"`)。
+どちらも 1 つだけでは動かない(二重の gate)。有効化は 42.4。
+
+### 42.2 追加される資源と権限(template。契約テスト `test_infra_issue_604_rotation_observation.py` が完全一致で固定)
+
+```
+Function 1     RotationObservationFunction(Timeout 60 秒・メモリ 512 MB・同時実行 1・非同期の再試行 0・DLQ なし・P 固有の環境変数 0 件)
+Schedule 2     平日 JST 08:15・08:30・08:45 と 09:00(祝日は runner が何もしない)。最後の回 09:00 は BatchRuns の TTL の上限 13:00 JST の内側
+IAM Role 1     RotationObservationSchedulerRole(★ この stack で初めての明示の RoleArn ★。信頼 = scheduler.amazonaws.com だけ・権限 = P の関数 1 つへの Invoke だけ)
+               + 関数の実行 Role(SAM が生成。下の 5 つの権限だけ)
+Alarm 1        RotationObservationFunctionErrorsAlarm(Errors・Sum・900 秒・閾値 1・TreatMissingData = notBreaching・既存の通知 Topic)
+Parameter 1    RotationObservationScheduleState(既定 DISABLED・ENABLED / DISABLED だけ)
+```
+
+関数の権限(これだけ。UpdateItem・DeleteItem・BatchWriteItem・TransactWriteItems・SQS・他の Lambda の Invoke・Secrets Manager・LINE・
+他の表・ワイルドカードの Resource は付けない): BatchRuns への GetItem / Recommendations への BatchGetItem / HoldingEvaluationRecords の
+GSI(holding_id-index)だけへの Query / ★ HoldingsTableV2 の 1 表だけへの Scan(恒久。条件 = 200 件 / 3 ページ / 時間の上限・部分結果で判断しない)★ /
+AuditLog への PutItem(条件付き・先勝ち)。
+
+### 42.3 ChangeSet の想定差分(CREATE の想定。EXECUTE しない限り反映されない)
+
+```
+追加   Function 1(P)・IAM Role(P の関数の実行用 + 起動用)2・Schedule 2(★ State = DISABLED ★)・Errors Alarm 1・Parameter 1
+       ・ConfigLayer の新しい LayerVersion 1(P の mode の設定ファイルを含むため)
+変更   ★ 既存 15 関数の Modify(Layers のみ)★ = 想定内。ConfigLayer の LayerVersion の差し替えにより、全関数の Layers が変わる(15 行)
+       ★ リリース①との違い: リリース①の 15 行の Modify の理由は Code(共有 artifact の key)。本件は Layers ★(2 つの ChangeSet を並べて読むときに取り違えない)
+削除   旧い ConfigLayer の LayerVersion(RetentionPolicy が Delete のため 1 件。ChangeSet で確認)
+```
+
+★ **想定外(1 件でもあれば EXECUTE しない)**:
+・既存 Function の Layers 以外のプロパティの変更(Environment・Role・Policy・Handler・Timeout・MemorySize・Events 等)
+・Table の Delete・Replacement / Topic policy の変更 / 既存 Role・Policy の変更
+・P の Schedule が ENABLED で作られる / P 以外の Scheduler の State の変更
+・P の関数に環境変数が付く(P 固有の環境変数は 0 件)/ P の Role に上の 5 つの権限以外が付く
+
+読み方: Modify の行は 15 行出る。『Layers だけ』であることを 1 行ずつ確認する(件数 15 を突き合わせる)。Add の Function は 1 件・Schedule は 2 件で、
+どちらの State も DISABLED のこと。EXECUTE 後も Schedule は DISABLED のまま(何も起動しない)。
+CREATE と EXECUTE は別の Human Gate で、承認は exact ChangeSet ARN に対してだけ有効(各回 SHA 固定 → CREATE → 差分確認 → EXECUTE)。
+**本節は deploy の承認ではない**(deploy の実作業は `DEVELOPER_WITH_DEPLOY`。担当の確認は CLAUDE.md §4)。
+
+### 42.4 有効化(★ 別の ChangeSet・別の USER 承認。本節の A2 には含まれない ★)
+
+有効化(P-b4 の B)は、次の 2 つを**別々の Human Gate**として行う: ①mode を `"SHADOW"` にした設定を含む ChangeSet(R1 の購入側 Shadow の観測の
+邪魔をしない営業日の境界で開始)②Parameter `RotationObservationScheduleState` を `ENABLED` にする ChangeSet。どちらか片方だけでは動かない。
+有効化の前に、P の資源が DISABLED / OFF のまま存在し、既存の BUY / SELL・保有バッチ(08:00)が不変であることを本番確認する(本節の範囲外)。
+
+### 42.5 止め方・戻し方
+
+・止める: Parameter を `DISABLED` に戻す(Scheduler が起動しない)/ mode を `"OFF"` に戻して再 deploy(起動しても何もしない)
+・戻す: P の資源を削除する ChangeSet(BUY / SELL・保有のバッチ・データには影響しない。書いた記録は読まれないだけで害は無い。1 日 1 件・約 0.5〜1 KB)
+・失敗の見え方: runner が記録に失敗すると Lambda が失敗し、Errors Alarm が既存の通知 Topic へ届く。一時的な状態(保有バッチが未完了)は次の回が再評価し、
+  最後の回(09:00)でも読めなければ gap の記録が 1 件残る(観測が黙って消えない)
+
+### 42.6 この節が確認していないこと(未確認)
+
+・SAM の transform 結果(ローカルにも CI にも template の検証は無い。ScheduleV2 の `RoleArn`・`State` が受理されることは SAM の公式仕様だが、実際の受理は ChangeSet の CREATE で確認する)
+・Timeout 60 秒の妥当性(総予算 50 秒 ≦ 54 秒は契約テストで固定済み。実測は稼働後に再確認する)
+・本番の AWS 上の実際の動作・月額コスト(概算は月 1 ドル未満の桁。実測は稼働後)
+・設計・実装: Issue #604(P-b4 統合文書 …6188895158・USER 決定 …6195577714)/ #606(接続 gate の記録 = 37.5)
