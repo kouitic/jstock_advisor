@@ -585,3 +585,30 @@ def test_the_reason_vocabulary_equals_the_writer_reason_enumeration() -> None:
     from jstock_advisor.domain.signals.portfolio_allocation_types import ReasonCode
 
     assert set(REASON_FILTER_CODES) == {member.value for member in ReasonCode}
+
+
+def _writer_limits(spec: Any) -> list[int]:
+    """書込側の記録の仕様(`_RECORD_SPEC`)の中の、list / map の要素数の上限を全て集める。"""
+    limits: list[int] = []
+    if isinstance(spec, writer._List | writer._Map):
+        limits.append(spec.limit)
+        inner = spec.item if isinstance(spec, writer._List) else spec.value
+        limits.extend(_writer_limits(inner))
+    elif isinstance(spec, writer._Opt):
+        limits.extend(_writer_limits(spec.inner))
+    elif isinstance(spec, dict):
+        for value in spec.values():
+            limits.extend(_writer_limits(value))
+    return limits
+
+
+def test_the_screen_list_limit_covers_the_largest_list_the_writer_can_record() -> None:
+    """★ 不変条件 ★: 画面の上限 `_MAX_LIST` >= 画面が読む list / map の書込側の上限の最大。
+
+    画面が読むのは候補ごとの記録(`_CANDIDATE_SPEC`)と方針(`_POLICY_SPEC`)の list / map。
+    (候補の件数の上限は別の話で、画面の `_MAX_LIST` を通らない。書込側 file は変えない)
+    画面の上限のほうが小さいと、書込側が正当に記録した要素が『不明』の件数に化ける。
+    """
+    limits = [*_writer_limits(writer._CANDIDATE_SPEC), *_writer_limits(writer._POLICY_SPEC)]
+    assert limits and max(limits) == 64  # 走査が空振りでない(理由コード等の上限 64 を含む)
+    assert max(limits) <= view._MAX_LIST

@@ -247,6 +247,30 @@ _SHADOW_FRAME_EXEMPT: Final = {
 }
 
 
+#: ★ #877 PR-2b-ii の『限定した Shadow 接続』の局所許可(別表)★。
+#: 完全一致 7 件 = 受け手が推移的に到達する exit_architecture の module(package の __init__・
+#: determination・evidence・price_facts・price_regime・verdicts・vocabulary)。
+#: 根拠 = USER 決定 #122 …6182420023 の 1(PR-2b に限定した Shadow 接続の承認)・
+#: サブちゃんの設計レビュー PASS(#877 …6182584823)。
+#: ★ `_SHADOW_FRAME_EXEMPT`(免除 10 件)には足していない ★。handler の根にだけ適用し、CLI の根には
+#: 適用しない(CLI は到達しない: `ProfitTakingService` の import の閉包に exit_architecture が無い)。
+#: ★ 受け手の経由でしか到達できないこと・各行が必要なこと(1 件外すと offender)・受け手を import する
+#: src の完全一致を、下のテストが固定する ★
+_PRICE_REGIME_SHADOW_REASON: Final = "#877 PR-2b・#122 …6182420023 の 1"
+_PRICE_REGIME_SHADOW_CONNECTION: Final = {
+    "jstock_advisor.domain.exit_architecture": _PRICE_REGIME_SHADOW_REASON,
+    "jstock_advisor.domain.exit_architecture.determination": _PRICE_REGIME_SHADOW_REASON,
+    "jstock_advisor.domain.exit_architecture.evidence": _PRICE_REGIME_SHADOW_REASON,
+    "jstock_advisor.domain.exit_architecture.price_facts": _PRICE_REGIME_SHADOW_REASON,
+    "jstock_advisor.domain.exit_architecture.price_regime": _PRICE_REGIME_SHADOW_REASON,
+    "jstock_advisor.domain.exit_architecture.verdicts": _PRICE_REGIME_SHADOW_REASON,
+    "jstock_advisor.domain.exit_architecture.vocabulary": _PRICE_REGIME_SHADOW_REASON,
+}
+#: 受け手(別表の module へ到達する唯一の経路)と、それを import してよい module(完全一致)
+_PRICE_REGIME_SHADOW_CONNECTOR: Final = "jstock_advisor.services.price_regime_shadow_service"
+_PRICE_REGIME_SHADOW_IMPORTERS: Final = ["lambda_handlers/holdings_watchlist_handler.py"]
+
+
 def _is_unconnected_name(module: str) -> bool:
     return any(module == p or module.startswith(p + ".") for p in _UNCONNECTED_PREFIXES) or any(
         token in module for token in _UNCONNECTED_NAME_TOKENS
@@ -262,8 +286,10 @@ def test_no_handler_or_cli_reaches_an_unconnected_module() -> None:
     assert "jstock_advisor.domain.entities.enums" in reached  # 推移閉包が実際に深く辿れている
     handler = _reachable_from_root(_HANDLER_ROOT_PREFIX)
     cli = _reachable_from_root(_CLI_ROOT_PREFIX)
-    # handler の根: Shadow の枠(完全一致の免除)だけが到達してよい。免除に無い名前は 1 つも許さない
-    assert [m for m in _unconnected(handler) if m not in _SHADOW_FRAME_EXEMPT] == []
+    # handler の根: Shadow の枠(完全一致の免除)と、#877 PR-2b の局所許可(別表)だけが到達してよい。
+    # どちらにも無い名前は 1 つも許さない
+    allowed = set(_SHADOW_FRAME_EXEMPT) | set(_PRICE_REGIME_SHADOW_CONNECTION)
+    assert [m for m in _unconnected(handler) if m not in allowed] == []
     # CLI の根: 免除を適用しない(CLI は記録を辞書として読むだけで、重い module へ到達しない)
     assert _unconnected(cli) == []
 
@@ -279,11 +305,97 @@ def test_the_exemption_is_exactly_the_unconnected_modules_the_shadow_frame_reach
     reached_unconnected = _unconnected(handler)
 
     assert len(_SHADOW_FRAME_EXEMPT) == 10
-    assert reached_unconnected == sorted(_SHADOW_FRAME_EXEMPT)
+    # handler の根が到達する未接続の module = 免除 10 件 ∪ 別表 7 件(#877 PR-2b の局所許可)
+    allowed = set(_SHADOW_FRAME_EXEMPT) | set(_PRICE_REGIME_SHADOW_CONNECTION)
+    assert reached_unconnected == sorted(allowed)
     for module in _SHADOW_FRAME_EXEMPT:  # 免除を外せば、全件が offender に挙がる
-        remaining = {m: why for m, why in _SHADOW_FRAME_EXEMPT.items() if m != module}
+        remaining = allowed - {module}
         assert [m for m in reached_unconnected if m not in remaining] == [module]
     assert all(why.startswith("#122 …6138622792【1】") for why in _SHADOW_FRAME_EXEMPT.values())
+
+
+def test_the_price_regime_connection_table_is_minimal_and_exact() -> None:
+    """★ 別表(局所許可)の最小性 ★: 1 件外すと offender に挙がる(死んだ行を溜めない)。件数 7。"""
+    handler = _reachable_from_root(_HANDLER_ROOT_PREFIX)
+    reached_unconnected = _unconnected(handler)
+    allowed = set(_SHADOW_FRAME_EXEMPT) | set(_PRICE_REGIME_SHADOW_CONNECTION)
+
+    assert len(_PRICE_REGIME_SHADOW_CONNECTION) == 7
+    assert set(_PRICE_REGIME_SHADOW_CONNECTION) <= set(reached_unconnected)  # 全行が実際に到達する
+    assert not set(_PRICE_REGIME_SHADOW_CONNECTION) & set(_SHADOW_FRAME_EXEMPT)  # 免除表とは別
+    for module in _PRICE_REGIME_SHADOW_CONNECTION:  # 1 件外せば、その module が offender に挙がる
+        remaining = allowed - {module}
+        assert [m for m in reached_unconnected if m not in remaining] == [module]
+    assert all(
+        why == _PRICE_REGIME_SHADOW_REASON for why in _PRICE_REGIME_SHADOW_CONNECTION.values()
+    )
+    assert all("exit_architecture" in m for m in _PRICE_REGIME_SHADOW_CONNECTION)
+
+
+def _reachable_without_expanding(roots: set[str], known: dict[str, Path], cut: str) -> set[str]:
+    """`cut` の module へは到達するが、その module の import(辺)は辿らない。"""
+    seen: set[str] = set()
+    stack = list(roots)
+    while stack:
+        module = stack.pop()
+        if module in seen:
+            continue
+        seen.add(module)
+        if module == cut:
+            continue
+        stack.extend(_direct_imports(module, known[module], known) - seen)
+    return seen
+
+
+def test_the_price_regime_modules_are_reachable_only_through_the_connector() -> None:
+    """★ 経由の固定(局所許可の本体)★: 受け手の辺を除いた import グラフでは、handler の根から
+    別表の 7 件のどれにも到達しない = 『受け手を通る道しか無い』。"""
+    known = _module_files()
+    roots = _roots_of(known, _HANDLER_ROOT_PREFIX)
+    assert _PRICE_REGIME_SHADOW_CONNECTOR in known
+    with_connector = _reachable(roots, known)
+    assert _PRICE_REGIME_SHADOW_CONNECTOR in with_connector  # 受け手へは到達する(空振りでない)
+    assert set(_PRICE_REGIME_SHADOW_CONNECTION) <= with_connector
+
+    cut = _reachable_without_expanding(roots, known, _PRICE_REGIME_SHADOW_CONNECTOR)
+    assert not set(_PRICE_REGIME_SHADOW_CONNECTION) & cut
+    assert not [m for m in cut if "exit_architecture" in m]
+
+
+def test_only_the_approved_module_imports_the_connector() -> None:
+    known = _module_files()
+    importers = sorted(
+        path.relative_to(_PACKAGE).as_posix()
+        for module, path in known.items()
+        if module != _PRICE_REGIME_SHADOW_CONNECTOR
+        and _PRICE_REGIME_SHADOW_CONNECTOR in _direct_imports(module, path, known)
+    )
+    assert importers == _PRICE_REGIME_SHADOW_IMPORTERS
+
+
+def test_neither_the_cli_root_nor_the_profit_taking_service_reaches_the_price_regime() -> None:
+    """★ CLI の根・利確判定サービスの閉包は、別表にも受け手にも到達しない ★(CLI に免除は無い)。"""
+    cli = _reachable_from_root(_CLI_ROOT_PREFIX)
+    assert not cli & set(_PRICE_REGIME_SHADOW_CONNECTION)
+    assert _PRICE_REGIME_SHADOW_CONNECTOR not in cli
+    service = "jstock_advisor.services.profit_taking_service"
+    closure = _reachable({service}, _module_files())
+    assert service in closure
+    assert not closure & set(_PRICE_REGIME_SHADOW_CONNECTION)
+    assert _PRICE_REGIME_SHADOW_CONNECTOR not in closure
+
+
+def test_the_connector_is_outside_the_name_net_and_is_not_exempt() -> None:
+    """受け手の名前は #606 の token・prefix に当たらない(別表と経由の固定で守る)。免除に無い。"""
+    assert not _is_unconnected_name(_PRICE_REGIME_SHADOW_CONNECTOR)
+    assert _PRICE_REGIME_SHADOW_CONNECTOR not in _SHADOW_FRAME_EXEMPT
+
+
+def test_an_exit_architecture_module_outside_the_table_is_still_caught() -> None:
+    module = "jstock_advisor.domain.exit_architecture.arbiter"  # 実在するが別表に無い
+    allowed = set(_SHADOW_FRAME_EXEMPT) | set(_PRICE_REGIME_SHADOW_CONNECTION)
+    assert module in _module_files()
+    assert [m for m in _unconnected({module}) if m not in allowed] == [module]
 
 
 def test_the_cli_root_reaches_none_of_the_exempt_modules() -> None:

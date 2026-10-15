@@ -231,7 +231,7 @@ def test_it_has_no_numeric_literal_no_clock_and_no_io() -> None:
     assert not called & {"open", "print", "input", "now", "today", "random", "getenv"}
 
 
-def test_only_the_profit_taking_service_imports_it_among_src_modules() -> None:
+def test_only_the_service_and_the_shadow_receiver_import_it_among_src_modules() -> None:
     """判定側(利確・売却・購入の判定)は暫定写像を import しない。全 src を走査(列挙しない)。"""
     importers: list[str] = []
     scanned = 0
@@ -250,7 +250,11 @@ def test_only_the_profit_taking_service_imports_it_among_src_modules() -> None:
             elif isinstance(node, ast.Import) and any(a.name == _MODULE_NAME for a in node.names):
                 importers.append(path.relative_to(_SRC).as_posix())
     assert scanned > 100
-    assert importers == ["services/profit_taking_service.py"]
+    # 値を詰めるサービスと、値を受け取る Shadow の受け手(#877 PR-2b-ii)だけ。判定側は import しない
+    assert importers == [
+        "services/price_regime_shadow_service.py",
+        "services/profit_taking_service.py",
+    ]
 
 
 # --- S-3 サービスの閉包に exit_architecture が無い ---------------------------------------------

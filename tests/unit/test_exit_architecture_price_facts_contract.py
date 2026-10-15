@@ -350,8 +350,8 @@ def test_the_import_scanner_detects_every_import_form() -> None:
     assert not _imports_the_module("from jstock_advisor.domain.exit_architecture import decision")
 
 
-def test_nothing_in_src_imports_it_yet_dormant() -> None:
-    """どこからも import されない(PR-2b で配線するまで dormant)。全 src を走査する(列挙しない)。"""
+def test_only_the_approved_shadow_receiver_imports_it() -> None:
+    """import するのは #877 PR-2b-ii の受け手だけ(承認済みの限定接続)。全 src を走査する。"""
     scanned = 0
     importers: list[str] = []
     for path in sorted(_SRC.rglob("*.py")):
@@ -361,7 +361,7 @@ def test_nothing_in_src_imports_it_yet_dormant() -> None:
         if _imports_the_module(path.read_text(encoding="utf-8")):
             importers.append(path.relative_to(_SRC).as_posix())
     assert scanned > 100, "走査が空振りしていないこと"
-    assert importers == []
+    assert importers == ["services/price_regime_shadow_service.py"]
 
 
 # --- C-5 実際の指標との同値 ----------------------------------------------------------------------
