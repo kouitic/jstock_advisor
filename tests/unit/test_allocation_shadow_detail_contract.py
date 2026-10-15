@@ -29,7 +29,11 @@ import pytest
 
 from jstock_advisor.domain.notification import allocation_shadow_detail_renderer as renderer
 from jstock_advisor.domain.notification import allocation_shadow_detail_view as view
-from jstock_advisor.domain.notification.allocation_shadow_cli_view import UNKNOWN_TEXT, DayInput
+from jstock_advisor.domain.notification.allocation_shadow_cli_view import (
+    DECISIONS,
+    UNKNOWN_TEXT,
+    DayInput,
+)
 from jstock_advisor.domain.notification.allocation_shadow_detail_renderer import (
     OPTIONAL_KEYS,
     detail_to_dict,
@@ -256,6 +260,51 @@ def test_the_row_is_the_today_row_without_the_two_derived_values() -> None:
                 assert getattr(shown, field) == getattr(row, field), field
     assert saw_allocated and saw_not_allocated  # 両方の経路を通っている(空振りでない)
     assert detail.unparsed == 0
+
+
+def test_the_allocated_decision_code_is_the_writers_closed_vocabulary() -> None:
+    """『配分したか』の判定が見る語(ALLOCATED)は、書込側の記録の閉じた語彙と一致する。
+
+    語彙がずれると、配分した候補の必要資金(記録の金額)が静かに出なくなる / 別の語でも出てしまう。
+    """
+    recorded = writer._ALLOCATION_SPEC["decision"].values  # noqa: SLF001 - 閉じた語彙の正本
+    assert recorded == {"ALLOCATED", "NOT_ALLOCATED"}
+    assert set(DECISIONS) == recorded  # today / detail が解釈する語 = 記録の語
+    assert "ALLOCATED" in recorded
+
+
+@pytest.mark.parametrize("decision", ["UNKNOWN_DECISION", "allocated", "", None, 7])
+def test_an_unknown_decision_code_never_shows_the_required_funds(decision: Any) -> None:
+    """判断コードが閉じた語彙に無いとき、必要資金は出さない(出さない側に倒れる)。
+
+    記録の金額(amount)が入っていても、『配分した』と確認できない候補では出さない。
+    """
+    record = _rich_record()
+    candidate = record["candidates"][0]
+    assert candidate["allocation"]["amount"] not in (None, "0")  # 金額は記録にある(空振りでない)
+    candidate["allocation"]["decision"] = decision
+    detail = build_detail_screen(_day(record))
+    shown = _first(detail)
+    assert shown.row.required_funds is None
+    assert shown.row.remaining_cash is None
+    table = render_detail_table(detail)
+    assert str(candidate["allocation"]["amount"]) not in table.replace(",", "")
+    payload = json.loads(render_detail_json(detail))
+    assert payload["owners"][0]["candidates"][0]["required_funds"] is None
+
+
+def test_the_owner_heading_has_no_expected_remaining_cash() -> None:
+    """所有者の『見込み残高(目安)』は引き算の導出値。detail では出さない。"""
+    detail = build_detail_screen(_day())
+    assert any(
+        o.expected_remaining_cash is not None for o in detail.screen.owners
+    )  # 今日の画面は持つ
+    table = render_detail_table(detail, include_optional=True)
+    assert "見込み残高" not in table and "残余" not in table
+    text = render_detail_json(detail, with_labels=True, include_optional=True)
+    assert "expected_remaining_cash" not in text
+    for owner in json.loads(text)["owners"]:
+        assert "expected_remaining_cash" not in owner
 
 
 def test_derived_values_never_appear_in_the_table_or_the_json() -> None:
