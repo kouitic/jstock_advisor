@@ -189,6 +189,10 @@ def _owner_lines(
     lines = [f"■ 所有者: {title}"]
     if status is not None and status is not OwnerStatus.OK:
         return [*lines, f"  ★ 詳細を表示できません(状態: {status.value})"]
+    lines.append(
+        f"  買付余力: {_opt(owner.available_cash)} / 基準日時: {_opt(owner.last_reconciled_at)}"
+        f" / ポートフォリオ評価額: {_opt(owner.portfolio_value)}"
+    )
     if include_optional and owner.policy is not None:
         lines.append("  方針: " + _pairs_line(owner.policy.values, include_optional=True))
     if include_optional and owner.run:
@@ -298,6 +302,9 @@ def detail_to_dict(
             "display_ref": owner.display_ref,
             "status": (statuses[owner.ref].value if owner.ref in statuses else None),
             "unparsed": owner.unparsed,
+            "available_cash": owner.available_cash,
+            "last_reconciled_at": owner.last_reconciled_at,
+            "portfolio_value": owner.portfolio_value,
             "candidates": [
                 _candidate_json(c, include_optional=include_optional) for c in owner.candidates
             ],

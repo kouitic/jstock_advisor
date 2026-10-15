@@ -88,6 +88,13 @@ _MAX_LIST: Final = 64  # 画面に出す要素の上限(超えた分は件数だ
 _SHOWN_NUMBER: Final = re.compile(r"^-?[0-9]{1,3}(,[0-9]{3})*(\.[0-9]+)?$|^-?[0-9]+(\.[0-9]+)?$")
 _SHOWN_YEN: Final = re.compile(r"^-?[0-9]{1,3}(,[0-9]{3})*(\.[0-9]+)?円$|^-?[0-9]+(\.[0-9]+)?円$")
 _SHOWN_INT: Final = re.compile(r"^[0-9]{1,18}$")
+_SHOWN_AT: Final = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}(:[0-9]{2}(\.[0-9]{1,6})?)?"
+    r"(Z|[+-][0-9]{2}:[0-9]{2})?)?$"
+)
+
+#: 『配分した』を表す記録の判断コード(書込側の閉じた語彙。契約テストが CandidateDecision と結ぶ)
+_ALLOCATED: Final = "ALLOCATED"
 
 YES_TEXT: Final = "はい"
 NO_TEXT: Final = "いいえ"
@@ -163,6 +170,11 @@ class OwnerDetail:
     policy: PolicyDetail | None = None
     run: tuple[DetailValue | DetailMap, ...] = ()  # 経過時間・読取の状態
     unparsed: int = 0
+    # 所有者の見出し: 記録された値だけ(買付余力・基準日時・ポートフォリオ評価額)。
+    # 『見込み残高(目安)』『配分 / 見送りの件数』は導出(引き算・行から数えた値)なので出さない
+    available_cash: str | None = None
+    last_reconciled_at: str | None = None
+    portfolio_value: str | None = None
 
 
 @dataclass(frozen=True)
@@ -330,7 +342,7 @@ def _clean_row(row: CandidateRow) -> tuple[CandidateRow, int]:
     )
     seq, bad_seq = _shown(_SHOWN_INT, row.seq if row.seq != "-" else None)
     raer, bad_raer = _shown(_SHOWN_NUMBER, row.raer_value)
-    allocated = row.decision is not None and row.decision.code == "ALLOCATED"
+    allocated = row.decision is not None and row.decision.code == _ALLOCATED
     rank, bad_rank = _shown(_SHOWN_INT, row.rank)
     shares, bad_shares = _shown(_SHOWN_INT, row.shares)
     # 必要資金は『配分した候補の記録の金額』だけ(配分しなかった候補の値は today が計算した導出値)
@@ -498,23 +510,38 @@ def _owner_detail(section: OwnerSection, items: Any) -> OwnerDetail:
     base = OwnerDetail(ref=section.ref, display_ref=section.display_ref, label=section.label)
     if section.status is not OwnerStatus.OK:
         return base
+    # 買付余力・評価額の『読めない値』は画面モデル側(screen.unparsed)が数え済み = 二重に数えない
+    cash, _ = _shown(_SHOWN_YEN, section.available_cash)
+    reconciled, bad_at = _shown(_SHOWN_AT, section.last_reconciled_at)
+    portfolio, _ = _shown(_SHOWN_YEN, section.portfolio_value)
+    base = replace(
+        base,
+        available_cash=cash,
+        last_reconciled_at=reconciled,
+        portfolio_value=portfolio,
+        unparsed=bad_at,
+    )
     record = items.record if items is not None and items.state is RecordState.FOUND else None
     if not isinstance(record, dict) or record.get("record_kind") != ITEMS_KIND:
-        return replace(base, unparsed=1)
+        return replace(base, unparsed=base.unparsed + 1)
     try:
         raws = _list(record.get("candidates"))
         if len(raws) != len(section.rows):
-            return replace(base, unparsed=1)
+            return replace(base, unparsed=base.unparsed + 1)
         candidates = tuple(
             _candidate_detail(row, raw) for row, raw in zip(section.rows, raws, strict=True)
         )
         policy = _policy(record)
         run, bad_run = _run(record)
         return replace(
-            base, candidates=candidates, policy=policy, run=run, unparsed=policy.unparsed + bad_run
+            base,
+            candidates=candidates,
+            policy=policy,
+            run=run,
+            unparsed=base.unparsed + policy.unparsed + bad_run,
         )
     except Exception:  # noqa: BLE001 - どんな辞書でも例外を出さない(読めなければ『不明』)
-        return replace(base, unparsed=1)
+        return replace(base, unparsed=base.unparsed + 1)
 
 
 def build_detail_screen(day: DayInput, labels: Mapping[str, str] | None = None) -> DetailScreen:

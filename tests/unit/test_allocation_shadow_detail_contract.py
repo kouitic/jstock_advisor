@@ -50,6 +50,7 @@ from jstock_advisor.domain.notification.allocation_shadow_detail_view import (
     build_detail_screen,
 )
 from jstock_advisor.domain.signals import allocation_shadow_record as writer
+from jstock_advisor.domain.signals.portfolio_allocation_types import CandidateDecision
 from tests.unit import test_allocation_shadow_cli_view_contract as view_tests
 from tests.unit.test_issue_606_production_connection_gate import (
     _ALLOCATION_MODULES_REACHABLE_FROM_CLI,
@@ -271,6 +272,9 @@ def test_the_allocated_decision_code_is_the_writers_closed_vocabulary() -> None:
     assert recorded == {"ALLOCATED", "NOT_ALLOCATED"}
     assert set(DECISIONS) == recorded  # today / detail が解釈する語 = 記録の語
     assert "ALLOCATED" in recorded
+    # detail の判定の語は、判断の enum と結ばれている(literal の取り違えを防ぐ)
+    assert CandidateDecision.ALLOCATED.value == view._ALLOCATED  # noqa: SLF001
+    assert {d.value for d in CandidateDecision} == recorded
 
 
 @pytest.mark.parametrize("decision", ["UNKNOWN_DECISION", "allocated", "", None, 7])
@@ -288,9 +292,54 @@ def test_an_unknown_decision_code_never_shows_the_required_funds(decision: Any) 
     assert shown.row.required_funds is None
     assert shown.row.remaining_cash is None
     table = render_detail_table(detail)
-    assert str(candidate["allocation"]["amount"]) not in table.replace(",", "")
+    first_block = table.split("[候補 #1]")[1].split("[候補 #2]")[
+        0
+    ]  # 所有者の評価額などと混ざらない
+    assert str(candidate["allocation"]["amount"]) not in first_block.replace(",", "")
     payload = json.loads(render_detail_json(detail))
     assert payload["owners"][0]["candidates"][0]["required_funds"] is None
+
+
+def test_the_owner_heading_shows_the_three_recorded_values() -> None:
+    """所有者の見出し(USER が ○ で承認した記録値): 買付余力・基準日時・ポートフォリオ評価額。"""
+    detail = build_detail_screen(_day())
+    owner = detail.owners[0]
+    assert owner.available_cash == "10,000,000円"
+    assert owner.last_reconciled_at == "2026-10-11T09:05:00+09:00"
+    assert owner.portfolio_value == "50,000,000円"
+    table = render_detail_table(detail)
+    assert "買付余力: 10,000,000円" in table
+    assert "基準日時: 2026-10-11T09:05:00+09:00" in table
+    assert "ポートフォリオ評価額: 50,000,000円" in table
+    payload = json.loads(render_detail_json(detail))["owners"][0]
+    assert payload["available_cash"] == "10,000,000円"
+    assert payload["last_reconciled_at"] == "2026-10-11T09:05:00+09:00"
+    assert payload["portfolio_value"] == "50,000,000円"
+
+
+def test_the_owner_heading_does_not_show_the_allocated_and_not_allocated_counts() -> None:
+    """配分 / 見送りの件数は記録に無く、行から数えた値(導出)なので出さない。"""
+    detail = build_detail_screen(_day())
+    assert detail.screen.owners[0].allocated_count is not None  # today の画面モデルは数える
+    table = render_detail_table(detail, include_optional=True)
+    assert "購入 " not in table.split("[候補")[0] and "購入しない候補" not in table
+    text = render_detail_json(detail, with_labels=True, include_optional=True)
+    assert "allocated_count" not in text
+
+
+def test_an_unreadable_owner_value_is_never_echoed() -> None:
+    record = _rich_record()
+    record["cash"]["last_reconciled_at"] = _SENTINEL
+    record["cash"]["available_cash"] = _SENTINEL
+    record["portfolio"]["portfolio_value"] = _SENTINEL
+    detail = build_detail_screen(_day(record))
+    owner = detail.owners[0]
+    assert owner.available_cash in (None, UNKNOWN_TEXT)
+    assert owner.last_reconciled_at == UNKNOWN_TEXT
+    assert owner.portfolio_value in (None, UNKNOWN_TEXT)
+    assert _SENTINEL not in render_detail_table(detail)
+    assert _SENTINEL not in render_detail_json(detail, with_labels=True, include_optional=True)
+    assert detail.unparsed >= 1
 
 
 def test_the_owner_heading_has_no_expected_remaining_cash() -> None:
