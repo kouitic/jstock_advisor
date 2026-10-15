@@ -6365,19 +6365,24 @@ AuditLog への PutItem(条件付き・先勝ち)。
 ```
 追加   Function 1(P)・IAM Role(P の関数の実行用 + 起動用)2・Schedule 2(★ State = DISABLED ★)・Errors Alarm 1・Parameter 1
        ・ConfigLayer の新しい LayerVersion 1(P の mode の設定ファイルを含むため)
-変更   ★ 既存 15 関数の Modify(Layers のみ)★ = 想定内。ConfigLayer の LayerVersion の差し替えにより、全関数の Layers が変わる(15 行)
-       ★ リリース①との違い: リリース①の 15 行の Modify の理由は Code(共有 artifact の key)。本件は Layers ★(2 つの ChangeSet を並べて読むときに取り違えない)
+変更   ★ 既存 15 関数の Modify = 想定内。理由は Layers(ConfigLayer の LayerVersion の差し替え)。src の変更を含むリリースでは Code(共有 artifact の key)も ★(15 行)
+       ★ リリース①との違い: リリース①の 15 行の Modify の理由は Code だけ。本件は Layers(+ src の変更があれば Code)★(2 つの ChangeSet を並べて読むときに取り違えない)
+       間接の Modify(GetAtt の再評価。リリース①と同形): Scheduler の Role 11・Schedule 11・SNS Subscription 1・API Gateway 1
+IAM    Role 26 → 28(増分は P の Role だけ)。HoldingsTableV2 の 1 表に限定した Scan(P の Role のみ)。既存の BUY / SELL の Role への権限の追加 = 0・他の表への Scan = 0
 削除   旧い ConfigLayer の LayerVersion(RetentionPolicy が Delete のため 1 件。ChangeSet で確認)
 ```
 
 ★ **想定外(1 件でもあれば EXECUTE しない)**:
-・既存 Function の Layers 以外のプロパティの変更(Environment・Role・Policy・Handler・Timeout・MemorySize・Events 等)
+・既存 Function の Layers・Code 以外のプロパティの変更(Environment・Role・Policy・Handler・Timeout・MemorySize・Events 等)
 ・Table の Delete・Replacement / Topic policy の変更 / 既存 Role・Policy の変更
 ・P の Schedule が ENABLED で作られる / P 以外の Scheduler の State の変更
 ・P の関数に環境変数が付く(P 固有の環境変数は 0 件)/ P の Role に上の 5 つの権限以外が付く
 
-読み方: Modify の行は 15 行出る。『Layers だけ』であることを 1 行ずつ確認する(件数 15 を突き合わせる)。Add の Function は 1 件・Schedule は 2 件で、
+読み方: 既存関数の Modify の行は 15 行出る。変更の理由が Layers(と、src を含むリリースでは Code)だけであることを 1 行ずつ確認する(件数 15 を突き合わせる)。Add の Function は 1 件・Schedule は 2 件で、
 どちらの State も DISABLED のこと。EXECUTE 後も Schedule は DISABLED のまま(何も起動しない)。
+★ ChangeSet の CREATE 後・EXECUTE 前に、予約同時実行の合計を確認する ★: P は ReservedConcurrentExecutions = 1 を持つ。既存の関数の予約値(Parameter の
+`*ReservedConcurrentExecutions`・既存の固定値)の合計 + 1 が、アカウントの『予約に使えない最小値(未予約の下限)』を割らないこと。割ると CREATE / EXECUTE が失敗しうる
+(失敗しても CloudFormation が自動 rollback するが、事前に気づく)。確認は AWS 読取を伴うため、実行は `DEVELOPER_WITH_DEPLOY` の手順の中で行う(#188 の手順外の AWS 読取はしない)。
 CREATE と EXECUTE は別の Human Gate で、承認は exact ChangeSet ARN に対してだけ有効(各回 SHA 固定 → CREATE → 差分確認 → EXECUTE)。
 **本節は deploy の承認ではない**(deploy の実作業は `DEVELOPER_WITH_DEPLOY`。担当の確認は CLAUDE.md §4)。
 

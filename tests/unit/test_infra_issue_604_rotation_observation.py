@@ -377,7 +377,10 @@ def test_the_expected_diff_is_written_in_the_runbook() -> None:
     section = text[text.index("## 42. ") :]  # 42 節の全体(42.2 に資源の一覧・42.3 に想定差分)
 
     for needle in (
-        "Layers のみ",  # 既存 15 関数の Modify
+        "Layers",  # 既存 15 関数の Modify の理由(src を含むリリースでは Code も)
+        "Code",
+        "26 → 28",  # Role の増分は P の Role だけ
+        "予約同時実行の合計",  # CREATE 後・EXECUTE 前の確認
         "15",
         "DISABLED",
         "想定外",
