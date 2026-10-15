@@ -284,6 +284,26 @@ def test_the_table_ends_with_both_notices() -> None:
     assert any("実際の投資判断ではありません" in line for line in tail)
 
 
+def test_the_json_carries_both_notices_in_every_option_combination() -> None:
+    """表だけでなく JSON(共有に使われる出力)にも 2 つの注意書きを入れる(USER の確定 #122)。"""
+    detail = build_detail_screen(_day())
+    for with_labels in (False, True):
+        for include_optional in (False, True):
+            payload = json.loads(
+                render_detail_json(
+                    detail, with_labels=with_labels, include_optional=include_optional
+                )
+            )
+            joined = "\n".join(payload["notices"])
+            assert "公開面へ貼らない" in joined
+            assert "Shadow の試験結果であり、実際の投資判断ではありません" in joined
+    # 表と JSON が同じ文言(1 か所で定義)
+    assert list(renderer.NOTICES) == payload["notices"]
+    assert len(renderer.NOTICES) == 2
+    text = render_detail_table(detail)
+    assert all(f"※ {notice}" in text for notice in renderer.NOTICES)
+
+
 def test_a_record_built_by_the_real_assembly_has_no_unparsed_items(tmp_path: Path) -> None:
     day, _ = view_tests._real(tmp_path)
     detail = build_detail_screen(day)

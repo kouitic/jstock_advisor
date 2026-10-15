@@ -206,6 +206,14 @@ def _owner_title_of(owner: OwnerDetail, *, show_labels: bool) -> str:
     return owner.display_ref
 
 
+NOTICE_NO_PUBLIC_SURFACE: Final = (
+    "この出力は利用者の端末だけで確認してください(Issue・PR などの公開面へ貼らない)"
+)
+NOTICE_NOT_INVESTMENT_ADVICE: Final = "これは Shadow の試験結果であり、実際の投資判断ではありません"
+# 表の末尾・JSON の `notices` の両方が使う(USER の確定 #122: 出力方法によらず 2 つとも明記する)
+NOTICES: Final = (NOTICE_NO_PUBLIC_SURFACE, NOTICE_NOT_INVESTMENT_ADVICE)
+
+
 def render_detail_table(
     detail: DetailScreen, *, show_labels: bool = True, include_optional: bool = False
 ) -> str:
@@ -241,8 +249,7 @@ def render_detail_table(
         lines.append("")
         lines.append(f"★ 解釈できなかった項目: 合計 {detail.unparsed} 件({UNKNOWN_TEXT})")
     lines.append("")
-    lines.append("※ この出力は利用者の端末だけで確認してください(Issue・PR などの公開面へ貼らない)")
-    lines.append("※ これは Shadow の試験結果であり、実際の投資判断ではありません")
+    lines.extend(f"※ {notice}" for notice in NOTICES)
     if show_labels and any(owner.label for owner in detail.owners):
         lines.append(LABEL_NOTICE)
     return "\n".join(lines) + "\n"
@@ -308,6 +315,7 @@ def detail_to_dict(
     return {
         "schema_version": OUTPUT_SCHEMA_VERSION,
         "disclaimer": DISCLAIMER,
+        "notices": list(NOTICES),
         "business_date": screen.business_date,
         "state": screen.state.value,
         "state_text": DAY_STATE_TEXT[screen.state],
