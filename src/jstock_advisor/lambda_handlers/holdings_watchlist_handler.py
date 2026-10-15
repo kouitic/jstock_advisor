@@ -73,6 +73,10 @@ from jstock_advisor.domain.entities.holding_evaluation_record import (
 from jstock_advisor.domain.entities.owner import log_ref
 from jstock_advisor.domain.entities.recommendation import Recommendation
 from jstock_advisor.domain.jst import evaluation_date_jst
+from jstock_advisor.domain.notification.notification_category import (
+    resolve_attention_origin_for_recommendation,
+    resolve_notification_category,
+)
 from jstock_advisor.domain.price_freshness import (
     PriceFreshnessVerdict,
     evaluate_holdings_price_freshness,
@@ -149,8 +153,6 @@ from jstock_advisor.services.judgment_safety_shadow_service import (
 from jstock_advisor.services.line_notification_service import (
     LineNotificationService,
     NotificationOutcome,
-    resolve_attention_origin_for_recommendation,
-    resolve_notification_category,
     resolve_notification_intent_for_recommendation,
 )
 from jstock_advisor.services.portfolio_service import PortfolioService
