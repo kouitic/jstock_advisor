@@ -407,3 +407,49 @@ def test_a_failing_receiver_never_changes_the_handler_result(
 
     monkeypatch.setattr(handler_module, "observe_price_regime_shadow", _boom)
     assert scenario(monkeypatch) == baseline
+
+
+# --- Lambda artifact への同梱(handler の起動失敗を防ぐ)--------------------------------------------
+
+
+def test_the_handler_module_imports_and_the_receiver_modules_ship_with_the_existing_artifact() -> (
+    None
+):
+    """handler は受け手(exit_architecture の 7 module)を top-level で import する。
+
+    import が失敗すると保有バッチの handler 全体が起動に失敗する。ここで (a) handler の import が
+    成立すること (b) 受け手と exit_architecture の module が、既存の Lambda の artifact
+    (`CodeUri: ../src/` の全関数共通)に含まれ、template の変更が要らないことを固定する。
+    """
+    import importlib
+
+    from tests.unit.test_issue_606_production_connection_gate import _template_document
+
+    assert importlib.import_module(handler_module.__name__) is handler_module
+    assert callable(handler_module.handler)
+
+    resources = _template_document()["Resources"]
+    function = next(
+        resource
+        for resource in resources.values()
+        if resource.get("Type") == "AWS::Serverless::Function"
+        and resource["Properties"].get("Handler")
+        == "jstock_advisor.lambda_handlers.holdings_watchlist_handler.handler"
+    )
+    code_uri = function["Properties"].get("CodeUri") or "../src/"  # Globals 由来なら既定
+    assert code_uri == "../src/"
+    artifact_root = _HANDLER_PATH.parents[2].resolve()  # src/
+    template_root = (Path(__file__).resolve().parents[2] / "infra" / code_uri).resolve()
+    assert artifact_root == template_root  # artifact の根 = src/
+    for module in (
+        "services/price_regime_shadow_service.py",
+        "domain/signals/price_path_facts.py",
+        "domain/exit_architecture/price_facts.py",
+        "domain/exit_architecture/price_regime.py",
+        "domain/exit_architecture/determination.py",
+        "domain/exit_architecture/evidence.py",
+        "domain/exit_architecture/verdicts.py",
+        "domain/exit_architecture/vocabulary.py",
+        "domain/exit_architecture/__init__.py",
+    ):
+        assert (artifact_root / "jstock_advisor" / module).is_file(), module
