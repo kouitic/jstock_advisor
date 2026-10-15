@@ -10,8 +10,10 @@
 
 * ★ 記録に無い値を作らない・補完しない・丸めない・計算し直さない ★: 寄与度・土台・配分の金額は
   記録の 10 進数の文字列をそのまま(桁区切りだけ)整形する。寄与の合計・順位・残余を再計算しない。
-  例外は `today` と同じ 2 つ(『残余資金』の目安・配分しなかった候補の『必要資金』)で、これらは
-  `allocation_shadow_cli_view` の行をそのまま使う
+  ★ `today` の行が持つ 2 つの導出値(『残余資金』の目安 = 記録の金額の引き算・配分しなかった候補の
+  『必要資金』 = 株数 × 現在価格の掛け算)は、詳細では出さない ★(USER の指示 #122 …6195577047:
+  記録されている値を表示するだけで、CLI 側の再計算・推定・補完は禁止)。必要資金は配分した候補の
+  記録の金額だけ
 * ★ LENIENT かつ『生の値が画面へ出ない』★: どんな辞書(型・キー・値の形を崩した入力)でも例外を
   送出しない。allowlist のキーだけを読み、値は形(10 進数・コード・語・識別子・真偽・日付)を
   検査して、形が合うものだけを出す。合わないもの(未知の型・自由文・構造・巨大な値)は『不明』へ畳み、
@@ -328,11 +330,14 @@ def _clean_row(row: CandidateRow) -> tuple[CandidateRow, int]:
     )
     seq, bad_seq = _shown(_SHOWN_INT, row.seq if row.seq != "-" else None)
     raer, bad_raer = _shown(_SHOWN_NUMBER, row.raer_value)
+    allocated = row.decision is not None and row.decision.code == "ALLOCATED"
     rank, bad_rank = _shown(_SHOWN_INT, row.rank)
     shares, bad_shares = _shown(_SHOWN_INT, row.shares)
-    required, bad_required = _shown(_SHOWN_YEN, row.required_funds)
+    # 必要資金は『配分した候補の記録の金額』だけ(配分しなかった候補の値は today が計算した導出値)
+    required, bad_required = _shown(_SHOWN_YEN, row.required_funds if allocated else None)
     shortfall, bad_shortfall = _shown(_SHOWN_YEN, row.shortfall)
-    remaining, bad_remaining = _shown(_SHOWN_YEN, row.remaining_cash)
+    # 残余資金は today が記録の金額を引き算した目安 = 導出値。詳細では出さない
+    remaining, bad_remaining = None, 0
     confidence = row.confidence
     bad_confidence = 0
     if (

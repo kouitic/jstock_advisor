@@ -175,7 +175,6 @@ def _candidate_lines(candidate: CandidateDetail, *, include_optional: bool) -> l
         funds = f"{funds}(不足 {row.shortfall})"
     lines.append(
         f"    配分: 株数 {_opt(row.shares)} / 必要資金 {funds}"
-        f" / 残余資金 {_opt(row.remaining_cash)}"
         + " / "
         + _pairs_line(candidate.allocation, include_optional=include_optional)
     )
@@ -243,6 +242,7 @@ def render_detail_table(
         lines.append(f"★ 解釈できなかった項目: 合計 {detail.unparsed} 件({UNKNOWN_TEXT})")
     lines.append("")
     lines.append("※ この出力は利用者の端末だけで確認してください(Issue・PR などの公開面へ貼らない)")
+    lines.append("※ これは Shadow の試験結果であり、実際の投資判断ではありません")
     if show_labels and any(owner.label for owner in detail.owners):
         lines.append(LABEL_NOTICE)
     return "\n".join(lines) + "\n"

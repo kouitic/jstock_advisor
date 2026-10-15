@@ -225,13 +225,63 @@ def test_the_view_has_no_decimal_arithmetic() -> None:
     assert not [n for n in ast.walk(tree) if isinstance(n, ast.AugAssign)] or True  # 件数の加算のみ
 
 
-def test_the_row_is_the_same_as_the_today_screen_after_the_shape_check() -> None:
-    """行(連番・銘柄・RAER・順位・判断・株数・資金・理由)は `today` と同じ値(検査を通ったもの)。"""
+def test_the_row_is_the_today_row_without_the_two_derived_values() -> None:
+    """行は `today` と同じ値(検査を通ったもの)。ただし導出値 2 つは出さない。
+
+    導出値 = 残余資金・配分しなかった候補の必要資金。
+    USER の指示(#122 …6195577047): 記録の値を表示するだけで、CLI 側の再計算・推定・補完は禁止。
+    """
     detail = build_detail_screen(_day())
+    saw_allocated = saw_not_allocated = False
     for owner_section, owner_detail in zip(detail.screen.owners, detail.owners, strict=True):
         for row, candidate in zip(owner_section.rows, owner_detail.candidates, strict=True):
-            assert candidate.row == row
+            shown = candidate.row
+            assert shown.remaining_cash is None  # 引き算の目安は出さない
+            allocated = row.decision is not None and row.decision.code == "ALLOCATED"
+            if allocated:
+                saw_allocated = True
+                assert shown.required_funds == row.required_funds  # 記録の金額(amount)
+            else:
+                saw_not_allocated = True
+                assert shown.required_funds is None  # 株数 × 現在価格の掛け算は出さない
+            for field in (
+                "seq",
+                "stock_code",
+                "raer_value",
+                "rank",
+                "decision",
+                "shares",
+                "reason",
+            ):
+                assert getattr(shown, field) == getattr(row, field), field
+    assert saw_allocated and saw_not_allocated  # 両方の経路を通っている(空振りでない)
     assert detail.unparsed == 0
+
+
+def test_derived_values_never_appear_in_the_table_or_the_json() -> None:
+    """記録に無い導出値(残余資金・掛け算の必要資金)が、表にも JSON にも現れない。"""
+    detail = build_detail_screen(_day())
+    table = render_detail_table(detail, include_optional=True)
+    payload = detail_to_dict(detail, include_optional=True)
+    assert "残余資金" not in table
+    for owner in payload["owners"]:
+        for candidate in owner["candidates"]:
+            assert candidate["remaining_cash"] is None
+    not_allocated = payload["owners"][0]["candidates"][1]
+    assert not_allocated["decision"]["code"] == "NOT_ALLOCATED"
+    assert not_allocated["required_funds"] is None
+    # 掛け算の結果(上限後の株数 3000 × 現在価格 2000 = 6,000,000円)も出ない
+    assert "6,000,000" not in table and "6,000,000" not in json.dumps(payload)
+
+
+def test_the_table_ends_with_both_notices() -> None:
+    """USER の指示: ①公開 Issue / PR へ貼らない ②Shadow の試験結果であり実際の投資判断ではない。"""
+    text = render_detail_table(build_detail_screen(_day()))
+    assert "公開面へ貼らない" in text
+    assert "Shadow の試験結果であり、実際の投資判断ではありません" in text
+    tail = text.strip().splitlines()[-3:]
+    assert any("公開面へ貼らない" in line for line in tail)
+    assert any("実際の投資判断ではありません" in line for line in tail)
 
 
 def test_a_record_built_by_the_real_assembly_has_no_unparsed_items(tmp_path: Path) -> None:
