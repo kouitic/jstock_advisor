@@ -130,13 +130,14 @@ def _importers_of_the_source_module() -> list[str]:
     return found
 
 
-def test_c2b_only_the_service_and_the_handler_import_the_source_module() -> None:
+def test_c2b_only_the_service_and_the_two_handlers_import_the_source_module() -> None:
     """正本を import してよい src の完全一致(#988 の importer の完全一致と同じ作法)。
 
     新しい importer が増えたら、ここで落ちる = 分類の使い手の追加を意識的に確認する。
     """
     assert _importers_of_the_source_module() == [
         "lambda_handlers/holdings_watchlist_handler.py",
+        "lambda_handlers/rotation_observation_handler.py",  # #604 P-b4 A1
         "services/line_notification_service.py",
     ]
 
