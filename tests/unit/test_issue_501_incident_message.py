@@ -945,7 +945,8 @@ def test_every_lambda_function_in_the_template_has_an_entry() -> None:
     functions = set(re.findall(r'FunctionName: !Sub "\$\{AWS::StackName\}-([a-z0-9-]+)"', template))
 
     # 監視対象の Lambda は 12 本(#132)+ incident-notifier(#503)+ worker 2 本(#533)
-    assert len(functions) == 15
+    # + 資金入替の観測 P(#604 P-b4 A2)
+    assert len(functions) == 16
     # Lambda関数ではないが、HANDLED_FAILUREの発行元として対応表に載る内部名(明示的に列挙する)。
     # Issue #675(HF-10): 2つのバッチが共通で呼ぶ株主優待registryの健全性チェック。
     non_lambda_internal_names = {"shareholder-benefit-registry"}

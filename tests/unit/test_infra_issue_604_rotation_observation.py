@@ -27,6 +27,7 @@ from typing import Any
 
 import pytest
 
+from jstock_advisor.domain.notification.incident_message import IncidentJob, resolve_incident_job
 from jstock_advisor.domain.signals.rotation_observation_schedule import (
     DEFAULT_SCHEDULED_TIME,
     latest_safe_run_at,
@@ -412,3 +413,14 @@ def test_no_p_resource_is_deleted_by_a_rollback_of_data(name: str) -> None:
         for n, r in resources().items()
         if "RotationObservation" in n and r["Type"] == "AWS::DynamoDB::Table"
     ]
+
+
+def test_the_alarm_notice_uses_the_existing_generic_job_name_and_adds_no_new_wording() -> None:
+    """Errors Alarm の通知の本文の名称は、既存の『その他の処理』(新しい文言を足さない)。
+
+    専用の名称(利用者に見える文言)を作るかは外部仕様 = USER の確認が要る別の判断。
+    """
+    assert resolve_incident_job("rotation-observation") is IncidentJob.OTHER
+    assert resolve_incident_job("jstock-rotation-observation") is IncidentJob.OTHER
+    assert [j.value for j in IncidentJob].count("その他の処理") == 1
+    assert len(list(IncidentJob)) == 13  # 新しいメンバー(= 本文に出る新しい文言)を足していない
