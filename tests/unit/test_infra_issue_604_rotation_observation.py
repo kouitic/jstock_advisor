@@ -381,6 +381,8 @@ def test_the_expected_diff_is_written_in_the_runbook() -> None:
         "Code",
         "26 → 28",  # Role の増分は P の Role だけ
         "予約同時実行の合計",  # CREATE 後・EXECUTE 前の確認
+        "差分の原因の切り分け",  # Layers の Modify は A1 の設定ファイル・P の資源は A2 の template
+        "config/rotation_observation.yaml",
         "15",
         "DISABLED",
         "想定外",

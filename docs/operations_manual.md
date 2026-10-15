@@ -6373,6 +6373,12 @@ IAM    Role 26 → 28(増分は P の Role だけ)。HoldingsTableV2 の 1 表�
 削除   旧い ConfigLayer の LayerVersion(RetentionPolicy が Delete のため 1 件。ChangeSet で確認)
 ```
 
+★ **差分の原因の切り分け**(2 つの PR の差分が 1 つの ChangeSet に重なる。原因を取り違えない)★:
+・P の資源の追加(Function・Role 2・Schedule 2・Alarm・Parameter)= **A2(infra/template.yaml)の差分**。既存の resource の定義は書き換えていない(追加のみ)
+・既存 15 関数の Layers の Modify・ConfigLayer の LayerVersion の差し替え = A2 の template の変更ではなく、**A1 が `config/rotation_observation.yaml` を足したこと**による
+  (ConfigLayer は `config/` のディレクトリ全体を ContentUri に取るため、設定ファイルを 1 つ足すだけで LayerVersion が置き換わり、全関数の Layers が変わる)
+・既存 15 関数の Code の Modify(src を含むリリースのとき)= F5・A1 ほか、そのリリースに含まれる src の変更による(共有 artifact の key が変わる)
+
 ★ **想定外(1 件でもあれば EXECUTE しない)**:
 ・既存 Function の Layers・Code 以外のプロパティの変更(Environment・Role・Policy・Handler・Timeout・MemorySize・Events 等)
 ・Table の Delete・Replacement / Topic policy の変更 / 既存 Role・Policy の変更
