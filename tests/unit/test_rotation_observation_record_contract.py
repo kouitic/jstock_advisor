@@ -514,7 +514,7 @@ def test_the_module_has_no_write_port_no_clock_no_environment_no_io() -> None:
 
 
 def test_nothing_in_src_imports_the_record_module_yet() -> None:
-    """dormant: 書込(P-b3)が入るまで、どこからも import されない(import 文を AST で見る)。"""
+    """dormant: P-b3 の runner だけが import する(配線は P-b4。import 文を AST で見る)。"""
     importers = _importers_of("rotation_observation_record", _MODULE_PATH)
 
-    assert importers == []
+    assert importers == ["services/rotation_observation_runner.py"]
