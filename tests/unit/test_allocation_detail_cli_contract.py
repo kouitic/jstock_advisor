@@ -349,6 +349,11 @@ def test_the_json_is_on_stdout_only_and_has_no_label_by_default(
 
     labelled = _detail(*_LOCAL, "--format", "json", "--with-labels")
     assert json.loads(labelled.stdout)["owners"][0]["label"] == "LABEL-ZZ"
+    # 共有に使われる JSON にも 2 つの注意書きが入る(USER の確定 #122)
+    for result in (plain, labelled):
+        notices = "\n".join(json.loads(result.stdout)["notices"])
+        assert "公開面へ貼らない" in notices
+        assert "実際の投資判断ではありません" in notices
 
     table = _detail(*_LOCAL)
     assert "LABEL-ZZ" in table.stdout  # 表は既定でラベルを出し、共有の注意を付ける
