@@ -517,12 +517,24 @@ _ALLOCATION_MODULES_REACHABLE_FROM_HANDLERS = [
 #: ★ 重い `allocation_shadow_record`(配分・RAER の module を推移的に import する)・
 #: `allocation_shadow_compute` は含めない = CLI は記録を辞書として読むだけ ★。
 #: handler の網(_UNCONNECTED_NAME_TOKENS)は外していない
+#: 7 → 10 の追加 = `jstock allocation detail`(#605 追加 CLI)の 3 module
+#: (cli.allocation_detail・domain.notification.allocation_shadow_detail_view・同 _detail_renderer)。
+#: ★ 『接続を許す変更』ではない ★(#934 の summary と同じ class = 読取専用・GetItem だけ・
+#: 本番の判断 / 通知 / 表示へ未接続)。
+#: 根拠 = USER 指示 #122 …6185062118(R2 の追加 CLI は R1 の記録を読む読取専用を優先・LINE 禁止)・
+#: サブちゃんの設計レビュー PASS(#605 …6185799547・…6189256361。『新 module の閉包は自分自身 +
+#: 既存の画面モデル系 + 既存 7 件で閉じる・承認不要』)。
+#: ★ 新 module は記録の module(allocation_shadow_record・allocation_shadow_compute)・方針の config
+#: (allocation_policy_config)を import しない = 閉包は閉じたまま ★
 _ALLOCATION_MODULES_REACHABLE_FROM_CLI = [
     "jstock_advisor.cli.allocation",
+    "jstock_advisor.cli.allocation_detail",
     "jstock_advisor.cli.allocation_labels",
     "jstock_advisor.cli.allocation_summary",
     "jstock_advisor.domain.notification.allocation_shadow_cli_renderer",
     "jstock_advisor.domain.notification.allocation_shadow_cli_view",
+    "jstock_advisor.domain.notification.allocation_shadow_detail_renderer",
+    "jstock_advisor.domain.notification.allocation_shadow_detail_view",
     "jstock_advisor.domain.notification.allocation_shadow_summary",
     "jstock_advisor.infrastructure.aws.allocation_shadow_reader",
 ]
@@ -537,7 +549,7 @@ def test_the_only_allocation_modules_reachable_from_handlers_are_the_off_shadow_
 
 
 def test_the_only_allocation_modules_reachable_from_the_cli_are_the_read_only_ones() -> None:
-    """CLI の根から到達できる配分系 = 読取専用の CLI の 7 module だけ(完全一致)。"""
+    """CLI の根から到達できる配分系 = 読取専用の CLI の 10 module だけ(完全一致)。"""
     reached = _reachable_from_root(_CLI_ROOT_PREFIX)
     assert sorted(m for m in reached if "allocation" in m) == _ALLOCATION_MODULES_REACHABLE_FROM_CLI
 
