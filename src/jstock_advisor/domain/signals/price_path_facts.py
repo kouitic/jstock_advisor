@@ -12,6 +12,12 @@ CLI(`cli/analyze.py`)からも到達するため、サービスが `exit_archite
 素の型を詰めるだけで、`exit_architecture` へ繋がる受け手は別の module(PR-2b-ii)に置く。
 設計: #877 PR-2 設計 rev3(…6182483078)・設計レビュー PASS(…6182584823)。
 
+★ 注意: 本 module は #606 の網の対象外(名前の token・prefix に当たらない)★。到達の保証は
+#606 ではなく、
+契約テスト(全 src の走査で import するのは利確判定サービスだけ・サービスの import の閉包に
+exit_architecture が無い)である。`exit_architecture` の中に置くと token で網に掛かり、CLI の根が
+到達して落ちるため、素の型の module として外に置いている。
+
 ## 守ること(契約テストで固定する)
 
 * ★ 値を写すだけ ★: 指標の値(下落率・peak 時点の含み益率・現在の含み益率・データ不足か)を

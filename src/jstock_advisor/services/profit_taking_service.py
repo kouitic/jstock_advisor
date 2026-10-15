@@ -666,6 +666,11 @@ class ProfitTakingService:
         指標とトレンドの分類を写すだけで、判定・保存・通知へ使わない(shadowの受け手だけが読む)。
         組み立ての失敗(想定外のトレンド値など)は隔離し、判定の結果を変えない。ログには型名だけを
         残す(値・例外の文面を出さない)。
+
+        ★ ログは保有 1 件ごとに最大 1 行(1 回の実行で件数ぶん出得る。#954 のように畳まない)★。
+        現実的に到達しない経路である: トレンドの写像は TrendClassification の全メンバーを
+        覆い(契約テストが全メンバーで固定)、組み立ては値の直接の代入だけで四則演算を持たない
+        ため、KeyError・演算の例外が起きる経路が無い。この隔離は将来の変更への保険である。
         """
         try:
             return build_price_path_facts(metrics, snapshot.momentum.trend_classification)
