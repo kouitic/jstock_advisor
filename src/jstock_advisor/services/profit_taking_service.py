@@ -105,6 +105,7 @@ from jstock_advisor.domain.signals.market_environment import (
     market_environment_config_values,
     market_environment_result_to_metrics,
 )
+from jstock_advisor.domain.signals.price_path_facts import PricePathFacts, build_price_path_facts
 from jstock_advisor.domain.signals.profit_protection import (
     ProfitProtectionMetrics,
     compute_profit_protection_metrics,
@@ -177,6 +178,11 @@ class ProfitTakingOutcome:
     # 推奨が生成された経路でのみ設定する(data_error / HOLD等の推奨なし経路はNone)。等価比較・
     # reprには含めない(既存の比較・ログを変えない)。shadowの評価点(PR-3以降)だけが読む。
     safety_facts: SafetyFacts | None = field(default=None, compare=False, repr=False)
+    # --- Issue #877 PR-2b-i: 価格の経路の事実(素の型 5 つ。非永続・判定へ使わない) ---
+    # 指標とトレンドの分類を写すだけ(再計算なし)。推奨の有無に依らず(HOLD でも)、判定の経路に入った
+    # 後で設定する(data_error の経路はNone)。値の詰めは隔離され、失敗してもNone(判定・保存・通知は
+    # 変えない)。等価比較・reprには含めない。shadowの受け手(PR-2b-ii)だけが読む。
+    price_path_facts: PricePathFacts | None = field(default=None, compare=False, repr=False)
 
 
 def _dividend_decrease_explanation(
@@ -650,6 +656,27 @@ class ProfitTakingService:
             config=self._config.profit_taking.profit_protection,
             business_calendar=self._calendar,
         )
+
+    @staticmethod
+    def _price_path_facts(
+        metrics: ProfitProtectionMetrics, snapshot: StockSnapshot
+    ) -> PricePathFacts | None:
+        """価格の経路の事実(素の型 5 つ)を詰める(Issue #877 PR-2b-i)。★ 失敗してもNone ★。
+
+        指標とトレンドの分類を写すだけで、判定・保存・通知へ使わない(shadowの受け手だけが読む)。
+        組み立ての失敗(想定外のトレンド値など)は隔離し、判定の結果を変えない。ログには型名だけを
+        残す(値・例外の文面を出さない)。
+
+        ★ ログは保有 1 件ごとに最大 1 行(1 回の実行で件数ぶん出得る。#954 のように畳まない)★。
+        現実的に到達しない経路である: トレンドの写像は TrendClassification の全メンバーを
+        覆い(契約テストが全メンバーで固定)、組み立ては値の直接の代入だけで四則演算を持たない
+        ため、KeyError・演算の例外が起きる経路が無い。この隔離は将来の変更への保険である。
+        """
+        try:
+            return build_price_path_facts(metrics, snapshot.momentum.trend_classification)
+        except Exception as error:  # noqa: BLE001 - shadowの失敗を判定へ伝播させない
+            logger.warning("price path facts unavailable: error_type=%s", type(error).__name__)
+            return None
 
     def _corporate_action_shadow_facts(
         self,
@@ -1289,7 +1316,11 @@ class ProfitTakingService:
 
         if effective_recommendation_type == RecommendationType.HOLD:
             return ProfitTakingOutcome(
-                holding.stock_code, None, None, audit_id=audit_entry.audit_id
+                holding.stock_code,
+                None,
+                None,
+                audit_id=audit_entry.audit_id,
+                price_path_facts=self._price_path_facts(profit_protection_metrics, snapshot),
             )
 
         dividend = snapshot.dividend
@@ -1670,6 +1701,7 @@ class ProfitTakingService:
             recommendation,
             None,
             audit_id=audit_entry.audit_id,
+            price_path_facts=self._price_path_facts(profit_protection_metrics, snapshot),
             # UNKNOWN(None)を事実として識別できる2項目の**実値**を、判定式を変えずに転記する。
             # Noneは「取得できていない」、0年・Falseは「確認した結果」(FalseをUNKNOWNと推測しない)。
             safety_facts=SafetyFacts(
