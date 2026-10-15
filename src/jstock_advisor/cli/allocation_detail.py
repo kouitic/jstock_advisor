@@ -15,8 +15,10 @@
   (画面モデル・整形の module は時計を持たない)
 * ★ `--reason` の語彙は閉じた理由コードの表から導く ★(手で写した一覧を持たない)。未知の語は
   終了コード 2 で、文面に使える語の一覧を出す
-* ★ 表示項目(外部仕様)の確認が済むまで出さない項目(△)は、モデルにあっても画面へ出さない ★
-  (`INCLUDE_OPTIONAL`)
+* ★ 表示項目(外部仕様): USER の回答(#122 …記録済み・#605 …6190430543)に基づき、△ の項目
+  (保有評価額・方針の値・経過時間と読取の状態)も画面へ出す ★(`INCLUDE_OPTIONAL = True`)。
+  方針の値は記録の `policy` の節の値だけ(config は読まない)。
+  USER が後で訂正すれば、この定数で切り替える
 
 終了コード: `today` と同じ(0 = 揃っている / 1 = 読取の失敗 / 2 = 指定の誤り / 3 = 読めたが不完全)。
 """
@@ -54,8 +56,9 @@ from jstock_advisor.domain.notification.allocation_shadow_detail_view import (
 )
 from jstock_advisor.infrastructure.aws.allocation_shadow_reader import ReadFailure, read_day
 
-#: ★ 表示項目(△)の確認が済むまで False ★(保有評価額・方針の値・経過時間と読取の状態)
-INCLUDE_OPTIONAL: Final = False
+#: ★ △ の表示項目(保有評価額・方針の値・経過時間と読取の状態)を出す = USER の回答(#605 …6190430543)★
+#: USER が訂正したら False へ戻す(モデルは常に持つ)
+INCLUDE_OPTIONAL: Final = True
 
 _OWNER_PREFIX: Final = re.compile(r"[0-9a-f]{6,24}")
 _STOCK_CODE: Final = re.compile(r"[0-9A-Za-z]{1,16}")

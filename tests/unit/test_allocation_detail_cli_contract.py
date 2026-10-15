@@ -387,8 +387,8 @@ def test_the_cli_module_has_no_write_scan_clock_or_notification_path() -> None:
     assert not [m for m in imports if "allocation_shadow_record" in m or "shadow_compute" in m]
 
 
-def test_the_include_optional_switch_is_off_until_the_display_items_are_confirmed() -> None:
-    assert detail_cli.INCLUDE_OPTIONAL is False
+def test_the_optional_items_are_shown_by_the_cli_as_the_user_answered() -> None:
+    assert detail_cli.INCLUDE_OPTIONAL is True
 
 
 @pytest.mark.parametrize(
@@ -418,3 +418,66 @@ def test_the_reason_word_selects_the_matching_candidates_only(
     _use(monkeypatch, _source())
     result = _detail(*_LOCAL, "--reason", "INSUFFICIENT_CASH_REMAINING")
     assert "候補 #2" in result.stdout and "候補 #1" not in result.stdout
+
+
+def test_the_optional_items_appear_in_the_cli_table_and_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """USER の回答: 保有評価額・方針の値・経過時間と読取の状態も出す(記録の policy 節の値だけ)。"""
+    _use(monkeypatch, _source())
+    table = _detail(*_LOCAL).stdout
+    for needle in (
+        "保有評価額=1,234,567円",
+        "RAER の最低基準=10.5",
+        "経過時間(ms)=5",
+        "公開面へ貼らない",
+    ):
+        assert needle in table, needle
+    parsed = json.loads(_detail(*_LOCAL, "--format", "json").stdout)
+    owner = parsed["owners"][0]
+    assert owner["policy"]["min_raer_to_allocate"] == "10.5"
+    assert owner["run"]["elapsed_ms"] == "5"
+    assert owner["candidates"][0]["attributes"]["current_position_value"] == "1,234,567円"
+
+
+def test_no_unreadable_value_reaches_the_cli_output_even_with_the_optional_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MUST-1 を CLI の出力で確かめる: 方針・実行・保有評価額の欄に形の合わない値を入れる。"""
+    record = _rich_record()
+    junk = "SENTINEL 生の値 zz"
+    record["policy"]["min_raer_to_allocate"] = junk
+    record["policy"]["tier_quantity_caps"] = {junk: junk}
+    record["run"]["elapsed_ms"] = junk
+    record["run"]["read_states"] = {junk: junk}
+    record["candidates"][0]["current_position_value"] = junk
+    source = FakeSource(
+        {
+            f"allocation_shadow_index:{_DAY}": view_tests._index([_REF]),
+            f"allocation_shadow_items:{_DAY}:{_REF}": record,
+        }
+    )
+    _use(monkeypatch, source)
+    for arguments in ([], ["--format", "json"], ["--format", "json", "--with-labels"]):
+        output = _detail(*_LOCAL, *arguments).stdout
+        assert "SENTINEL" not in output, arguments
+        assert "不明" in output
+
+
+def test_the_private_names_of_the_today_command_that_detail_reuses_exist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """detail は today の private 名を再利用する(summary と同じ)。名前が消えたらここで落ちる。"""
+    monkeypatch.undo()  # 自動の fixture が差し替えた名前を元へ戻し、本物どうしの同一性を見る
+    for name in (
+        "_FAILURE_TEXT",
+        "_build_source",
+        "_default_calendar",
+        "_load_labels_or_none",
+        "_today_jst",
+    ):
+        assert hasattr(cli, name), name
+        assert getattr(detail_cli, name) is getattr(cli, name), name
+    assert callable(cli._build_source) and callable(cli._default_calendar)
+    assert callable(cli._load_labels_or_none) and callable(cli._today_jst)
+    assert set(cli._FAILURE_TEXT) == set(ReadFailureKind)  # detail が参照する全ての失敗の種別を覆う
