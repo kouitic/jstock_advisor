@@ -154,7 +154,11 @@ from jstock_advisor.services.line_notification_service import (
     resolve_notification_intent_for_recommendation,
 )
 from jstock_advisor.services.portfolio_service import PortfolioService
-from jstock_advisor.services.profit_taking_service import ProfitTakingService
+from jstock_advisor.services.price_regime_shadow_service import observe_price_regime_shadow
+from jstock_advisor.services.profit_taking_service import (
+    ProfitTakingOutcome,
+    ProfitTakingService,
+)
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.provider_factory import build_real_provider_bundle
 from jstock_advisor.services.rule_version_service import RuleVersionService
@@ -882,6 +886,19 @@ def _resolve_mode_designated_engine(
     return None
 
 
+def _observe_price_regime_shadow_safely(pt_outcome: ProfitTakingOutcome) -> None:
+    """価格の経路の Shadow の受け手を呼ぶ(Issue #877 PR-2b-ii)。★ 例外なし・戻り値を使わない ★。
+
+    呼び出しは、保存・通知・保有の評価記録がすべて終わった後(`return result` の直前)に置く。
+    受け手自身も例外を送出しない契約だが、本流を守る二重の網としてここでも隔離する。
+    閾値が供給されない間(PR-2b では常に)、受け手は何も組み立てずに戻る(判定・通知・保存なし)。
+    """
+    try:
+        observe_price_regime_shadow(pt_outcome)
+    except Exception as error:  # noqa: BLE001 - shadowの失敗を本流へ伝播させない
+        logger.warning("price regime shadow failed: error_type=%s", type(error).__name__)
+
+
 def _analyze_one_holding(
     holding: Holding,
     now: dt.datetime,
@@ -1469,6 +1486,7 @@ def _analyze_one_holding(
             holding_decision_result_id=None,
             holding_decision_notified=False,
         )
+        _observe_price_regime_shadow_safely(pt_outcome)
         return result
 
     # --- Issue #75(2026-08-30): 利確判定が成立しなかった場合の区別 ---
@@ -1539,6 +1557,7 @@ def _analyze_one_holding(
         holding_decision_result_id=None,
         holding_decision_notified=False,
     )
+    _observe_price_regime_shadow_safely(pt_outcome)
     return result
 
 

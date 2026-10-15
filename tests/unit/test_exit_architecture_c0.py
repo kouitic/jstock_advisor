@@ -836,7 +836,13 @@ def test_no_existing_source_file_imports_the_package() -> None:
     # capital_rotation(#603 PR-D。dormant)は、提案の分類の語彙 ExitClass.CAPITAL_ROTATION を
     # 読むだけで、既存の SELL / 利確 / 下落保護 / Arbiter の判定には触れない(逆向きの依存がない
     # ことは test_capital_rotation_contract.py が固定する)
-    assert importers == ["domain/signals/capital_rotation.py"]
+    # price_regime_shadow_service(#877 PR-2b-ii)は、USER が承認した『PR-2b に限定した Shadow 接続』
+    # の受け手(#122 …6182420023 の 1)。exit_architecture へ繋がる唯一の module で、#606 の局所許可
+    # (別表 7 件 + 経由の固定)と対になる。閉じた完全一致のまま、他の import 元は増やさない
+    assert importers == [
+        "domain/signals/capital_rotation.py",
+        "services/price_regime_shadow_service.py",
+    ]
 
 
 _ALLOWED_IMPORT_ROOTS = {
