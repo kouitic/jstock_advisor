@@ -6239,6 +6239,30 @@ jstock allocation summary --backend dynamodb --aws-region ap-northeast-1 --confi
 ★ 本コマンドの出力は、投資判断・LINE の通知に使わない。結果を公開面へ書くときは、件数・状態・日付だけ(DISCLOSURE = PUBLIC_SANITIZED)。
 ・設計・実装: Issue #934(設計 rev2・rev3・PR-2 差分 = …6169731888)/ PR-1 = #961
 
+### 40.8 候補ごとの詳細(`jstock allocation detail`。Issue #605 追加 CLI、2026-10-15追加)
+
+`today` と同じ記録(索引・日単位の skip・所有者ごとの項目つきの記録)を**同じ読取(GetItem のみ・最大 18 回)**で読み、候補ごとの内訳を表示する。
+入口の作法は 40.1 と同じ(backend は明示・dynamodb は region と表名の完全一致・**本番の記録を実際に読む実行は USER の許可と読取計画が先に要る**)。
+
+```
+jstock allocation detail --backend local --date 2026-10-15 [--owner 先頭6〜24桁] [--stock 銘柄コード] [--decision all|allocated|not-allocated] [--reason 理由コード] [--format table|json] [--with-labels]
+jstock allocation detail --backend dynamodb --aws-region ap-northeast-1 --confirm-table jstock-audit_log --aws-profile REPLACE_WITH_OBSERVER_PROFILE --date 2026-10-15
+```
+
+```
+出すもの    候補ごとの 属性(価格帯・適正価格の確信度・質の帯・業種・high-risk)/ 価格(現在値・価格日・鮮度の判定)/ RAER の入力 13 項目 / RAER の出力(適用・未適用の軸・リスクフラグ・理由コード)/ 寄与度(記録のまま)/ 配分の判断
+            値は記録のまま。計算し直し・補完・丸め・合計の作成をしない。★ 解釈できなかった値は表示せず『不明』と数える(未知のキー・形の合わない値・自由な文章は出ない)★
+絞り込み    --owner / --stock / --decision / --reason は表示だけ(読取の回数・順序は変わらない)。--reason は閉じた理由コードの表の語だけ。未知の語は終了コード 2(使える語の一覧を出す)
+            該当なしは『該当する候補がありません(絞り込み: …)』(『0 件』とは書かない)
+--date      省略 = 直近の営業日。★ 営業日でない日を指定すると、読まずに終了コード 2(GetItem 0 回)★(today は読んで『索引なし』を出す)
+終了コード  today と同じ(0 = 揃っている / 1 = 読取の失敗 / 2 = 指定の誤り / 3 = 読めたが不完全)
+出さないもの 保有評価額・方針の値・経過時間と読取の状態は、表示項目の確認(USER)が済むまで画面へ出さない(モデルには持つ)
+```
+
+★ 出力は利用者の端末だけで確認する(Issue・PR・コメントなどの公開面へ貼らない。銘柄・金額・所有者の表示名を含みうる)。投資判断・LINE の通知に使わない。
+・設計・実装: Issue #605(追加 CLI 設計 rev1〜rev3)/ 閉包: 記録の module(allocation_shadow_record・shadow_compute)・方針の config(allocation_policy_config)を import しない(#606 の CLI の根に免除は無い)
+
+
 ## 41. 購入側 Shadow(資金配分の試験計算)の本番バッチへの配線(Issue #603 PR-F2-2b、2026-10-14追加)
 
 買い候補バッチの finalize が完了した後に、資金配分の試験計算(Shadow)を実行して記録を残す配線。**出荷設定は有効(SHADOW。R1 = Issue #128。USER の別承認 G0)**で、
