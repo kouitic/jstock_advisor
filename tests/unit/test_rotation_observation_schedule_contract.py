@@ -202,8 +202,10 @@ def test_the_module_reads_no_clock_no_environment_and_does_no_io() -> None:
 
 
 def test_nothing_in_src_imports_the_module_yet() -> None:
-    """dormant: P-b3 の runner の配線(P-b4)まで、どこからも import されない。"""
-    assert _importers_of("rotation_observation_schedule", _MODULE_PATH) == []
+    """dormant: P-b3 の runner だけが import する(配線は P-b4)。"""
+    assert _importers_of("rotation_observation_schedule", _MODULE_PATH) == [
+        "services/rotation_observation_runner.py"
+    ]
 
 
 def test_the_module_is_importable_by_name() -> None:

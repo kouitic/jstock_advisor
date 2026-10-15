@@ -19,6 +19,7 @@ CI の test job は、変更が Markdown のみのとき全体 pytest を省略�
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
@@ -706,6 +707,58 @@ def test_other_jobs_keep_their_own_conditions() -> None:
         "catalog-coverage",
     ):
         assert "if" not in _jobs()[name], name
+
+
+# --- Issue #965: 計測(--durations=50 と runner の資源の記録)-----------------------------------
+# 計測だけの変更であり、required check の名前・Markdown-only 判定・full pytest の実行条件・
+# subset の step は変えない(サブちゃんの設計レビュー SUBU-20261015-002)。
+
+_FULL_PYTEST = "python -m pytest tests -q"
+
+
+def _resource_step_index(steps: list[dict[str, object]]) -> int:
+    return _step_index(steps, "nproc")
+
+
+def test_full_pytest_step_reports_the_slowest_tests_and_keeps_what_it_runs() -> None:
+    steps = _steps("test")
+    full = steps[_step_index(steps, _FULL_PYTEST)]
+    tokens = shlex.split(str(full["run"]))
+    assert tokens[:5] == ["python", "-m", "pytest", "tests", "-q"]  # 対象(tests 全体)と -q は不変
+    assert "--durations=50" in tokens
+    assert full["if"] == "steps.classify.outputs.markdown_only != 'true'"  # 実行条件は不変
+
+
+def test_the_runner_resource_step_is_measurement_only_and_cannot_fail_the_job() -> None:
+    steps = _steps("test")
+    classify = _step_index(steps, "scripts/ci_markdown_only.py")
+    install = _step_index(steps, "pip install -r requirements-lock.txt")
+    resource = _resource_step_index(steps)
+    full = _step_index(steps, _FULL_PYTEST)
+    # 判定(classify)の後・pip install の後・full pytest の前(位置が前へずれると判定の前に入り込む)
+    assert classify < install < resource < full
+    assert sum("nproc" in str(s.get("run", "")) for s in steps) == 1
+    step = steps[resource]
+    # 計測のために job を赤くしない(値が取れない日があっても CI は成功する)
+    assert step.get("continue-on-error") is True
+    assert "if" not in step  # 条件なし = どの経路でも同じように記録される
+    assert "id" not in step  # 他の step が出力を参照する経路を作らない
+    run = str(step["run"])
+    assert "nproc" in run and "free -m" in run
+    assert "pytest" not in run  # テストを起動しない
+    assert "GITHUB_OUTPUT" not in run  # 判定の output へ書かない(classify だけが書く)
+
+
+def test_the_markdown_only_subset_and_notice_steps_are_unchanged_by_the_measurement() -> None:
+    steps = _steps("test")
+    subset = steps[_step_index(steps, "tests/ci_markdown_subset.txt")]
+    assert subset["if"] == "steps.classify.outputs.markdown_only == 'true'"
+    assert subset["run"] == (
+        r"python -m pytest -q $(grep -v -E '^\s*(#|$)' tests/ci_markdown_subset.txt | tr -d '\015')"
+    )
+    assert "--durations" not in str(subset["run"])  # 軽量経路は #866 のまま
+    notice = steps[_step_index(steps, "Markdown-only change")]
+    assert notice["if"] == "steps.classify.outputs.markdown_only == 'true'"
 
 
 # --- script 自体の性質 ---------------------------------------------------------------------
