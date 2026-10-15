@@ -146,13 +146,26 @@ def test_insufficient_facts_are_carried_as_undetermined() -> None:
     assert not observation.price_facts.trend.is_determined
 
 
-def test_missing_facts_give_none_even_with_thresholds() -> None:
-    assert (
-        observe_price_regime_shadow(
+def test_missing_facts_give_none_even_with_thresholds(caplog: pytest.LogCaptureFixture) -> None:
+    """facts が無い(None)のは『正常な None』: ★ WARNING を 1 行も出さない ★。
+
+    """facts が無い(None)のは『正常な None』: ★ WARNING を 1 行も出さない ★。
+    通るようになると、保有の件数ぶんの WARNING が出る(サブちゃんの変異 M3)。ログの有無で区別する。
+    """
+    with caplog.at_level("DEBUG"):
+        result = observe_price_regime_shadow(
             _Outcome(None), thresholds_provider=_provider(_SYNTHETIC_THRESHOLDS)
         )
-        is None
-    )
+    assert result is None
+    assert [r for r in caplog.records if r.levelno >= 30] == []  # WARNING 以上が 0 件
+    assert "price regime shadow unavailable" not in caplog.text
+
+
+def test_the_thresholds_none_path_is_also_silent(caplog: pytest.LogCaptureFixture) -> None:
+    """閾値が供給されない通常の経路も、ログを出さない(本番で保有の件数ぶんの行を作らない)。"""
+    with caplog.at_level("DEBUG"):
+        assert observe_price_regime_shadow(_Outcome(_FACTS)) is None
+    assert caplog.records == []
 
 
 # --- R-4 例外を送出しない ---------------------------------------------------------------------
