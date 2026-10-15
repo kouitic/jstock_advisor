@@ -174,6 +174,9 @@ _NEW_RECORD_READERS = {
     "domain/notification/allocation_shadow_cli_view.py",
     "domain/notification/allocation_shadow_cli_renderer.py",
     "domain/notification/allocation_shadow_summary.py",  # #934 BT-A(集計。画面モデルだけを読む)
+    # #605 追加 CLI(候補ごとの詳細。画面モデル・整形。読取専用。log_ref を使わない)
+    "domain/notification/allocation_shadow_detail_view.py",
+    "domain/notification/allocation_shadow_detail_renderer.py",
     "infrastructure/aws/allocation_shadow_reader.py",
 }
 

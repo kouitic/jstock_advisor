@@ -17,8 +17,8 @@
   検査して、形が合うものだけを出す。合わないもの(未知の型・自由文・構造・巨大な値)は『不明』へ畳み、
   件数(unparsed)に数える。★ 解釈できなかった値を `repr` / `str` で画面へ落とさない ★
   (未知のキーは読まない = 出ない)
-* ★ 記録の module を import しない ★(`allocation_shadow_record`・`allocation_shadow_compute`・
-  配分 / RAER 系・`allocation_policy_config` は #606 の網に掛かり、CLI の根には免除が無い)。
+* ★ 記録の組み立て・計算の module(書込側)を import しない ★(配分 / RAER 系・
+  方針の config は #606 の網に掛かり、CLI の根には免除が無い)。
   方針の値は記録の `policy` の節から読む。キー名の一覧は本 module が自前で持ち、書込側の公開定数
   (`RAER_IN_KEYS`・`RAER_EXTRA_KEYS`)との一致は契約テストが固定する(書込側の module は変更しない
   = R1 の記録契約に触れない)
