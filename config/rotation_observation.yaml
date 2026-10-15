@@ -1,0 +1,18 @@
+# 資金入替の観測 P(Issue #604 P-b4。#128 R2)の mode の設定。
+#
+# mode:
+# ★ 値は必ず引用符で囲むこと("OFF")。引用符なしのOFFはYAML 1.1で真偽値Falseと解釈され、検証に失敗して
+#   設定ファイル全体が読まれなくなる(読まれなければOFFへ縮退するが、意図を明示する)。
+#   OFF     観測を一切実行しない(DynamoDBへの読取・AuditLogへの書込のいずれにも入らない)。
+#           ファイルが無い・読めない・不正な場合の縮退先でもある。
+#   SHADOW  観測のみ行う(読取専用 + AuditLogへ『日の集計』を1件 / 日)。★ 有効化は別のUSER承認 ★
+#           (Parameterでの Scheduler の ENABLED とは別の、もう1つのHuman Gate)。
+#
+# ★ ACTIVE は存在しない(投資判断・表示・LINEへの接続は別の承認)。
+# ★ 購入側 Shadow の設定とは switch を共有しない(別の設定・別の入口)。
+# ★ 現在の出荷値は OFF(USER 決定 #604 …6195577714。Scheduler も DISABLED で出荷する)。
+#   rollback: mode を "OFF" へ戻して再deployする(Lambda Layer の静的設定のため、config変更 + 再deployが要る)。
+#
+# このファイルが無い・読めない・不正な場合は、mode=OFFとして扱う(観測を実行しない側へ倒す)。
+version: 1
+mode: "OFF"

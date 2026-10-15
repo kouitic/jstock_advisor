@@ -942,8 +942,11 @@ def test_the_module_reads_no_environment_no_clock_and_takes_names_and_sleep_by_a
 
 
 def test_no_module_other_than_the_tests_imports_the_reader_yet() -> None:
-    """dormant: P-b3・P-b4 の配線まで、どこからも import されない。"""
-    assert _importers_of("rotation_observation_reader", _MODULE_PATH) == []
+    """P-b4 A1 の ports と handler(client の組み立て)だけが import する。"""
+    assert _importers_of("rotation_observation_reader", _MODULE_PATH) == [
+        "lambda_handlers/rotation_observation_handler.py",
+        "services/rotation_observation_ports.py",
+    ]
 
 
 def test_the_module_is_importable_by_name() -> None:

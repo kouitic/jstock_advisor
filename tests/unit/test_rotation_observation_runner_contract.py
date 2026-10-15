@@ -713,5 +713,9 @@ def test_the_mode_enum_has_no_active_and_no_other_value_is_referenced() -> None:
     assert "ACTIVE" not in names
 
 
-def test_nothing_in_src_imports_the_runner_so_it_is_dormant() -> None:
-    assert _importers_of("rotation_observation_runner", _MODULE_PATH) == []
+def test_only_the_new_handler_and_the_config_import_the_runner() -> None:
+    """P-b4 A1: handler(runner を呼ぶ唯一の皮)と、mode の設定(mode の型を共有)だけ。"""
+    assert _importers_of("rotation_observation_runner", _MODULE_PATH) == [
+        "lambda_handlers/rotation_observation_handler.py",
+        "services/rotation_observation_config.py",
+    ]
