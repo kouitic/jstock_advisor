@@ -112,6 +112,61 @@ def test_c2_each_function_is_defined_exactly_once_in_the_source_module(name: str
     assert _definitions(name) == ["domain/notification/notification_category.py"]
 
 
+# --- C2b 旧 path の guard(import してよい src は決まっている)-------------------------------------
+
+
+_OLD_PATH = "jstock_advisor.services.line_notification_service"
+
+
+def _importers_of_the_source_module() -> list[str]:
+    found: list[str] = []
+    for path in sorted(_PACKAGE.rglob("*.py")):
+        if path.name == "notification_category.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ImportFrom) and node.module == _SOURCE_MODULE:
+                found.append(path.relative_to(_PACKAGE).as_posix())
+                break
+    return found
+
+
+def test_c2b_only_the_service_and_the_handler_import_the_source_module() -> None:
+    """正本を import してよい src の完全一致(#988 の importer の完全一致と同じ作法)。
+
+    新しい importer が増えたら、ここで落ちる = 分類の使い手の追加を意識的に確認する。
+    """
+    assert _importers_of_the_source_module() == [
+        "lambda_handlers/holdings_watchlist_handler.py",
+        "services/line_notification_service.py",
+    ]
+
+
+def test_c2b_no_src_imports_the_two_names_from_the_old_path() -> None:
+    """旧 path(`line_notification_service`)から 2 名を import する src は 0 件。
+
+    service は正本から import して使うだけで、2 名の『定義』を持たない。別の src が旧 path 経由で
+    import していると、分類の正本が service に戻ったように見える(取り違えの温床)。
+    """
+    offenders: list[str] = []
+    for path in sorted(_PACKAGE.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ImportFrom) and node.module == _OLD_PATH:
+                names = {alias.name for alias in node.names}
+                if names & set(_FUNCTIONS):
+                    offenders.append(path.relative_to(_PACKAGE).as_posix())
+    assert offenders == []
+
+
+def test_c2b_the_guard_is_not_vacuous() -> None:
+    """検査が空振りでない: 旧 path から別の名前を import する src は実在する。"""
+    importers = [
+        path
+        for path in _PACKAGE.rglob("*.py")
+        if f"from {_OLD_PATH} import" in path.read_text(encoding="utf-8")
+    ]
+    assert len(importers) >= 2
+
+
 # --- C3 使う側は正本と同一 ---------------------------------------------------------------------
 
 
