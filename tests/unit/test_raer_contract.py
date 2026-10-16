@@ -995,6 +995,11 @@ _ALLOWED_IMPORTERS = {
     "domain/valuation/raer_inputs.py",  # #602 PR-G1(入力の組み立て。RaerResult を作る)
     "services/allocation_shadow_compute.py",  # #603 PR-F2-2a(RAER を計算して候補へ渡す)
     "lambda_handlers/allocation_shadow_wiring.py",  # #603 PR-F2-2b(係数・assembler を読む)
+    # #934 BT-2a(RAER の式の再現)。★ 部分一致で入る ★: 本 module(raer)そのものは import しない。
+    # import するのは valuation.raer_composition(RaerCoefficients の型 1 つ)で、この guard の
+    # 検索語 "valuation.raer" が "valuation.raer_composition" の部分文字列のため当たる。
+    # 検索語を狭めて例外を消す方向に『直さない』(raer 本体への言及を見逃す網になる)
+    "domain/signals/allocation_shadow_raer_replay.py",
 }
 
 
