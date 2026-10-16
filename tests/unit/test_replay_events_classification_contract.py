@@ -34,9 +34,9 @@ from jstock_advisor.domain.backtest.replay_classification import (
 from jstock_advisor.domain.backtest.replay_events import (
     EXCLUSION_ORDER,
     CoFireCounts,
-    PopulationExclusion,
     Fire,
     Observation,
+    PopulationExclusion,
     account_population,
     build_events,
     co_fire_counts,
