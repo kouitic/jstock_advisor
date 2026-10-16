@@ -710,5 +710,6 @@ def test_only_the_observation_modules_import_the_module() -> None:
         "domain/signals/rotation_observation_record.py",
         "infrastructure/aws/rotation_observation_reader.py",
         "services/rotation_observation_inputs.py",
+        "services/rotation_observation_ports.py",
         "services/rotation_observation_runner.py",
     ]

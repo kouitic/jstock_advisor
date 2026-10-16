@@ -271,6 +271,46 @@ _PRICE_REGIME_SHADOW_CONNECTOR: Final = "jstock_advisor.services.price_regime_sh
 _PRICE_REGIME_SHADOW_IMPORTERS: Final = ["lambda_handlers/holdings_watchlist_handler.py"]
 
 
+#: ★ #604 P-b4 A1 の『資金入替の観測 P』の局所許可(別表)★。
+#: 完全一致 13 件 = 新しい handler(`rotation_observation_handler`)の閉包の『未接続の名前』の module
+#: (handler・設定・ports・runner・入力の組み立て・reader・Scan の proxy・観測の純粋部分・
+#: 記録・予定・入替元の適格性・`capital_rotation`)。
+#: 根拠 = USER 決定 #604 …6195577714(P-b4 を統合文書 …6188895158 の §9 どおりに承認。A1・A2 は
+#: 追加の確認なしに実装・テスト・PR してよい。出荷は Scheduler = DISABLED かつ mode = OFF)・
+#: #122 …6195577047。★ 本番有効化(mode SHADOW・Scheduler ENABLED)・LINE・本番判断への接続は
+#: 含まない ★(別の承認)。
+#: ★ `_SHADOW_FRAME_EXEMPT`(10 件)にも `_PRICE_REGIME_SHADOW_CONNECTION`(7 件)にも足していない ★。
+#: handler の根にだけ適用し、CLI の根には適用しない(CLI は 1 件も到達しない)。
+#: ★ 新しい handler の経由でしか到達できないこと・各行が必要なこと(1 件外すと offender)を、
+#: 下のテストが固定する ★
+_ROTATION_OBSERVATION_REASON: Final = "#604 P-b4 A1・USER #604 …6195577714 / #122 …6195577047"
+_ROTATION_OBSERVATION_HANDLER: Final = "jstock_advisor.lambda_handlers.rotation_observation_handler"
+_ROTATION_OBSERVATION_CONNECTION: Final = {
+    module: _ROTATION_OBSERVATION_REASON
+    for module in (
+        "jstock_advisor.domain.signals.capital_rotation",
+        "jstock_advisor.domain.signals.rotation_observation",
+        "jstock_advisor.domain.signals.rotation_observation_reads",
+        "jstock_advisor.domain.signals.rotation_observation_record",
+        "jstock_advisor.domain.signals.rotation_observation_schedule",
+        "jstock_advisor.domain.signals.rotation_source_eligibility",
+        "jstock_advisor.infrastructure.aws.rotation_observation_reader",
+        "jstock_advisor.infrastructure.aws.rotation_observation_scan",
+        _ROTATION_OBSERVATION_HANDLER,
+        "jstock_advisor.services.rotation_observation_config",
+        "jstock_advisor.services.rotation_observation_inputs",
+        "jstock_advisor.services.rotation_observation_ports",
+        "jstock_advisor.services.rotation_observation_runner",
+    )
+}
+#: handler の根が到達してよい『未接続の名前』の module = 3 つの表の和集合(完全一致)
+_HANDLER_ALLOWED: Final = (
+    set(_SHADOW_FRAME_EXEMPT)
+    | set(_PRICE_REGIME_SHADOW_CONNECTION)
+    | set(_ROTATION_OBSERVATION_CONNECTION)
+)
+
+
 def _is_unconnected_name(module: str) -> bool:
     return any(module == p or module.startswith(p + ".") for p in _UNCONNECTED_PREFIXES) or any(
         token in module for token in _UNCONNECTED_NAME_TOKENS
@@ -286,10 +326,9 @@ def test_no_handler_or_cli_reaches_an_unconnected_module() -> None:
     assert "jstock_advisor.domain.entities.enums" in reached  # 推移閉包が実際に深く辿れている
     handler = _reachable_from_root(_HANDLER_ROOT_PREFIX)
     cli = _reachable_from_root(_CLI_ROOT_PREFIX)
-    # handler の根: Shadow の枠(完全一致の免除)と、#877 PR-2b の局所許可(別表)だけが到達してよい。
-    # どちらにも無い名前は 1 つも許さない
-    allowed = set(_SHADOW_FRAME_EXEMPT) | set(_PRICE_REGIME_SHADOW_CONNECTION)
-    assert [m for m in _unconnected(handler) if m not in allowed] == []
+    # handler の根: Shadow の枠(完全一致の免除)・#877 PR-2b の局所許可(別表)・#604 P-b4 A1 の
+    # 局所許可(別表)だけが到達してよい。どれにも無い名前は 1 つも許さない
+    assert [m for m in _unconnected(handler) if m not in _HANDLER_ALLOWED] == []
     # CLI の根: 免除を適用しない(CLI は記録を辞書として読むだけで、重い module へ到達しない)
     assert _unconnected(cli) == []
 
@@ -305,8 +344,8 @@ def test_the_exemption_is_exactly_the_unconnected_modules_the_shadow_frame_reach
     reached_unconnected = _unconnected(handler)
 
     assert len(_SHADOW_FRAME_EXEMPT) == 10
-    # handler の根が到達する未接続の module = 免除 10 件 ∪ 別表 7 件(#877 PR-2b の局所許可)
-    allowed = set(_SHADOW_FRAME_EXEMPT) | set(_PRICE_REGIME_SHADOW_CONNECTION)
+    # handler の根が到達する未接続の module = 免除 10 件 ∪ 別表 7 件(#877)∪ 別表 13 件(#604 A1)
+    allowed = _HANDLER_ALLOWED
     assert reached_unconnected == sorted(allowed)
     for module in _SHADOW_FRAME_EXEMPT:  # 免除を外せば、全件が offender に挙がる
         remaining = allowed - {module}
@@ -318,7 +357,7 @@ def test_the_price_regime_connection_table_is_minimal_and_exact() -> None:
     """★ 別表(局所許可)の最小性 ★: 1 件外すと offender に挙がる(死んだ行を溜めない)。件数 7。"""
     handler = _reachable_from_root(_HANDLER_ROOT_PREFIX)
     reached_unconnected = _unconnected(handler)
-    allowed = set(_SHADOW_FRAME_EXEMPT) | set(_PRICE_REGIME_SHADOW_CONNECTION)
+    allowed = _HANDLER_ALLOWED
 
     assert len(_PRICE_REGIME_SHADOW_CONNECTION) == 7
     assert set(_PRICE_REGIME_SHADOW_CONNECTION) <= set(reached_unconnected)  # 全行が実際に到達する
@@ -332,8 +371,11 @@ def test_the_price_regime_connection_table_is_minimal_and_exact() -> None:
     assert all("exit_architecture" in m for m in _PRICE_REGIME_SHADOW_CONNECTION)
 
 
-def _reachable_without_expanding(roots: set[str], known: dict[str, Path], cut: str) -> set[str]:
+def _reachable_without_expanding(
+    roots: set[str], known: dict[str, Path], cut: str | set[str]
+) -> set[str]:
     """`cut` の module へは到達するが、その module の import(辺)は辿らない。"""
+    cuts = {cut} if isinstance(cut, str) else set(cut)
     seen: set[str] = set()
     stack = list(roots)
     while stack:
@@ -341,7 +383,7 @@ def _reachable_without_expanding(roots: set[str], known: dict[str, Path], cut: s
         if module in seen:
             continue
         seen.add(module)
-        if module == cut:
+        if module in cuts:
             continue
         stack.extend(_direct_imports(module, known[module], known) - seen)
     return seen
@@ -349,7 +391,12 @@ def _reachable_without_expanding(roots: set[str], known: dict[str, Path], cut: s
 
 def test_the_price_regime_modules_are_reachable_only_through_the_connector() -> None:
     """★ 経由の固定(局所許可の本体)★: 受け手の辺を除いた import グラフでは、handler の根から
-    別表の 7 件のどれにも到達しない = 『受け手を通る道しか無い』。"""
+    別表の 7 件のどれにも到達しない = 『受け手を通る道しか無い』。
+
+    ★ 7 件の package を import する src は C0 の契約テストが完全一致で固定している(受け手と
+    `capital_rotation`)。後者は #604 A1 の別表(新しい handler の経由でしか到達しない)に入るため、
+    2 つの import 元の辺を除いて確かめる ★
+    """
     known = _module_files()
     roots = _roots_of(known, _HANDLER_ROOT_PREFIX)
     assert _PRICE_REGIME_SHADOW_CONNECTOR in known
@@ -357,7 +404,11 @@ def test_the_price_regime_modules_are_reachable_only_through_the_connector() -> 
     assert _PRICE_REGIME_SHADOW_CONNECTOR in with_connector  # 受け手へは到達する(空振りでない)
     assert set(_PRICE_REGIME_SHADOW_CONNECTION) <= with_connector
 
-    cut = _reachable_without_expanding(roots, known, _PRICE_REGIME_SHADOW_CONNECTOR)
+    cut = _reachable_without_expanding(
+        roots,
+        known,
+        {_PRICE_REGIME_SHADOW_CONNECTOR, "jstock_advisor.domain.signals.capital_rotation"},
+    )
     assert not set(_PRICE_REGIME_SHADOW_CONNECTION) & cut
     assert not [m for m in cut if "exit_architecture" in m]
 
@@ -383,6 +434,73 @@ def test_neither_the_cli_root_nor_the_profit_taking_service_reaches_the_price_re
     assert service in closure
     assert not closure & set(_PRICE_REGIME_SHADOW_CONNECTION)
     assert _PRICE_REGIME_SHADOW_CONNECTOR not in closure
+
+
+def test_the_rotation_observation_table_is_minimal_and_exact() -> None:
+    """★ 別表(#604 A1)の最小性 ★: 1 件外すと offender に挙がる(死んだ行を溜めない)。件数 13。"""
+    handler = _reachable_from_root(_HANDLER_ROOT_PREFIX)
+    reached_unconnected = _unconnected(handler)
+
+    assert len(_ROTATION_OBSERVATION_CONNECTION) == 13
+    assert set(_ROTATION_OBSERVATION_CONNECTION) <= set(reached_unconnected)  # 全行が実際に到達する
+    assert not set(_ROTATION_OBSERVATION_CONNECTION) & set(_SHADOW_FRAME_EXEMPT)  # 他の表とは別
+    assert not set(_ROTATION_OBSERVATION_CONNECTION) & set(_PRICE_REGIME_SHADOW_CONNECTION)
+    for module in _ROTATION_OBSERVATION_CONNECTION:  # 1 件外せば、その module が offender に挙がる
+        remaining = _HANDLER_ALLOWED - {module}
+        assert [m for m in reached_unconnected if m not in remaining] == [module]
+    assert all(
+        why == _ROTATION_OBSERVATION_REASON for why in _ROTATION_OBSERVATION_CONNECTION.values()
+    )
+
+
+def test_the_rotation_observation_modules_are_reachable_only_through_the_new_handler() -> None:
+    """★ 経由の固定 ★: 新しい handler を根から外すと、別表の 13 件のどれにも到達しない。
+
+    = 既存の BUY / SELL / 保有 / レビュー等の handler からは、P の module へ 1 本の道も無い
+    (P を既存の関数へ相乗りさせると、ここで落ちる)。
+    """
+    known = _module_files()
+    assert _ROTATION_OBSERVATION_HANDLER in known
+    all_roots = _roots_of(known, _HANDLER_ROOT_PREFIX)
+    assert _ROTATION_OBSERVATION_HANDLER in all_roots
+    assert set(_ROTATION_OBSERVATION_CONNECTION) <= _reachable(all_roots, known)  # 空振りでない
+
+    others = _reachable(all_roots - {_ROTATION_OBSERVATION_HANDLER}, known)
+    assert not set(_ROTATION_OBSERVATION_CONNECTION) & others
+
+
+def test_nothing_imports_the_new_handler_and_the_cli_reaches_none_of_the_table() -> None:
+    known = _module_files()
+    importers = sorted(
+        path.relative_to(_PACKAGE).as_posix()
+        for module, path in known.items()
+        if module != _ROTATION_OBSERVATION_HANDLER
+        and _ROTATION_OBSERVATION_HANDLER in _direct_imports(module, path, known)
+    )
+    assert importers == []  # handler は Lambda の入口で、他の module から import されない
+    cli = _reachable_from_root(_CLI_ROOT_PREFIX)
+    assert not cli & set(_ROTATION_OBSERVATION_CONNECTION)  # CLI に免除は無い
+
+
+def test_exit_architecture_is_reached_from_the_new_handler_only_via_capital_rotation() -> None:
+    """P の閉包は `capital_rotation`(型)経由で exit_architecture の一部へも到達する(7 件の内)。
+
+    ★ 本テストが固定するのは exit_architecture だけ ★。同じ `capital_rotation` 経由で届く RAER・
+    配分・期待リターンの module は、`test_raer_contract.py` の
+    `test_the_rotation_observation_handler_reaches_raer_only_through_capital_rotation` が固定する。
+
+    ★ 経由は `capital_rotation` だけ ★(C0 の契約テストが、package を import する src の完全一致
+    〔`capital_rotation` と受け手〕を固定している)。P の handler 自体は package を import しない。
+    """
+    known = _module_files()
+    capital = "jstock_advisor.domain.signals.capital_rotation"
+    cut = _reachable_without_expanding({_ROTATION_OBSERVATION_HANDLER}, known, capital)
+    assert capital in cut
+    assert not [m for m in cut if "exit_architecture" in m]  # capital_rotation の辺を除くと無い
+    full = _reachable({_ROTATION_OBSERVATION_HANDLER}, known)
+    reached = {m for m in full if "exit_architecture" in m}
+    assert reached  # 空振りでない: 辺を戻すと到達する
+    assert reached <= set(_PRICE_REGIME_SHADOW_CONNECTION)  # 別表の 7 件の内だけ
 
 
 def test_the_connector_is_outside_the_name_net_and_is_not_exempt() -> None:
@@ -1269,11 +1387,24 @@ _A_128_CONFIG_FILES = {
     "allocation_shadow.yaml": "SHADOW_MODE_SWITCH_SHIPPED_OFF",
     # #602 PR-E: RAER の承認済みの係数の置き場。有効化の入口ではない(下の専用テストで固定)
     "raer_coefficients.yaml": "COEFFICIENT_VALUES_ONLY",
+    # #604 P-b4 A1: 資金入替の観測 P の mode(OFF / SHADOW のみ。出荷 OFF。購入側とは別の入口)。
+    # USER 承認: #604 …6195577714。完全一致で承認する(下の専用テストで中身を固定)
+    "rotation_observation.yaml": "P_MODE_SWITCH_SHIPPED_OFF",
 }
 
 
+#: config 名の網(#606)。`_FEATURE_TOKEN` に P の名前(`rotation_observation`)を足したもの。
+#: ★ 網を広げる変更 ★(P の設定ファイルは、下の完全一致の許可リストで承認する)
+_CONFIG_NAME_TOKEN = re.compile(
+    r"(allocation|expected_return|raer|capital_rotation|today_actions|rotation_observation)",
+    re.IGNORECASE,
+)
+
+
 def test_the_only_config_files_for_a_128_feature_are_the_off_shadow_and_the_policy_values() -> None:
-    by_name = sorted(p.name for p in _SHIPPED_CONFIG_DIR.iterdir() if _FEATURE_TOKEN.search(p.name))
+    by_name = sorted(
+        p.name for p in _SHIPPED_CONFIG_DIR.iterdir() if _CONFIG_NAME_TOKEN.search(p.name)
+    )
     assert by_name == sorted(_A_128_CONFIG_FILES)
     by_content = sorted(
         p.name
@@ -1283,6 +1414,26 @@ def test_the_only_config_files_for_a_128_feature_are_the_off_shadow_and_the_poli
         and re.search(r"(expected_return|raer\b|allocation)", p.read_text(encoding="utf-8"))
     )
     assert by_content == []
+
+
+def test_the_rotation_observation_config_is_the_off_switch_and_nothing_else() -> None:
+    """★ P の mode の設定: 出荷値 OFF・OFF / SHADOW だけ・ACTIVE なし・キーは 2 つだけ ★。"""
+    from jstock_advisor.services.rotation_observation_config import (  # noqa: PLC0415
+        load_rotation_observation_config,
+    )
+    from jstock_advisor.services.rotation_observation_runner import (  # noqa: PLC0415
+        RotationObserverMode,
+    )
+
+    text = (_SHIPPED_CONFIG_DIR / "rotation_observation.yaml").read_text(encoding="utf-8")
+    assert re.search(r'^mode:\s*"OFF"\s*$', text, flags=re.MULTILINE)
+    data = yaml.safe_load(text)
+    assert set(data) == {"version", "mode"}
+    assert load_rotation_observation_config(_SHIPPED_CONFIG_DIR).mode is RotationObserverMode.OFF
+    assert {m.value for m in RotationObserverMode} == {"OFF", "SHADOW"}  # ACTIVE は存在しない
+    # 購入側 Shadow の設定とは別のファイル・別の入口(共有しない)
+    assert "allocation" not in text.lower()
+    assert _A_128_CONFIG_FILES["rotation_observation.yaml"] == "P_MODE_SWITCH_SHIPPED_OFF"
 
 
 def _all_yaml_keys(value: object) -> list[str]:

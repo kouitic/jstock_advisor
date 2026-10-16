@@ -5700,6 +5700,14 @@ shadow の記録は追記のみで削除しない。表・IAM は、既存の戻
   〔1 件外すと offender〕・受け手を import する src の完全一致・CLI の根と利確判定サービスの import の閉包が到達しないこと ★ を固定している。
   閾値の供給元は常に None(閾値 3 値は USER 判断として保留)のため、本番では何も組み立てず・分類せず・保存・通知しない。
   信頼性の供給元が決まるまで分類を呼ばない。名前の網〔token・prefix〕は 1 語も消していない
+・★ 限定した接続を 1 件認めた(#604 P-b4 A1。承認の記録 = #604 …6195577714・#122 …6195577047)★: 資金入替の観測 P の新しい handler
+  (`lambda_handlers/rotation_observation_handler.py`)の閉包だけ。handler の根にだけ、契約テストの『別表(完全一致 13 件)』を認めた
+  (免除 10 件・#877 の別表 7 件には足していない)。★ 新しい handler を根から外すと 13 件のどれにも到達しないこと・別表の各行が必要なこと
+  〔1 件外すと offender〕・CLI の根が 1 件も到達しないこと・handler を import する src が 0 件であること ★ を固定している。config 名の網へ
+  `rotation_observation` を足し、`rotation_observation.yaml`(mode。出荷 OFF)だけを完全一致で認めた。P の閉包は LINE・EDINET・秘密・GitHub の
+  module へ到達せず、呼ぶ DynamoDB 操作は GetItem・BatchGetItem・Query・Scan(HoldingsTableV2 の 1 表・200 件 / 3 ページ / 時間の上限)・PutItem
+  (AuditLog への『日の集計』1 件 / 日)だけ。★ 本承認に含まないもの = template・Scheduler・IAM(A2)・本番 deploy・SHA pin・ChangeSet の CREATE /
+  EXECUTE・Scheduler の ENABLED・mode SHADOW・LINE・本番判断への接続(それぞれ別の USER 判断)★。名前の網〔token・prefix〕は 1 語も消していない
 ・本節が存在し、各段の入口・出口・記録・停止条件、USER の明示的な承認、戻し方、決めていないことを含み、閾値・期間の数値を書かないこと
 ```
 

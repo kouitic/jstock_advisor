@@ -495,8 +495,10 @@ def test_the_module_reads_no_clock_no_environment_and_calls_no_aws_operation() -
 
 
 def test_nothing_in_src_imports_the_module_yet() -> None:
-    """dormant: P-b3 の runner の配線(P-b4)まで、どこからも import されない。"""
-    assert _importers_of("rotation_observation_inputs", _MODULE_PATH) == []
+    """P-b4 A1 の ports(`ScanHoldingInputs`)だけが import する(handler は ports 経由)。"""
+    assert _importers_of("rotation_observation_inputs", _MODULE_PATH) == [
+        "services/rotation_observation_ports.py"
+    ]
 
 
 def test_the_module_is_importable_by_name() -> None:

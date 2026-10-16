@@ -515,6 +515,13 @@ _REVIEW_REJECTS_MODE = (
     "reject_execution_mode() が指定を検出して例外で止める"
 )
 
+#: 資金入替の観測 P(#604 P-b4 A1)も、execution_mode / notification_mode を読まない。
+#: review 系と同じ `reject_execution_mode()` で、渡されたら黙殺せず例外で止める
+_ROTATION_OBSERVATION_REJECTS_MODE = (
+    "#604 P-b4 A1: P は execution_mode / notification_mode を読まない(隔離が無い)ため、"
+    "reject_execution_mode() が指定を検出して例外で止める"
+)
+
 #: handler × dimension の契約台帳。
 #: **lambda_handlers へ handler module を追加したらここへも登録しないと CI が落ちる。**
 _CONTEXT_CONTRACT_MATRIX: dict[str, dict[_Dimension, _ContractCell]] = {
@@ -710,6 +717,19 @@ _CONTEXT_CONTRACT_MATRIX: dict[str, dict[_Dimension, _ContractCell]] = {
         _Dimension.EXECUTION_MODE: _cell(_ContractStatus.REJECTS_EXPLICITLY, _REVIEW_REJECTS_MODE),
         _Dimension.NOTIFICATION_MODE: _cell(
             _ContractStatus.REJECTS_EXPLICITLY, _REVIEW_REJECTS_MODE
+        ),
+        _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
+            _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
+        ),
+        _Dimension.JOB_TYPE: _cell(_ContractStatus.NOT_APPLICABLE, _NA_NO_JOB_TYPE),
+    },
+    # #604 P-b4 A1: 資金入替の観測 P(読取専用 + AuditLog へ日の集計 1 件。mode は設定ファイル)
+    "rotation_observation_handler": {
+        _Dimension.EXECUTION_MODE: _cell(
+            _ContractStatus.REJECTS_EXPLICITLY, _ROTATION_OBSERVATION_REJECTS_MODE
+        ),
+        _Dimension.NOTIFICATION_MODE: _cell(
+            _ContractStatus.REJECTS_EXPLICITLY, _ROTATION_OBSERVATION_REJECTS_MODE
         ),
         _Dimension.TRADE_DETECTION_CONFIRMED: _cell(
             _ContractStatus.NOT_APPLICABLE, _NA_NO_TRADE_DETECTION
