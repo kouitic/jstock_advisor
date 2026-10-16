@@ -720,11 +720,16 @@ def _importers_of(target: str, own: Path) -> list[str]:
 
 
 def test_only_the_p_b_modules_import_it_so_it_is_dormant() -> None:
-    """dormant: P-b の記録の形・入力の組み立て・reader・runner だけ。配線は P-b4。"""
+    """P-b の module だけ(記録の形・reader・Scan の proxy・入力の組み立て・ports・runner)。
+
+    handler(P-b4 A1)は ports・runner を経由するだけで、この module を直接 import しない。
+    """
     assert _importers_of("rotation_observation", _MODULE_PATH) == [
         "domain/signals/rotation_observation_record.py",
         "infrastructure/aws/rotation_observation_reader.py",
+        "infrastructure/aws/rotation_observation_scan.py",
         "services/rotation_observation_inputs.py",
+        "services/rotation_observation_ports.py",
         "services/rotation_observation_runner.py",
     ]
 

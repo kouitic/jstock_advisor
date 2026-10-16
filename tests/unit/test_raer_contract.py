@@ -910,6 +910,44 @@ def test_reachability_helper_follows_chains_and_relative_imports(tmp_path: Path)
     assert "pkg.orphan" not in reached
 
 
+_ROTATION_OBSERVATION_HANDLER = "jstock_advisor.lambda_handlers.rotation_observation_handler"
+_CAPITAL_ROTATION = "jstock_advisor.domain.signals.capital_rotation"
+
+
+def test_the_rotation_observation_handler_reaches_raer_only_through_capital_rotation() -> None:
+    """P の handler(#604 P-b4 A1)が RAER へ到達する道は、`capital_rotation`(型)だけ。
+
+    承認の記録 = USER 決定 #604 …6195577714(P-b4 の A1)。P は観測の記録を作るだけで、RAER を
+    計算しない(`capital_rotation` を import するのは入替元の適格性の型のため)。
+    `capital_rotation` の辺を除くと RAER・配分・期待リターンのどれにも到達しない = 道は 1 本。
+
+    ★ 本テストが固定するのは RAER・配分・期待リターンの 3 つだけ ★(網羅ではない)。P の handler が
+    `capital_rotation` 経由で届く `exit_architecture` の module は、#606 の gate の
+    `test_exit_architecture_is_reached_from_the_new_handler_only_via_capital_rotation` と
+    C0 の契約テストが固定している(片方だけ読んで『全部固定済み』と誤解しない)。
+    """
+    known = _module_files(_SRC)
+    assert _ROTATION_OBSERVATION_HANDLER in known and _CAPITAL_ROTATION in known
+    raer = "jstock_advisor.domain.valuation.raer"
+
+    cut: set[str] = set()
+    stack = [_ROTATION_OBSERVATION_HANDLER]
+    while stack:
+        module = stack.pop()
+        if module in cut:
+            continue
+        cut.add(module)
+        if module == _CAPITAL_ROTATION:
+            continue  # この module へは到達するが、その import は辿らない
+        stack.extend(_direct_imports(module, known[module], known) - cut)
+    full = _reachable({_ROTATION_OBSERVATION_HANDLER}, known)
+
+    assert _CAPITAL_ROTATION in cut
+    assert raer in full  # 辺を戻すと到達する(空振りでない)
+    names = ("valuation.raer", "portfolio_allocation", "expected_return")
+    assert not [m for m in cut if any(token in m for token in names)]
+
+
 def test_the_new_module_is_reachable_from_handlers_only_through_the_shadow_wiring() -> None:
     """RAER が handler・CLI から到達できる入口は、出荷 SHADOW の Shadow の配線だけ(#603 PR-F2-2b)。
 
@@ -925,6 +963,10 @@ def test_the_new_module_is_reachable_from_handlers_only_through_the_shadow_wirin
         if m.startswith(("jstock_advisor.lambda_handlers.", "jstock_advisor.cli."))
         or m in {"jstock_advisor.lambda_handlers", "jstock_advisor.cli"}
     }
+    # 資金入替の観測 P の handler(#604 P-b4 A1)は別の承認された入口。型(`capital_rotation`)経由の
+    # 到達は下の専用テストで固定する(この根からは外す)
+    assert _ROTATION_OBSERVATION_HANDLER in roots
+    roots -= {_ROTATION_OBSERVATION_HANDLER}
     assert len(roots) > 20
 
     reached = _reachable(roots, known)
