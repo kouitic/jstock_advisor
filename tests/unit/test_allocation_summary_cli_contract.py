@@ -323,6 +323,22 @@ def test_the_json_output_is_the_report_dict(monkeypatch: pytest.MonkeyPatch) -> 
     assert payload["counting_rule_source"].endswith("(USER 承認済みの暫定ルール)")
 
 
+@pytest.mark.parametrize("by_owner", [False, True])
+def test_the_json_carries_the_two_notices_like_the_detail_screen(
+    monkeypatch: pytest.MonkeyPatch, by_owner: bool
+) -> None:
+    """#992(USER 確定 #122): 共有に使われる JSON にも、注意書き 2 つを明記する(detail と同一)。"""
+    _use(monkeypatch, FakeSource((_FRI, _TUE)))
+    extra = ["--by-owner"] if by_owner else []
+    payload = json.loads(
+        _run(*_local(_FRI, _TUE, "--target-days", "2", "--format", "json", *extra)).stdout
+    )
+    assert payload["notices"] == [
+        "この出力は利用者の端末だけで確認してください(Issue・PR などの公開面へ貼らない)",
+        "これは Shadow の試験結果であり、実際の投資判断ではありません",
+    ]
+
+
 # =================================================================================================
 # 読取専用(AST)
 # =================================================================================================

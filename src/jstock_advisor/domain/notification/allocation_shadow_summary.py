@@ -38,6 +38,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Final
 
+from jstock_advisor.domain.notification.allocation_shadow_cli_renderer import NOTICES
 from jstock_advisor.domain.notification.allocation_shadow_cli_view import (
     AllocationShadowScreen,
     CandidateRow,
@@ -977,6 +978,9 @@ def report_to_dict(
     """レポート + 集計 → 辞書。★ owner 別は include_by_owner=True のときだけ(公開面へ貼らない)★。"""
     out: dict[str, Any] = {
         "schema_version": SUMMARY_SCHEMA_VERSION,
+        # 注意書き 2 つ(today / detail と同一の定義。USER の確定 #122・#992)。
+        # JSON は共有に使われやすい
+        "notices": list(NOTICES),
         "counting_rule_source": report.rule_source,
         "target_days": report.target_days,
         "counted_days": report.counted_days,

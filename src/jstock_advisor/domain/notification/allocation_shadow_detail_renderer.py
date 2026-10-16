@@ -20,6 +20,9 @@ from typing import Any, Final
 from jstock_advisor.domain.notification.allocation_shadow_cli_renderer import (
     DISCLAIMER,
     LABEL_NOTICE,
+    NOTICE_NO_PUBLIC_SURFACE,  # noqa: F401 - 再公開(既存の `detail_renderer.NOTICE_*` の参照を保つ)
+    NOTICE_NOT_INVESTMENT_ADVICE,  # noqa: F401 - 同上
+    NOTICES,
     _opt,
     _reason_text,
     _row_json,
@@ -210,12 +213,8 @@ def _owner_title_of(owner: OwnerDetail, *, show_labels: bool) -> str:
     return owner.display_ref
 
 
-NOTICE_NO_PUBLIC_SURFACE: Final = (
-    "この出力は利用者の端末だけで確認してください(Issue・PR などの公開面へ貼らない)"
-)
-NOTICE_NOT_INVESTMENT_ADVICE: Final = "これは Shadow の試験結果であり、実際の投資判断ではありません"
-# 表の末尾・JSON の `notices` の両方が使う(USER の確定 #122: 出力方法によらず 2 つとも明記する)
-NOTICES: Final = (NOTICE_NO_PUBLIC_SURFACE, NOTICE_NOT_INVESTMENT_ADVICE)
+# 注意書きの定義は `allocation_shadow_cli_renderer`(3 画面の共有の基盤。#992)。
+# この module では同じ名前で参照する(表の末尾・JSON の `notices` の両方が使う。#122)。
 
 
 def render_detail_table(

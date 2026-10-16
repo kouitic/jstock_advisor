@@ -1,0 +1,947 @@
+{
+  "today_json": {
+    "schema_version": 1,
+    "disclaimer": "試験運用:投資判断には使いません(資金配分 Shadow。LINE には送られません)",
+    "business_date": "2026-10-14",
+    "state": "COMPLETE",
+    "state_text": "すべての所有者の記録があります",
+    "complete": true,
+    "index": {
+      "key_version": "1",
+      "attempted_owner_count": "1",
+      "recorded_owner_count": "1",
+      "unrecorded_owner_count": "0",
+      "unrecorded_reasons": [],
+      "owner_refs_truncated": false
+    },
+    "skip": null,
+    "owners": [
+      {
+        "ref": "kv1.1:c7ba0ffb5449d53b1d2947ea",
+        "display_ref": "owner-c7ba0f",
+        "status": "OK",
+        "outcome": {
+          "code": "COMPUTED",
+          "text": "計算できた"
+        },
+        "run_status": {
+          "code": "ALLOCATED_SOME",
+          "text": "配分あり"
+        },
+        "skip_reason": null,
+        "unavailable_reason": null,
+        "available_cash": "10,000,000円",
+        "last_reconciled_at": "2026-10-11T09:05:00+09:00",
+        "portfolio_value": "50,000,000円",
+        "expected_remaining_cash": "5,000,000円",
+        "allocated_count": 1,
+        "not_allocated_count": 1,
+        "incomplete_reasons": [],
+        "exclusions": [],
+        "model_version": "raer-combined-v1-provisional",
+        "policy_id": "p1",
+        "contract_version": "c1",
+        "shadow_mode": "SHADOW",
+        "candidates_truncated": 0,
+        "unparsed": 0,
+        "candidates": [
+          {
+            "readable": true,
+            "seq": "1",
+            "stock_code": "0001",
+            "buy_action": {
+              "code": "BUY",
+              "text": "購入候補"
+            },
+            "raer": {
+              "value": "35.400",
+              "state": {
+                "code": "PROVISIONAL",
+                "text": "暫定"
+              },
+              "confidence": "MEDIUM"
+            },
+            "rank": "1",
+            "decision": {
+              "code": "ALLOCATED",
+              "text": "配分"
+            },
+            "shares": "5000",
+            "required_funds": "5,000,000円",
+            "shortfall": null,
+            "remaining_cash": "5,000,000円",
+            "reason": {
+              "code": "ALLOCATED",
+              "text": "配分しました"
+            }
+          },
+          {
+            "readable": true,
+            "seq": "2",
+            "stock_code": "0002",
+            "buy_action": {
+              "code": "SMALL_ENTRY",
+              "text": "打診購入候補"
+            },
+            "raer": {
+              "value": "20.1",
+              "state": {
+                "code": "PROVISIONAL",
+                "text": "暫定"
+              },
+              "confidence": "LOW"
+            },
+            "rank": "2",
+            "decision": {
+              "code": "NOT_ALLOCATED",
+              "text": "見送り"
+            },
+            "shares": null,
+            "required_funds": "6,000,000円",
+            "shortfall": "1,000,000円",
+            "remaining_cash": null,
+            "reason": {
+              "code": "INSUFFICIENT_CASH_REMAINING",
+              "text": "買付余力が残っていないため見送り"
+            }
+          }
+        ]
+      }
+    ],
+    "missing_refs": [],
+    "schema_version_seen": "1",
+    "unparsed": 0,
+    "over_cap_refs": 0
+  },
+  "today_json_with_labels": {
+    "schema_version": 1,
+    "disclaimer": "試験運用:投資判断には使いません(資金配分 Shadow。LINE には送られません)",
+    "business_date": "2026-10-14",
+    "state": "COMPLETE",
+    "state_text": "すべての所有者の記録があります",
+    "complete": true,
+    "index": {
+      "key_version": "1",
+      "attempted_owner_count": "1",
+      "recorded_owner_count": "1",
+      "unrecorded_owner_count": "0",
+      "unrecorded_reasons": [],
+      "owner_refs_truncated": false
+    },
+    "skip": null,
+    "owners": [
+      {
+        "ref": "kv1.1:c7ba0ffb5449d53b1d2947ea",
+        "display_ref": "owner-c7ba0f",
+        "status": "OK",
+        "outcome": {
+          "code": "COMPUTED",
+          "text": "計算できた"
+        },
+        "run_status": {
+          "code": "ALLOCATED_SOME",
+          "text": "配分あり"
+        },
+        "skip_reason": null,
+        "unavailable_reason": null,
+        "available_cash": "10,000,000円",
+        "last_reconciled_at": "2026-10-11T09:05:00+09:00",
+        "portfolio_value": "50,000,000円",
+        "expected_remaining_cash": "5,000,000円",
+        "allocated_count": 1,
+        "not_allocated_count": 1,
+        "incomplete_reasons": [],
+        "exclusions": [],
+        "model_version": "raer-combined-v1-provisional",
+        "policy_id": "p1",
+        "contract_version": "c1",
+        "shadow_mode": "SHADOW",
+        "candidates_truncated": 0,
+        "unparsed": 0,
+        "candidates": [
+          {
+            "readable": true,
+            "seq": "1",
+            "stock_code": "0001",
+            "buy_action": {
+              "code": "BUY",
+              "text": "購入候補"
+            },
+            "raer": {
+              "value": "35.400",
+              "state": {
+                "code": "PROVISIONAL",
+                "text": "暫定"
+              },
+              "confidence": "MEDIUM"
+            },
+            "rank": "1",
+            "decision": {
+              "code": "ALLOCATED",
+              "text": "配分"
+            },
+            "shares": "5000",
+            "required_funds": "5,000,000円",
+            "shortfall": null,
+            "remaining_cash": "5,000,000円",
+            "reason": {
+              "code": "ALLOCATED",
+              "text": "配分しました"
+            }
+          },
+          {
+            "readable": true,
+            "seq": "2",
+            "stock_code": "0002",
+            "buy_action": {
+              "code": "SMALL_ENTRY",
+              "text": "打診購入候補"
+            },
+            "raer": {
+              "value": "20.1",
+              "state": {
+                "code": "PROVISIONAL",
+                "text": "暫定"
+              },
+              "confidence": "LOW"
+            },
+            "rank": "2",
+            "decision": {
+              "code": "NOT_ALLOCATED",
+              "text": "見送り"
+            },
+            "shares": null,
+            "required_funds": "6,000,000円",
+            "shortfall": "1,000,000円",
+            "remaining_cash": null,
+            "reason": {
+              "code": "INSUFFICIENT_CASH_REMAINING",
+              "text": "買付余力が残っていないため見送り"
+            }
+          }
+        ],
+        "label": "ラベルA"
+      }
+    ],
+    "missing_refs": [],
+    "schema_version_seen": "1",
+    "unparsed": 0,
+    "over_cap_refs": 0
+  },
+  "today_table": "試験運用:投資判断には使いません(資金配分 Shadow。LINE には送られません)\n資金配分 Shadow  対象日: 2026-10-14\n状況: すべての所有者の記録があります\n索引: 記録済み 1 件 / 未記録 0 件 / 試行 1 件(鍵の版 1)\n\n■ 所有者: ラベルA(owner-c7ba0f)\n  結果: 計算できた / 配分あり\n  買付余力: 10,000,000円(最終棚卸し 2026-10-11T09:05:00+09:00)   ポートフォリオ評価額: 50,000,000円\n  RAER の版: raer-combined-v1-provisional(暫定式)  方針: p1  契約: c1  評価モード: SHADOW\n  結論: 購入 1 件 / 購入しない候補 1 件   見込み残高(目安): 5,000,000円\n  ■ 購入候補(RAER の高い順)\n  | 順位 | 銘柄 | 銘柄単独の判断 | RAER        | 結果   | 推奨株数 | 必要資金                      | 残余資金    | 理由                                                          |\n  |------|------|----------------|-------------|--------|----------|-------------------------------|-------------|---------------------------------------------------------------|\n  |    1 | 0001 | 購入候補       | 35.400 暫定 | 配分   |     5000 |                   5,000,000円 | 5,000,000円 | 配分しました(ALLOCATED)                                       |\n  |    2 | 0002 | 打診購入候補   |   20.1 暫定 | 見送り |        - | 6,000,000円(不足 1,000,000円) |           - | 買付余力が残っていないため見送り(INSUFFICIENT_CASH_REMAINING) |\n\n※ この表には表示名(ラベル)が含まれます。共有するときは --format json を使うか、表示名を伏せてください\n",
+  "summary_json": {
+    "schema_version": 1,
+    "counting_rule_source": "kouitic/jstock_advisor#128 issuecomment-6165459615 の 2 節(USER 承認済みの暫定ルール)",
+    "target_days": 2,
+    "counted_days": 2,
+    "expected_days_total": 2,
+    "reached": true,
+    "first_counted_date": "2026-10-09",
+    "tenth_counted_date": "2026-10-13",
+    "projected_tenth_date_if_all_remaining_days_count": null,
+    "not_counted": {},
+    "versions_periods": 1,
+    "days": [
+      {
+        "business_date": "2026-10-09",
+        "counted": true,
+        "not_counted": null,
+        "state": "COMPLETE",
+        "computed_owners": 1,
+        "skipped_owners": 0,
+        "failed_owners": 0,
+        "other_owners": 0,
+        "unparsed": 0,
+        "attempted": 1,
+        "recorded": 1,
+        "missing_count": 0,
+        "read_failure": null
+      },
+      {
+        "business_date": "2026-10-13",
+        "counted": true,
+        "not_counted": null,
+        "state": "COMPLETE",
+        "computed_owners": 1,
+        "skipped_owners": 0,
+        "failed_owners": 0,
+        "other_owners": 0,
+        "unparsed": 0,
+        "attempted": 1,
+        "recorded": 1,
+        "missing_count": 0,
+        "read_failure": null
+      }
+    ],
+    "periods": [
+      {
+        "model_version": "raer-combined-v1-provisional",
+        "policy_id": "p1",
+        "contract_version": "c1",
+        "shadow_mode": "SHADOW",
+        "first_date": "2026-10-09",
+        "last_date": "2026-10-13",
+        "day_count": 2,
+        "measures": [
+          {
+            "key": "owner_kinds",
+            "title": "owner-日の結果の種別",
+            "deliverable": 1,
+            "unit": "owner-日",
+            "denominator": 2,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "COMPUTED": 2
+            }
+          },
+          {
+            "key": "owner_computed_rate",
+            "title": "計算できた owner-日の割合",
+            "deliverable": 2,
+            "unit": "owner-日",
+            "denominator": 2,
+            "classification": "UNCLASSIFIED",
+            "count": 2,
+            "rate": "1.0000"
+          },
+          {
+            "key": "skip_reasons",
+            "title": "owner の見送り(SKIPPED)の理由別の件数",
+            "deliverable": 3,
+            "unit": "owner-日(SKIPPED)",
+            "denominator": 0,
+            "classification": "NEEDS_MORE_OBSERVATION",
+            "status": "測れない"
+          },
+          {
+            "key": "run_status",
+            "title": "owner-日の配分の実行結果",
+            "deliverable": 2,
+            "unit": "owner-日(記録あり)",
+            "denominator": 2,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "ALLOCATED_SOME": 2
+            }
+          },
+          {
+            "key": "unavailable_reasons",
+            "title": "算出不能の理由コード別の件数(欠損理由)",
+            "deliverable": 3,
+            "unit": "owner-日(記録あり)",
+            "denominator": 2,
+            "classification": "UNCLASSIFIED"
+          },
+          {
+            "key": "raer_states",
+            "title": "候補の RAER の状態",
+            "deliverable": 2,
+            "unit": "候補",
+            "denominator": 4,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "PROVISIONAL": 4
+            }
+          },
+          {
+            "key": "raer_available_rate",
+            "title": "RAER が算出できた候補の割合(算出 + 暫定)",
+            "deliverable": 2,
+            "unit": "候補",
+            "denominator": 4,
+            "classification": "UNCLASSIFIED",
+            "count": 4,
+            "rate": "1.0000"
+          },
+          {
+            "key": "raer_unavailable_rate",
+            "title": "RAER が算出できなかった候補の割合",
+            "deliverable": 2,
+            "unit": "候補",
+            "denominator": 4,
+            "classification": "UNCLASSIFIED",
+            "count": 0,
+            "rate": "0.0000"
+          },
+          {
+            "key": "raer_value_present_rate",
+            "title": "RAER の値が記録された候補の割合",
+            "deliverable": 2,
+            "unit": "候補",
+            "denominator": 4,
+            "classification": "UNCLASSIFIED",
+            "count": 4,
+            "rate": "1.0000"
+          },
+          {
+            "key": "buy_actions",
+            "title": "候補の購入判定の分布",
+            "deliverable": 5,
+            "unit": "候補",
+            "denominator": 4,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "BUY": 2,
+              "SMALL_ENTRY": 2
+            }
+          },
+          {
+            "key": "decisions",
+            "title": "候補の配分結果(配分 / 見送り)",
+            "deliverable": 5,
+            "unit": "候補",
+            "denominator": 4,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "ALLOCATED": 2,
+              "NOT_ALLOCATED": 2
+            }
+          },
+          {
+            "key": "allocation_reasons",
+            "title": "候補の配分・見送りの理由コード別の件数",
+            "deliverable": 6,
+            "unit": "候補",
+            "denominator": 4,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "ALLOCATED": 2,
+              "INSUFFICIENT_CASH_REMAINING": 2
+            }
+          },
+          {
+            "key": "ranks",
+            "title": "順位別の候補数",
+            "deliverable": 5,
+            "unit": "候補",
+            "denominator": 4,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "1": 2,
+              "2": 2
+            }
+          },
+          {
+            "key": "allocated_per_owner_day",
+            "title": "owner-日あたりの配分された候補の数の分布",
+            "deliverable": 5,
+            "unit": "owner-日(記録あり)",
+            "denominator": 2,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "1": 2
+            }
+          },
+          {
+            "key": "remaining_cash_stage",
+            "title": "残余資金の段階(目安。金額は出さない)",
+            "deliverable": 5,
+            "unit": "owner-日(記録あり)",
+            "denominator": 2,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "POSITIVE": 2
+            }
+          },
+          {
+            "key": "exclusions",
+            "title": "候補の除外理由別の件数",
+            "deliverable": 6,
+            "unit": "候補の除外(件数の合計)",
+            "denominator": 0,
+            "classification": "NEEDS_MORE_OBSERVATION",
+            "status": "測れない"
+          },
+          {
+            "key": "incomplete_reasons",
+            "title": "入力の不足の理由別の件数(データ品質)",
+            "deliverable": 8,
+            "unit": "owner-日(記録あり)",
+            "denominator": 2,
+            "classification": "UNCLASSIFIED"
+          },
+          {
+            "key": "raer_by_buy_action",
+            "title": "購入判定別の RAER の算出可否(属性の偏り)",
+            "deliverable": 8,
+            "unit": "候補",
+            "denominator": 4,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "BUY:AVAILABLE": 2,
+              "SMALL_ENTRY:AVAILABLE": 2
+            }
+          },
+          {
+            "key": "cash_staleness_days",
+            "title": "買付余力の最終照合日からの経過日数の分布(データの鮮度)",
+            "deliverable": 8,
+            "unit": "owner-日(記録あり)",
+            "denominator": 2,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "-2": 1,
+              "2": 1
+            }
+          },
+          {
+            "key": "unavailable_by_staleness",
+            "title": "経過日数別の算出不能(UNAVAILABLE)の owner-日",
+            "deliverable": 8,
+            "unit": "owner-日(記録あり)",
+            "denominator": 2,
+            "classification": "UNCLASSIFIED"
+          },
+          {
+            "key": "candidates_truncated",
+            "title": "記録の上限で切り詰められた候補の件数",
+            "deliverable": 3,
+            "unit": "候補",
+            "denominator": 4,
+            "classification": "UNCLASSIFIED",
+            "count": 0,
+            "rate": "0.0000"
+          }
+        ]
+      }
+    ],
+    "improvement_candidates": [
+      {
+        "summary": "配分しなかった(見送り・制限)理由が記録されている",
+        "facts": "理由別 INSUFFICIENT_CASH_REMAINING=2",
+        "logic": "B",
+        "frequency": "候補 2 件",
+        "related_issues": [
+          "#603",
+          "#934",
+          "#960"
+        ],
+        "interpretation": "初案・未確定(⑤投資判断への影響 ⑥原因仮説 ⑦改善の方向性 ⑧優先度は人が書く)"
+      },
+      {
+        "summary": "事後の評価(バックテスト)は未実施",
+        "facts": "NOT_MEASURABLE の項目(閾値・係数の妥当性・事後の値動きとの比較)",
+        "logic": "D",
+        "frequency": "全期間",
+        "related_issues": [
+          "#934",
+          "#960"
+        ],
+        "interpretation": "初案・未確定(⑤投資判断への影響 ⑥原因仮説 ⑦改善の方向性 ⑧優先度は人が書く)"
+      }
+    ],
+    "not_measurable": [
+      {
+        "deliverable": 4,
+        "title": "RAER 構成要素の寄与度(軸・リスク別の分布)",
+        "reason": "入力の画面モデルに構成要素の内訳が無い。view model の拡張を要する(PR-1b で要否を決める)",
+        "classification": "UNCLASSIFIED"
+      },
+      {
+        "deliverable": 3,
+        "title": "欠けた入力の軸別の分布 / 比較キーの種類数",
+        "reason": "入力の画面モデルに軸別の欠落・比較キーが無い(算出不能の理由コード別の件数は出す)",
+        "classification": "UNCLASSIFIED"
+      },
+      {
+        "deliverable": 7,
+        "title": "判断の閾値の近傍にある候補数の分布",
+        "reason": "config の参照(読取専用)と、記録の config_hash との突合が要る。import の経路を増やすため gate の確認後に PR-1b で扱う(参照した config の出所を記録に添える)",
+        "classification": "UNCLASSIFIED"
+      },
+      {
+        "deliverable": 7,
+        "title": "閾値・係数の妥当性の判定",
+        "reason": "★ USER 判断 ★(判定基準・評価用の係数の組・事後の評価が未承認)。#960 の対象",
+        "classification": "NEEDS_BACKTEST"
+      },
+      {
+        "deliverable": 9,
+        "title": "記録の再計算の一致率(replay_items_record)",
+        "reason": "再計算の module は CLI から到達できない(#606 の gate が禁じている)。gate の変更は USER 承認の記録を要する",
+        "classification": "UNCLASSIFIED"
+      },
+      {
+        "deliverable": 9,
+        "title": "事後の値動き(forward return)との比較",
+        "reason": "★ USER 判断 ★(評価期間・比較基準・コスト控除・外部価格データが未承認)",
+        "classification": "NEEDS_BACKTEST"
+      },
+      {
+        "deliverable": 5,
+        "title": "配分の集中度(銘柄数・業種の偏り)",
+        "reason": "入力の画面モデルに業種・銘柄別の配分が無い(配分された件数の分布は出す)",
+        "classification": "UNCLASSIFIED"
+      },
+      {
+        "deliverable": 8,
+        "title": "価格の鮮度(price_as_of)別の算出不能率",
+        "reason": "入力の画面モデルに価格の時刻が無い(買付余力の最終照合日の鮮度は出す)",
+        "classification": "UNCLASSIFIED"
+      }
+    ]
+  },
+  "summary_json_by_owner": {
+    "schema_version": 1,
+    "counting_rule_source": "kouitic/jstock_advisor#128 issuecomment-6165459615 の 2 節(USER 承認済みの暫定ルール)",
+    "target_days": 2,
+    "counted_days": 2,
+    "expected_days_total": 2,
+    "reached": true,
+    "first_counted_date": "2026-10-09",
+    "tenth_counted_date": "2026-10-13",
+    "projected_tenth_date_if_all_remaining_days_count": null,
+    "not_counted": {},
+    "versions_periods": 1,
+    "days": [
+      {
+        "business_date": "2026-10-09",
+        "counted": true,
+        "not_counted": null,
+        "state": "COMPLETE",
+        "computed_owners": 1,
+        "skipped_owners": 0,
+        "failed_owners": 0,
+        "other_owners": 0,
+        "unparsed": 0,
+        "attempted": 1,
+        "recorded": 1,
+        "missing_count": 0,
+        "read_failure": null
+      },
+      {
+        "business_date": "2026-10-13",
+        "counted": true,
+        "not_counted": null,
+        "state": "COMPLETE",
+        "computed_owners": 1,
+        "skipped_owners": 0,
+        "failed_owners": 0,
+        "other_owners": 0,
+        "unparsed": 0,
+        "attempted": 1,
+        "recorded": 1,
+        "missing_count": 0,
+        "read_failure": null
+      }
+    ],
+    "periods": [
+      {
+        "model_version": "raer-combined-v1-provisional",
+        "policy_id": "p1",
+        "contract_version": "c1",
+        "shadow_mode": "SHADOW",
+        "first_date": "2026-10-09",
+        "last_date": "2026-10-13",
+        "day_count": 2,
+        "measures": [
+          {
+            "key": "owner_kinds",
+            "title": "owner-日の結果の種別",
+            "deliverable": 1,
+            "unit": "owner-日",
+            "denominator": 2,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "COMPUTED": 2
+            }
+          },
+          {
+            "key": "owner_computed_rate",
+            "title": "計算できた owner-日の割合",
+            "deliverable": 2,
+            "unit": "owner-日",
+            "denominator": 2,
+            "classification": "UNCLASSIFIED",
+            "count": 2,
+            "rate": "1.0000"
+          },
+          {
+            "key": "skip_reasons",
+            "title": "owner の見送り(SKIPPED)の理由別の件数",
+            "deliverable": 3,
+            "unit": "owner-日(SKIPPED)",
+            "denominator": 0,
+            "classification": "NEEDS_MORE_OBSERVATION",
+            "status": "測れない"
+          },
+          {
+            "key": "run_status",
+            "title": "owner-日の配分の実行結果",
+            "deliverable": 2,
+            "unit": "owner-日(記録あり)",
+            "denominator": 2,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "ALLOCATED_SOME": 2
+            }
+          },
+          {
+            "key": "unavailable_reasons",
+            "title": "算出不能の理由コード別の件数(欠損理由)",
+            "deliverable": 3,
+            "unit": "owner-日(記録あり)",
+            "denominator": 2,
+            "classification": "UNCLASSIFIED"
+          },
+          {
+            "key": "raer_states",
+            "title": "候補の RAER の状態",
+            "deliverable": 2,
+            "unit": "候補",
+            "denominator": 4,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "PROVISIONAL": 4
+            }
+          },
+          {
+            "key": "raer_available_rate",
+            "title": "RAER が算出できた候補の割合(算出 + 暫定)",
+            "deliverable": 2,
+            "unit": "候補",
+            "denominator": 4,
+            "classification": "UNCLASSIFIED",
+            "count": 4,
+            "rate": "1.0000"
+          },
+          {
+            "key": "raer_unavailable_rate",
+            "title": "RAER が算出できなかった候補の割合",
+            "deliverable": 2,
+            "unit": "候補",
+            "denominator": 4,
+            "classification": "UNCLASSIFIED",
+            "count": 0,
+            "rate": "0.0000"
+          },
+          {
+            "key": "raer_value_present_rate",
+            "title": "RAER の値が記録された候補の割合",
+            "deliverable": 2,
+            "unit": "候補",
+            "denominator": 4,
+            "classification": "UNCLASSIFIED",
+            "count": 4,
+            "rate": "1.0000"
+          },
+          {
+            "key": "buy_actions",
+            "title": "候補の購入判定の分布",
+            "deliverable": 5,
+            "unit": "候補",
+            "denominator": 4,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "BUY": 2,
+              "SMALL_ENTRY": 2
+            }
+          },
+          {
+            "key": "decisions",
+            "title": "候補の配分結果(配分 / 見送り)",
+            "deliverable": 5,
+            "unit": "候補",
+            "denominator": 4,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "ALLOCATED": 2,
+              "NOT_ALLOCATED": 2
+            }
+          },
+          {
+            "key": "allocation_reasons",
+            "title": "候補の配分・見送りの理由コード別の件数",
+            "deliverable": 6,
+            "unit": "候補",
+            "denominator": 4,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "ALLOCATED": 2,
+              "INSUFFICIENT_CASH_REMAINING": 2
+            }
+          },
+          {
+            "key": "ranks",
+            "title": "順位別の候補数",
+            "deliverable": 5,
+            "unit": "候補",
+            "denominator": 4,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "1": 2,
+              "2": 2
+            }
+          },
+          {
+            "key": "allocated_per_owner_day",
+            "title": "owner-日あたりの配分された候補の数の分布",
+            "deliverable": 5,
+            "unit": "owner-日(記録あり)",
+            "denominator": 2,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "1": 2
+            }
+          },
+          {
+            "key": "remaining_cash_stage",
+            "title": "残余資金の段階(目安。金額は出さない)",
+            "deliverable": 5,
+            "unit": "owner-日(記録あり)",
+            "denominator": 2,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "POSITIVE": 2
+            }
+          },
+          {
+            "key": "exclusions",
+            "title": "候補の除外理由別の件数",
+            "deliverable": 6,
+            "unit": "候補の除外(件数の合計)",
+            "denominator": 0,
+            "classification": "NEEDS_MORE_OBSERVATION",
+            "status": "測れない"
+          },
+          {
+            "key": "incomplete_reasons",
+            "title": "入力の不足の理由別の件数(データ品質)",
+            "deliverable": 8,
+            "unit": "owner-日(記録あり)",
+            "denominator": 2,
+            "classification": "UNCLASSIFIED"
+          },
+          {
+            "key": "raer_by_buy_action",
+            "title": "購入判定別の RAER の算出可否(属性の偏り)",
+            "deliverable": 8,
+            "unit": "候補",
+            "denominator": 4,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "BUY:AVAILABLE": 2,
+              "SMALL_ENTRY:AVAILABLE": 2
+            }
+          },
+          {
+            "key": "cash_staleness_days",
+            "title": "買付余力の最終照合日からの経過日数の分布(データの鮮度)",
+            "deliverable": 8,
+            "unit": "owner-日(記録あり)",
+            "denominator": 2,
+            "classification": "UNCLASSIFIED",
+            "buckets": {
+              "-2": 1,
+              "2": 1
+            }
+          },
+          {
+            "key": "unavailable_by_staleness",
+            "title": "経過日数別の算出不能(UNAVAILABLE)の owner-日",
+            "deliverable": 8,
+            "unit": "owner-日(記録あり)",
+            "denominator": 2,
+            "classification": "UNCLASSIFIED"
+          },
+          {
+            "key": "candidates_truncated",
+            "title": "記録の上限で切り詰められた候補の件数",
+            "deliverable": 3,
+            "unit": "候補",
+            "denominator": 4,
+            "classification": "UNCLASSIFIED",
+            "count": 0,
+            "rate": "0.0000"
+          }
+        ]
+      }
+    ],
+    "improvement_candidates": [
+      {
+        "summary": "配分しなかった(見送り・制限)理由が記録されている",
+        "facts": "理由別 INSUFFICIENT_CASH_REMAINING=2",
+        "logic": "B",
+        "frequency": "候補 2 件",
+        "related_issues": [
+          "#603",
+          "#934",
+          "#960"
+        ],
+        "interpretation": "初案・未確定(⑤投資判断への影響 ⑥原因仮説 ⑦改善の方向性 ⑧優先度は人が書く)"
+      },
+      {
+        "summary": "事後の評価(バックテスト)は未実施",
+        "facts": "NOT_MEASURABLE の項目(閾値・係数の妥当性・事後の値動きとの比較)",
+        "logic": "D",
+        "frequency": "全期間",
+        "related_issues": [
+          "#934",
+          "#960"
+        ],
+        "interpretation": "初案・未確定(⑤投資判断への影響 ⑥原因仮説 ⑦改善の方向性 ⑧優先度は人が書く)"
+      }
+    ],
+    "not_measurable": [
+      {
+        "deliverable": 4,
+        "title": "RAER 構成要素の寄与度(軸・リスク別の分布)",
+        "reason": "入力の画面モデルに構成要素の内訳が無い。view model の拡張を要する(PR-1b で要否を決める)",
+        "classification": "UNCLASSIFIED"
+      },
+      {
+        "deliverable": 3,
+        "title": "欠けた入力の軸別の分布 / 比較キーの種類数",
+        "reason": "入力の画面モデルに軸別の欠落・比較キーが無い(算出不能の理由コード別の件数は出す)",
+        "classification": "UNCLASSIFIED"
+      },
+      {
+        "deliverable": 7,
+        "title": "判断の閾値の近傍にある候補数の分布",
+        "reason": "config の参照(読取専用)と、記録の config_hash との突合が要る。import の経路を増やすため gate の確認後に PR-1b で扱う(参照した config の出所を記録に添える)",
+        "classification": "UNCLASSIFIED"
+      },
+      {
+        "deliverable": 7,
+        "title": "閾値・係数の妥当性の判定",
+        "reason": "★ USER 判断 ★(判定基準・評価用の係数の組・事後の評価が未承認)。#960 の対象",
+        "classification": "NEEDS_BACKTEST"
+      },
+      {
+        "deliverable": 9,
+        "title": "記録の再計算の一致率(replay_items_record)",
+        "reason": "再計算の module は CLI から到達できない(#606 の gate が禁じている)。gate の変更は USER 承認の記録を要する",
+        "classification": "UNCLASSIFIED"
+      },
+      {
+        "deliverable": 9,
+        "title": "事後の値動き(forward return)との比較",
+        "reason": "★ USER 判断 ★(評価期間・比較基準・コスト控除・外部価格データが未承認)",
+        "classification": "NEEDS_BACKTEST"
+      },
+      {
+        "deliverable": 5,
+        "title": "配分の集中度(銘柄数・業種の偏り)",
+        "reason": "入力の画面モデルに業種・銘柄別の配分が無い(配分された件数の分布は出す)",
+        "classification": "UNCLASSIFIED"
+      },
+      {
+        "deliverable": 8,
+        "title": "価格の鮮度(price_as_of)別の算出不能率",
+        "reason": "入力の画面モデルに価格の時刻が無い(買付余力の最終照合日の鮮度は出す)",
+        "classification": "UNCLASSIFIED"
+      }
+    ],
+    "by_owner": [
+      {
+        "owner": "owner-c7ba0f",
+        "days_present": 2,
+        "kinds": {
+          "COMPUTED": 2
+        }
+      }
+    ]
+  },
+  "summary_table": "購入側 Shadow の観測: 2026-10-09 〜 2026-10-13(期待される営業日 2 日)\n数える日: 2 / 2(目標に到達)\nDay 1(最初に数えた日): 2026-10-09 / 10 日目: 2026-10-13 / 見込み(以後の期待される営業日が全て数える日になる場合の仮定): なし\n数える日の規則の出所: kouitic/jstock_advisor#128 issuecomment-6165459615 の 2 節(USER 承認済みの暫定ルール)\n数えない日: なし\n\n日別(日付 状態 数える 理由 | 計算/見送り/失敗/その他 | 欠落/母数):\n  2026-10-09 COMPLETE ○ - | 1/0/0/0 | 0/1\n  2026-10-13 COMPLETE ○ - | 1/0/0/0 | 0/1\n\n版ごとの指標: 2026-10-09 〜 2026-10-13(2 日。model=raer-combined-v1-provisional policy=p1 contract=c1 mode=SHADOW)※ 版をまたいだ合算はしない\n  owner-日の結果の種別: 母数 2 owner-日 / COMPUTED=2\n  計算できた owner-日の割合: 母数 2 owner-日 / 2 件 = 100.0%\n  owner の見送り(SKIPPED)の理由別の件数: 測れない(母数 0 = owner-日(SKIPPED))\n  owner-日の配分の実行結果: 母数 2 owner-日(記録あり) / ALLOCATED_SOME=2\n  算出不能の理由コード別の件数(欠損理由): 母数 2 owner-日(記録あり)\n  候補の RAER の状態: 母数 4 候補 / PROVISIONAL=4\n  RAER が算出できた候補の割合(算出 + 暫定): 母数 4 候補 / 4 件 = 100.0%\n  RAER が算出できなかった候補の割合: 母数 4 候補 / 0 件 = 0.0%\n  RAER の値が記録された候補の割合: 母数 4 候補 / 4 件 = 100.0%\n  候補の購入判定の分布: 母数 4 候補 / BUY=2, SMALL_ENTRY=2\n  候補の配分結果(配分 / 見送り): 母数 4 候補 / ALLOCATED=2, NOT_ALLOCATED=2\n  候補の配分・見送りの理由コード別の件数: 母数 4 候補 / ALLOCATED=2, INSUFFICIENT_CASH_REMAINING=2\n  順位別の候補数: 母数 4 候補 / 1=2, 2=2\n  owner-日あたりの配分された候補の数の分布: 母数 2 owner-日(記録あり) / 1=2\n  残余資金の段階(目安。金額は出さない): 母数 2 owner-日(記録あり) / POSITIVE=2\n  候補の除外理由別の件数: 測れない(母数 0 = 候補の除外(件数の合計))\n  入力の不足の理由別の件数(データ品質): 母数 2 owner-日(記録あり)\n  購入判定別の RAER の算出可否(属性の偏り): 母数 4 候補 / BUY:AVAILABLE=2, SMALL_ENTRY:AVAILABLE=2\n  買付余力の最終照合日からの経過日数の分布(データの鮮度): 母数 2 owner-日(記録あり) / -2=1, 2=1\n  経過日数別の算出不能(UNAVAILABLE)の owner-日: 母数 2 owner-日(記録あり)\n  記録の上限で切り詰められた候補の件数: 母数 4 候補 / 0 件 = 0.0%\n\n改善候補一覧(事実の欄のみ。解釈の欄は人が書く = 初案・未確定):\n  1. [B] 配分しなかった(見送り・制限)理由が記録されている\n       事実: 理由別 INSUFFICIENT_CASH_REMAINING=2 / 頻度・範囲: 候補 2 件\n       関連: #603, #934, #960 / 初案・未確定(⑤投資判断への影響 ⑥原因仮説 ⑦改善の方向性 ⑧優先度は人が書く)\n  2. [D] 事後の評価(バックテスト)は未実施\n       事実: NOT_MEASURABLE の項目(閾値・係数の妥当性・事後の値動きとの比較) / 頻度・範囲: 全期間\n       関連: #934, #960 / 初案・未確定(⑤投資判断への影響 ⑥原因仮説 ⑦改善の方向性 ⑧優先度は人が書く)\n\n測れないもの(0 や『問題なし』ではない):\n  成果物 4: RAER 構成要素の寄与度(軸・リスク別の分布) — 入力の画面モデルに構成要素の内訳が無い。view model の拡張を要する(PR-1b で要否を決める)(UNCLASSIFIED)\n  成果物 3: 欠けた入力の軸別の分布 / 比較キーの種類数 — 入力の画面モデルに軸別の欠落・比較キーが無い(算出不能の理由コード別の件数は出す)(UNCLASSIFIED)\n  成果物 7: 判断の閾値の近傍にある候補数の分布 — config の参照(読取専用)と、記録の config_hash との突合が要る。import の経路を増やすため gate の確認後に PR-1b で扱う(参照した config の出所を記録に添える)(UNCLASSIFIED)\n  成果物 7: 閾値・係数の妥当性の判定 — ★ USER 判断 ★(判定基準・評価用の係数の組・事後の評価が未承認)。#960 の対象(NEEDS_BACKTEST)\n  成果物 9: 記録の再計算の一致率(replay_items_record) — 再計算の module は CLI から到達できない(#606 の gate が禁じている)。gate の変更は USER 承認の記録を要する(UNCLASSIFIED)\n  成果物 9: 事後の値動き(forward return)との比較 — ★ USER 判断 ★(評価期間・比較基準・コスト控除・外部価格データが未承認)(NEEDS_BACKTEST)\n  成果物 5: 配分の集中度(銘柄数・業種の偏り) — 入力の画面モデルに業種・銘柄別の配分が無い(配分された件数の分布は出す)(UNCLASSIFIED)\n  成果物 8: 価格の鮮度(price_as_of)別の算出不能率 — 入力の画面モデルに価格の時刻が無い(買付余力の最終照合日の鮮度は出す)(UNCLASSIFIED)\n",
+  "summary_table_by_owner": "購入側 Shadow の観測: 2026-10-09 〜 2026-10-13(期待される営業日 2 日)\n数える日: 2 / 2(目標に到達)\nDay 1(最初に数えた日): 2026-10-09 / 10 日目: 2026-10-13 / 見込み(以後の期待される営業日が全て数える日になる場合の仮定): なし\n数える日の規則の出所: kouitic/jstock_advisor#128 issuecomment-6165459615 の 2 節(USER 承認済みの暫定ルール)\n数えない日: なし\n\n日別(日付 状態 数える 理由 | 計算/見送り/失敗/その他 | 欠落/母数):\n  2026-10-09 COMPLETE ○ - | 1/0/0/0 | 0/1\n  2026-10-13 COMPLETE ○ - | 1/0/0/0 | 0/1\n\n版ごとの指標: 2026-10-09 〜 2026-10-13(2 日。model=raer-combined-v1-provisional policy=p1 contract=c1 mode=SHADOW)※ 版をまたいだ合算はしない\n  owner-日の結果の種別: 母数 2 owner-日 / COMPUTED=2\n  計算できた owner-日の割合: 母数 2 owner-日 / 2 件 = 100.0%\n  owner の見送り(SKIPPED)の理由別の件数: 測れない(母数 0 = owner-日(SKIPPED))\n  owner-日の配分の実行結果: 母数 2 owner-日(記録あり) / ALLOCATED_SOME=2\n  算出不能の理由コード別の件数(欠損理由): 母数 2 owner-日(記録あり)\n  候補の RAER の状態: 母数 4 候補 / PROVISIONAL=4\n  RAER が算出できた候補の割合(算出 + 暫定): 母数 4 候補 / 4 件 = 100.0%\n  RAER が算出できなかった候補の割合: 母数 4 候補 / 0 件 = 0.0%\n  RAER の値が記録された候補の割合: 母数 4 候補 / 4 件 = 100.0%\n  候補の購入判定の分布: 母数 4 候補 / BUY=2, SMALL_ENTRY=2\n  候補の配分結果(配分 / 見送り): 母数 4 候補 / ALLOCATED=2, NOT_ALLOCATED=2\n  候補の配分・見送りの理由コード別の件数: 母数 4 候補 / ALLOCATED=2, INSUFFICIENT_CASH_REMAINING=2\n  順位別の候補数: 母数 4 候補 / 1=2, 2=2\n  owner-日あたりの配分された候補の数の分布: 母数 2 owner-日(記録あり) / 1=2\n  残余資金の段階(目安。金額は出さない): 母数 2 owner-日(記録あり) / POSITIVE=2\n  候補の除外理由別の件数: 測れない(母数 0 = 候補の除外(件数の合計))\n  入力の不足の理由別の件数(データ品質): 母数 2 owner-日(記録あり)\n  購入判定別の RAER の算出可否(属性の偏り): 母数 4 候補 / BUY:AVAILABLE=2, SMALL_ENTRY:AVAILABLE=2\n  買付余力の最終照合日からの経過日数の分布(データの鮮度): 母数 2 owner-日(記録あり) / -2=1, 2=1\n  経過日数別の算出不能(UNAVAILABLE)の owner-日: 母数 2 owner-日(記録あり)\n  記録の上限で切り詰められた候補の件数: 母数 4 候補 / 0 件 = 0.0%\n\n改善候補一覧(事実の欄のみ。解釈の欄は人が書く = 初案・未確定):\n  1. [B] 配分しなかった(見送り・制限)理由が記録されている\n       事実: 理由別 INSUFFICIENT_CASH_REMAINING=2 / 頻度・範囲: 候補 2 件\n       関連: #603, #934, #960 / 初案・未確定(⑤投資判断への影響 ⑥原因仮説 ⑦改善の方向性 ⑧優先度は人が書く)\n  2. [D] 事後の評価(バックテスト)は未実施\n       事実: NOT_MEASURABLE の項目(閾値・係数の妥当性・事後の値動きとの比較) / 頻度・範囲: 全期間\n       関連: #934, #960 / 初案・未確定(⑤投資判断への影響 ⑥原因仮説 ⑦改善の方向性 ⑧優先度は人が書く)\n\n測れないもの(0 や『問題なし』ではない):\n  成果物 4: RAER 構成要素の寄与度(軸・リスク別の分布) — 入力の画面モデルに構成要素の内訳が無い。view model の拡張を要する(PR-1b で要否を決める)(UNCLASSIFIED)\n  成果物 3: 欠けた入力の軸別の分布 / 比較キーの種類数 — 入力の画面モデルに軸別の欠落・比較キーが無い(算出不能の理由コード別の件数は出す)(UNCLASSIFIED)\n  成果物 7: 判断の閾値の近傍にある候補数の分布 — config の参照(読取専用)と、記録の config_hash との突合が要る。import の経路を増やすため gate の確認後に PR-1b で扱う(参照した config の出所を記録に添える)(UNCLASSIFIED)\n  成果物 7: 閾値・係数の妥当性の判定 — ★ USER 判断 ★(判定基準・評価用の係数の組・事後の評価が未承認)。#960 の対象(NEEDS_BACKTEST)\n  成果物 9: 記録の再計算の一致率(replay_items_record) — 再計算の module は CLI から到達できない(#606 の gate が禁じている)。gate の変更は USER 承認の記録を要する(UNCLASSIFIED)\n  成果物 9: 事後の値動き(forward return)との比較 — ★ USER 判断 ★(評価期間・比較基準・コスト控除・外部価格データが未承認)(NEEDS_BACKTEST)\n  成果物 5: 配分の集中度(銘柄数・業種の偏り) — 入力の画面モデルに業種・銘柄別の配分が無い(配分された件数の分布は出す)(UNCLASSIFIED)\n  成果物 8: 価格の鮮度(price_as_of)別の算出不能率 — 入力の画面モデルに価格の時刻が無い(買付余力の最終照合日の鮮度は出す)(UNCLASSIFIED)\n\nowner 別(★ 公開面へ貼らない。手元で読むだけ ★):\n  owner-c7ba0f: 2 日 / COMPUTED=2\n"
+}

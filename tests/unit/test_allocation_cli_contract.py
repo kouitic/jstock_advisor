@@ -449,6 +449,20 @@ def test_the_json_output_is_pure_on_stdout_and_hides_labels_by_default(
     assert "sentinel-表示名-zz" not in result.stderr
 
 
+def test_the_json_carries_the_two_notices_like_the_detail_screen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#992(USER 確定 #122): 共有に使われる JSON にも、表の注意書きと同じ 2 つを明記する。"""
+    _use(monkeypatch, _complete_source())
+
+    for extra in ([], ["--with-labels"]):
+        parsed = json.loads(_today(*_LOCAL, "--format", "json", *extra).stdout)
+        assert parsed["notices"] == [
+            "この出力は利用者の端末だけで確認してください(Issue・PR などの公開面へ貼らない)",
+            "これは Shadow の試験結果であり、実際の投資判断ではありません",
+        ]
+
+
 def test_with_labels_adds_the_names_to_the_json_only_when_asked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

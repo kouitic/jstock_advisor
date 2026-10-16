@@ -583,7 +583,12 @@ def test_the_summary_imports_only_pure_modules_and_the_cli_view() -> None:
             imported.add(node.module)
     assert {m.split(".")[0] for m in imported} <= _ALLOWED_IMPORT_ROOTS
     own = {m for m in imported if m.startswith("jstock_advisor")}
-    assert own == {"jstock_advisor.domain.notification.allocation_shadow_cli_view"}
+    # #992: 注意書き(NOTICES)の定義は 3 画面の共有の基盤である cli_renderer(純粋)に 1 か所。
+    # summary の JSON が `notices` を持つため、その定数だけを import する(意図して 1 件足した)
+    assert own == {
+        "jstock_advisor.domain.notification.allocation_shadow_cli_view",
+        "jstock_advisor.domain.notification.allocation_shadow_cli_renderer",
+    }
 
 
 def test_the_summary_has_no_clock_environment_io_or_aws_calls() -> None:

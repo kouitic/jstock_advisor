@@ -32,6 +32,14 @@ LABEL_NOTICE: Final = (
     "※ この表には表示名(ラベル)が含まれます。共有するときは --format json を使うか、"
     "表示名を伏せてください"
 )
+# 注意書き(『公開面へ貼らない』『実際の投資判断ではない』)。USER の確定(#122): 出力方法によらず
+# 2 つとも明記する。today / summary / detail の 3 画面の表・JSON(`notices`)が、この 1 か所の定義を
+# 使う(#992。detail は #993 で追加したものを、共有の基盤であるこの module へ移した)。
+NOTICE_NO_PUBLIC_SURFACE: Final = (
+    "この出力は利用者の端末だけで確認してください(Issue・PR などの公開面へ貼らない)"
+)
+NOTICE_NOT_INVESTMENT_ADVICE: Final = "これは Shadow の試験結果であり、実際の投資判断ではありません"
+NOTICES: Final = (NOTICE_NO_PUBLIC_SURFACE, NOTICE_NOT_INVESTMENT_ADVICE)
 _DASH: Final = "-"
 
 
@@ -291,6 +299,7 @@ def screen_to_dict(screen: AllocationShadowScreen, *, with_labels: bool = False)
     return {
         "schema_version": OUTPUT_SCHEMA_VERSION,
         "disclaimer": DISCLAIMER,
+        "notices": list(NOTICES),
         "business_date": screen.business_date,
         "state": screen.state.value,
         "state_text": DAY_STATE_TEXT[screen.state],
