@@ -631,6 +631,12 @@ def _period_measures_base(screens: Sequence[AllocationShadowScreen]) -> tuple[Me
     )
 
 
+#: RAER の『値が算出できた』状態。PROVISIONAL(暫定の係数で値が出た)も算出できた側に寄せる。
+#: ★ 理由 ★: 既存の `available_like`(算出できた割合)・`action_matrix` と同じ規約にそろえ、
+#: 同じ『算出できた候補』の数え方を指標の間でずらさない(PR-1 の規約を継承)。
+#: ★ 影響 ★: `price_freshness_by_raer_state` では PROVISIONAL と AVAILABLE を区別せず
+#: 『{鮮度の語}:AVAILABLE』に合算する(区別が要るなら別の指標で出す)。算出可否が読めない
+#: (状態が無い・認識できない)候補は、この指標の分母から外れる(分母 = 組の合計)。
 _AVAILABLE_STATES: Final = ("AVAILABLE", "PROVISIONAL")
 
 

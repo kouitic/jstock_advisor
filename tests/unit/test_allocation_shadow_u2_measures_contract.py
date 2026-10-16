@@ -120,7 +120,12 @@ def test_unapplied_axes_keys_and_reason_codes_match_hand_counts() -> None:
         "2026-10-14",
         {
             A: [
-                _cand("1001", unapplied=["EARNINGS_TREND"], key="k1", reasons=["R_TREND"]),
+                _cand(
+                    "1001",
+                    unapplied=["EARNINGS_TREND", "EARNINGS_TREND"],
+                    key="k1",
+                    reasons=["R_TREND", "R_TREND"],
+                ),
                 _cand("1002", unapplied=["EARNINGS_TREND", "DATA_QUALITY"], key="k2"),
                 _cand("1003", unapplied=[], key=None, reasons=["R_TREND", "R_OTHER"]),
             ]
@@ -145,19 +150,19 @@ def test_contribution_measures_use_only_value_bearing_rows() -> None:
             A: [
                 _cand(
                     "1001",
-                    risk=["HIGH_PER"],
+                    risk=["HIGH_PER", "HIGH_PER"],
                     contributions={"FAIR_VALUE_CONFIDENCE": "5", "BUSINESS_RISK": "2"},
                 ),
-                _cand("1002", contributions={"FAIR_VALUE_CONFIDENCE": "0", "BUSINESS_RISK": "0"}),
+                _cand("1002", contributions={"FAIR_VALUE_CONFIDENCE": "3", "BUSINESS_RISK": "0"}),
                 _cand("1003", state="UNAVAILABLE", value=None),
             ]
         },
     )
     measures = _measures(day)
     assert measures["deduction_top_axis"].denominator == 2
-    assert _buckets(measures["deduction_top_axis"]) == {"FAIR_VALUE_CONFIDENCE": 1, "NONE": 1}
+    assert _buckets(measures["deduction_top_axis"]) == {"FAIR_VALUE_CONFIDENCE": 2}
     assert _buckets(measures["contribution_nonzero_axes"]) == {
-        "FAIR_VALUE_CONFIDENCE": 1,
+        "FAIR_VALUE_CONFIDENCE": 2,
         "BUSINESS_RISK": 1,
     }
     assert _buckets(measures["risk_flag_words"]) == {"HIGH_PER": 1}
@@ -267,6 +272,8 @@ def test_unreadable_rows_are_reported_separately_and_do_not_change_counts() -> N
     day = _day("2026-10-14", {A: [_cand("1001"), "not-a-dict", _cand("1002")]})
     measures = _measures(day)
     assert _buckets(measures["candidate_overlap"])["candidate_days"] == 2
+    assert measures["unapplied_axes"].denominator == 2
+    assert measures["comparison_keys"].denominator == 2
     unreadable = measures["unreadable_candidate_rows"]
     assert (unreadable.count, unreadable.denominator) == (1, 3)
 
@@ -309,3 +316,30 @@ def test_measures_are_separated_by_version_period() -> None:
 def test_not_measurable_still_lists_the_unmeasured_deliverables() -> None:
     deliverables = {item.deliverable for item in NOT_MEASURABLE}
     assert {4, 7, 9} <= deliverables
+
+
+def test_a_candidate_without_a_stock_code_is_counted_as_a_day_but_not_as_a_stock() -> None:
+    day = _day("2026-10-14", {A: [_cand("1001"), _cand("")]})
+    assert _overlap(day) == {
+        "candidate_days": 2,
+        "distinct_stocks": 1,
+        "stocks_on_2plus_days": 0,
+    }
+
+
+def test_the_top_deduction_axis_is_the_largest_contribution() -> None:
+    day = _day(
+        "2026-10-14",
+        {A: [_cand("1001", contributions={"FAIR_VALUE_CONFIDENCE": "1", "BUSINESS_RISK": "4"})]},
+    )
+    assert _buckets(_measures(day)["deduction_top_axis"]) == {"BUSINESS_RISK": 1}
+
+
+def test_all_zero_contributions_have_no_top_axis() -> None:
+    day = _day(
+        "2026-10-14",
+        {A: [_cand("1001", contributions={"FAIR_VALUE_CONFIDENCE": "0", "BUSINESS_RISK": "0"})]},
+    )
+    measures = _measures(day)
+    assert _buckets(measures["deduction_top_axis"]) == {"NONE": 1}
+    assert _buckets(measures["contribution_nonzero_axes"]) == {}
