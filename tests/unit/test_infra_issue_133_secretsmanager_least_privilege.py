@@ -161,11 +161,12 @@ def _secretsmanager_related_sam_policy_templates(function_name: str) -> list[str
     return found
 
 
-def test_template_defines_exactly_fifteen_lambda_functions() -> None:
+def test_template_defines_exactly_sixteen_lambda_functions() -> None:
     """関数総数を固定する。増減があれば、本module以下のテストの前提
     (全関数を横断確認している、という主張)が崩れていないかを見直す契機にする。
     """
-    assert len(_lambda_function_logical_ids()) == 15
+    # 15 + #604 P-b4 A2 の資金入替の観測 P(RotationObservationFunction。Secrets Manager 権限なし)
+    assert len(_lambda_function_logical_ids()) == 16
 
 
 def test_no_lambda_function_uses_a_secretsmanager_related_sam_policy_template() -> None:

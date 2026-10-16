@@ -95,6 +95,10 @@ _INTERNAL_NAME_TO_JOB: dict[str, IncidentJob] = {
     "quarterly-review": IncidentJob.QUARTERLY_REVIEW,
     "line-webhook": IncidentJob.LINE_WEBHOOK,
     "incident-notifier": IncidentJob.INCIDENT_NOTIFIER,
+    # Issue #604 P-b4 A2: 資金入替の観測 P。★ 利用者向けの新しい名称は作らない ★
+    # (本文に出る文言の追加は外部仕様 = USER の確認が要る。専用の名称は別の判断)。
+    # 今は既存の『その他の処理』へ落とす(Errors Alarm の通知の本文。承認 = #604 …6195577714)
+    "rotation-observation": IncidentJob.OTHER,
     # Issue #675(HF-10): Lambda関数ではなく、2つのバッチが呼ぶ共通処理のため、呼び出し元に
     # 依存しない固定の内部名を持つ(USER決定)。
     "shareholder-benefit-registry": IncidentJob.SHAREHOLDER_BENEFIT_REGISTRY,
