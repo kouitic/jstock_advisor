@@ -39,6 +39,7 @@ from enum import StrEnum
 from typing import Any, Final
 
 from jstock_advisor.domain.notification.allocation_shadow_cli_view import (
+    UNKNOWN_TEXT,
     AllocationShadowScreen,
     CandidateRow,
     DayState,
@@ -102,17 +103,15 @@ class NotMeasurable:
 
 #: この module(PR-1)が測らないもの。★ 0 や『問題なし』と書かない ★(理由つきで列挙する)
 NOT_MEASURABLE: Final[tuple[NotMeasurable, ...]] = (
+    # ★ U2(PR-1b)で測れるようになった項目 = 3(軸別の欠落・比較キー)・4(寄与度の分布)・
+    #   5(業種の偏り)・8(価格の鮮度)は、記録に既にある値から測る(指標 unapplied_axes ほか。
+    #   出所のパスは allocation_shadow_cli_view.U2_RECORD_PATHS)。残るのは次の項目 ★
     NotMeasurable(
         4,
-        "RAER 構成要素の寄与度(軸・リスク別の分布)",
-        "入力の画面モデルに構成要素の内訳が無い。view model の拡張を要する(PR-1b で要否を決める)",
-        Classification.UNCLASSIFIED,
-    ),
-    NotMeasurable(
-        3,
-        "欠けた入力の軸別の分布 / 比較キーの種類数",
-        "入力の画面モデルに軸別の欠落・比較キーが無い(算出不能の理由コード別の件数は出す)",
-        Classification.UNCLASSIFIED,
+        "係数を変えた再計算(感度分析)",
+        "★ USER 判断 ★(評価用の係数の組が未承認)。記録された寄与の分布は指標 "
+        "deduction_top_axis ほかで測る。#960 の対象",
+        Classification.NEEDS_BACKTEST,
     ),
     NotMeasurable(
         7,
@@ -139,18 +138,6 @@ NOT_MEASURABLE: Final[tuple[NotMeasurable, ...]] = (
         "事後の値動き(forward return)との比較",
         "★ USER 判断 ★(評価期間・比較基準・コスト控除・外部価格データが未承認)",
         Classification.NEEDS_BACKTEST,
-    ),
-    NotMeasurable(
-        5,
-        "配分の集中度(銘柄数・業種の偏り)",
-        "入力の画面モデルに業種・銘柄別の配分が無い(配分された件数の分布は出す)",
-        Classification.UNCLASSIFIED,
-    ),
-    NotMeasurable(
-        8,
-        "価格の鮮度(price_as_of)別の算出不能率",
-        "入力の画面モデルに価格の時刻が無い(買付余力の最終照合日の鮮度は出す)",
-        Classification.UNCLASSIFIED,
     ),
 )
 
@@ -417,7 +404,7 @@ def _candidate_rows(owners: Iterable[OwnerSection]) -> list[CandidateRow]:
     return [row for owner in owners for row in owner.rows if row.readable]
 
 
-def _period_measures(screens: Sequence[AllocationShadowScreen]) -> tuple[Measure, ...]:
+def _period_measures_base(screens: Sequence[AllocationShadowScreen]) -> tuple[Measure, ...]:
     owners = [o for s in screens for o in s.owners if o.status is OwnerStatus.OK]
     owner_days = [(s.business_date, o) for s in screens for o in s.owners]
     kinds = Counter(owner_kind(o).value for _, o in owner_days)
@@ -642,6 +629,200 @@ def _period_measures(screens: Sequence[AllocationShadowScreen]) -> tuple[Measure
             count=truncated,
         ),
     )
+
+
+_AVAILABLE_STATES: Final = ("AVAILABLE", "PROVISIONAL")
+
+
+def _price_age_days(business_date: str, price_as_of: str | None) -> int | None:
+    """対象日 − 価格の時点(暦日の差)。読めなければ None。"""
+    if price_as_of is None:
+        return None
+    try:
+        return (dt.date.fromisoformat(business_date) - dt.date.fromisoformat(price_as_of[:10])).days
+    except ValueError:
+        return None
+
+
+def _u2_measures(screens: Sequence[AllocationShadowScreen]) -> tuple[Measure, ...]:
+    """#934 U2(PR-1b): 記録に既にある項目の指標。
+
+    軸別の欠落・寄与度・業種の偏り・価格の鮮度・候補の重なり。
+    ★ 読むのは画面モデルの候補の行だけ(`readable` な行だけを数える。
+    読めなかった行の件数は別に出す)★。
+    所有者別には出さない(集約のみ。公開面へは集約の件数だけ)。銘柄コードは数えるだけで出力しない。
+    """
+    ok_owners = [
+        (s.business_date, o) for s in screens for o in s.owners if o.status is OwnerStatus.OK
+    ]
+    all_rows = [(date, row) for date, o in ok_owners for row in o.rows]
+    rows = [(date, row) for date, row in all_rows if row.readable]
+    unreadable = len(all_rows) - len(rows)
+    row_total = len(rows)
+    value_rows = [(date, row) for date, row in rows if row.raer_value is not None]
+
+    unapplied: Counter[str] = Counter()
+    keys: Counter[str] = Counter()
+    reason_codes: Counter[str] = Counter()
+    top_axis: Counter[str] = Counter()
+    nonzero_axes: Counter[str] = Counter()
+    risk_words: Counter[str] = Counter()
+    verdicts: Counter[str] = Counter()
+    verdict_by_state: Counter[str] = Counter()
+    ages: Counter[str] = Counter()
+    for date, row in rows:
+        unapplied.update(set(row.unapplied_axes))
+        keys[row.comparison_key or "NONE"] += 1
+        reason_codes.update(set(row.raer_reason_codes))
+        verdict = row.freshness_verdict or "UNKNOWN"
+        verdicts[verdict] += 1
+        state = _code(row.raer_state)
+        if state in _AVAILABLE_STATES:
+            verdict_by_state[f"{verdict}:AVAILABLE"] += 1
+        elif state == "UNAVAILABLE":
+            verdict_by_state[f"{verdict}:UNAVAILABLE"] += 1
+        age = _price_age_days(date, row.price_as_of)
+        ages["UNKNOWN" if age is None else str(age)] += 1
+    for _, row in value_rows:
+        top_axis[row.top_deduction_axis or "NONE"] += 1
+        nonzero_axes.update(axis for axis, nonzero in row.contribution_axes if nonzero)
+        risk_words.update(set(row.risk_flags))
+
+    # 配分された候補の業種の偏り(owner-日ごとの業種の数。業種が不明な候補は別に数える)
+    sector_spread: Counter[str] = Counter()
+    allocated_total = allocated_unknown = allocated_days = 0
+    for _, owner in ok_owners:
+        allocated = [r for r in owner.rows if r.readable and _code(r.decision) == "ALLOCATED"]
+        if not allocated:
+            continue
+        allocated_days += 1
+        allocated_total += len(allocated)
+        allocated_unknown += sum(1 for r in allocated if r.sector is None)
+        sector_spread[f"sectors={len({r.sector for r in allocated if r.sector is not None})}"] += 1
+
+    # 候補の重なり(★ 数えるだけ。銘柄コードは出さない ★)
+    # ① 候補 × 日 = 読めた行の件数(所有者の重複を含む)
+    # ② 実銘柄数 = 所有者・日をまたいで重複を除く
+    # ③ 2 日以上現れた銘柄の数(異なる営業日の数で数える。同じ日に複数の所有者に出ても 1 日)
+    days_by_code: dict[str, set[str]] = {}
+    for date, row in rows:
+        if row.stock_code != UNKNOWN_TEXT:
+            days_by_code.setdefault(row.stock_code, set()).add(date)
+    overlap = (
+        ("candidate_days", row_total),
+        ("distinct_stocks", len(days_by_code)),
+        ("stocks_on_2plus_days", sum(1 for days in days_by_code.values() if len(days) >= 2)),
+    )
+    return (
+        _measure(
+            "unapplied_axes",
+            "候補ごとの『適用されなかった軸』の件数",
+            3,
+            "候補",
+            row_total,
+            buckets=_buckets(unapplied),
+        ),
+        _measure(
+            "comparison_keys",
+            "比較キー(モデル版 + 適用軸)の種類別の候補数",
+            3,
+            "候補",
+            row_total,
+            buckets=_buckets(keys),
+        ),
+        _measure(
+            "raer_reason_codes",
+            "RAER の理由コード別の候補数(軸ごとの理由を含む)",
+            3,
+            "候補",
+            row_total,
+            buckets=_buckets(reason_codes),
+        ),
+        _measure(
+            "deduction_top_axis",
+            "減点の主因の軸(寄与が最大の軸)の頻度",
+            4,
+            "候補(RAER の値あり)",
+            len(value_rows),
+            buckets=_buckets(top_axis),
+        ),
+        _measure(
+            "contribution_nonzero_axes",
+            "軸ごとの寄与が 0 でない候補数",
+            4,
+            "候補(RAER の値あり)",
+            len(value_rows),
+            buckets=_buckets(nonzero_axes),
+        ),
+        _measure(
+            "risk_flag_words",
+            "RAER で観測されたリスクの語別の候補数",
+            4,
+            "候補(RAER の値あり)",
+            len(value_rows),
+            buckets=_buckets(risk_words),
+        ),
+        _measure(
+            "allocated_sector_spread",
+            "配分された候補の業種の数の分布(owner-日ごと)",
+            5,
+            "owner-日(配分あり)",
+            allocated_days,
+            buckets=_buckets(sector_spread),
+        ),
+        _measure(
+            "allocated_sector_unknown",
+            "配分された候補のうち業種が不明な割合",
+            5,
+            "配分された候補",
+            allocated_total,
+            count=allocated_unknown,
+        ),
+        _measure(
+            "price_freshness_verdicts",
+            "価格の鮮度の語別の候補数",
+            8,
+            "候補",
+            row_total,
+            buckets=_buckets(verdicts),
+        ),
+        _measure(
+            "price_freshness_by_raer_state",
+            "価格の鮮度の語 × RAER の算出可否",
+            8,
+            "候補(算出可否が分かるもの)",
+            sum(verdict_by_state.values()),
+            buckets=_buckets(verdict_by_state),
+        ),
+        _measure(
+            "price_age_days",
+            "価格の時点から対象日までの暦日の差の分布",
+            8,
+            "候補",
+            row_total,
+            buckets=_buckets(ages),
+        ),
+        _measure(
+            "candidate_overlap",
+            "候補の重なり(① 候補×日 ② 実銘柄数 ③ 2 日以上現れた銘柄数)",
+            2,
+            "候補(読めた行)",
+            row_total,
+            buckets=overlap,
+        ),
+        _measure(
+            "unreadable_candidate_rows",
+            "読めなかった候補の行の件数(上の指標には含めない)",
+            3,
+            "候補の行(読めた + 読めなかった)",
+            len(all_rows),
+            count=unreadable,
+        ),
+    )
+
+
+def _period_measures(screens: Sequence[AllocationShadowScreen]) -> tuple[Measure, ...]:
+    return _period_measures_base(screens) + _u2_measures(screens)
 
 
 def _periods(screens: Sequence[AllocationShadowScreen]) -> tuple[PeriodMetrics, ...]:
