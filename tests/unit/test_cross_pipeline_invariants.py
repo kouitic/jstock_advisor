@@ -49,6 +49,7 @@ from jstock_advisor.domain.entities.enums import (
     is_full_sell_like,
 )
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.notification.notification_category import resolve_notification_category
 from jstock_advisor.infrastructure.aws.batch_tracker import (
     JOB_TYPE_NEW_CANDIDATE_SCREENING,
     JOB_TYPE_WATCHLIST_MAINTENANCE,
@@ -61,7 +62,6 @@ from jstock_advisor.lambda_handlers import _finalize_recovery
 from jstock_advisor.services import watchlist_batch_finalizer
 from jstock_advisor.services.line_notification_service import (
     notification_priority_for_recommendation,
-    resolve_notification_category,
     resolve_notification_intent_for_recommendation,
 )
 from jstock_advisor.services.screening_data_provider import ScreeningDataStatus

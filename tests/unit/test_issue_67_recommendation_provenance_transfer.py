@@ -70,6 +70,7 @@ from jstock_advisor.domain.entities.holding_decision import (
 )
 from jstock_advisor.domain.entities.owner import DEFAULT_OWNER, build_holding_id
 from jstock_advisor.domain.notification import recommendation_adapter as adapter_module
+from jstock_advisor.domain.notification.notification_category import resolve_notification_category
 from jstock_advisor.domain.notification.recommendation_adapter import (
     build_notification_text_input,
 )
@@ -86,7 +87,6 @@ from jstock_advisor.services import sell_signal_service as sell_signal_service_m
 from jstock_advisor.services.holding_decision_notification_builder import (
     build_holding_decision_recommendation,
 )
-from jstock_advisor.services.line_notification_service import resolve_notification_category
 from jstock_advisor.services.provider_bundle import ProviderBundle
 from jstock_advisor.services.sell_signal_service import SellSignalService
 from jstock_advisor.services.stock_snapshot_service import build_stock_snapshot
