@@ -129,6 +129,15 @@ Parameters:
       holding単位のfan-outをHoldingsWatchlistQueue経由(SQS)で行う。
       **既定は false(従来どおり非同期自己再帰呼び出し)。** 有効化(Phase 3)は
       natural verification後の別の承認による。
+  RotationObservationScheduleState:
+    Type: String
+    Default: DISABLED
+    AllowedValues: [ENABLED, DISABLED]
+    Description: >
+      Issue #604 P-b4(#128 R2)。資金入替の観測 P の EventBridge Scheduler の State。
+      **既定は DISABLED(何も起動しない)。** ENABLED にするのは、P の mode を SHADOW にする
+      別の ChangeSet・別の USER 承認(P-b4 の B)のときだけ。mode は config/rotation_observation.yaml
+      (出荷 OFF)で決まり、この Parameter とは独立した 2 つ目の Human Gate である。
   AllowFullMarketScreening:
     Type: String
     Default: "false"
@@ -4002,6 +4011,131 @@ Resources:
   #     end-to-end simulationができる。詳細な確認手順は
   #     docs/operations_manual.md §35.1(本PRでは未実施。Production適用の
   #     別Human Gateで行う)。
+  # --- 資金入替の観測 P(Issue #604 P-b4 A2。#128 R2)-------------------------------
+  # USER 決定 #604 …6195577714(統合文書 …6188895158 §9 どおりに承認)。出荷は
+  # Scheduler = DISABLED かつ mode = OFF(何も動かない)。BUY / SELL・既存の Lambda・Role・queue・
+  # finalize・設定は変更しない。P は読取専用の観測で、書込は AuditLog への『日の集計』1 件 / 日だけ。
+  # ★ 本番有効化(Scheduler ENABLED + mode SHADOW)は別の ChangeSet・別の USER 承認 ★
+  RotationObservationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-rotation-observation"
+      CodeUri: ../src/
+      Handler: jstock_advisor.lambda_handlers.rotation_observation_handler.handler
+      # 総予算 50 秒(読取 40 + 書込の予約 10)≦ Timeout 60 秒の 0.9(契約テストが固定)。
+      Timeout: 60
+      MemorySize: 512
+      # 同時実行 1・非同期の再試行 0(次の回が再評価する設計。記録は先勝ちで冪等)。DLQ なし。
+      ReservedConcurrentExecutions: 1
+      EventInvokeConfig:
+        MaximumRetryAttempts: 0
+      # P 固有の環境変数は 0 件(mode は設定ファイル。Globals 由来の変数だけ)
+      Policies:
+        # ★ 最小権限(契約テストが Action・Resource の完全一致で固定)★
+        # 付けない: UpdateItem・DeleteItem・BatchWriteItem・TransactWriteItems・SQS・他の Lambda の Invoke・
+        #           Secrets Manager・LINE・他の表・ワイルドカードの Resource
+        - Statement:
+            - Sid: ReadBatchRuns
+              Effect: Allow
+              Action: dynamodb:GetItem
+              Resource:
+                - !GetAtt BatchRunsTable.Arn
+            - Sid: ReadRecommendations
+              Effect: Allow
+              Action: dynamodb:BatchGetItem
+              Resource:
+                - !GetAtt RecommendationsTable.Arn
+            - Sid: QueryHoldingEvaluationRecordsIndex
+              Effect: Allow
+              Action: dynamodb:Query
+              Resource:
+                - !Sub "${HoldingEvaluationRecordsTable.Arn}/index/holding_id-index"
+            # 保有の一覧(約 28 件の小さな表)を引く唯一の既存の方法。1 表だけ・200 件 / 3 ページ /
+            # 時間の上限・部分結果で判断しない(コード側の契約テストで固定)。
+            # ★ 観測用 profile の 1 回きりの Scan の承認とは別の、恒久的な Scan の承認(USER #604 …6195577714)★
+            - Sid: ScanHoldingsTableV2
+              Effect: Allow
+              Action: dynamodb:Scan
+              Resource:
+                - !GetAtt HoldingsTableV2.Arn
+            - Sid: PutObservationAudit
+              Effect: Allow
+              Action: dynamodb:PutItem
+              Resource:
+                - !GetAtt AuditLogTable.Arn
+      Events:
+        # 平日 08:15・08:30・08:45(保有バッチの 08:00〜08:03 の山の後)。祝日は runner が何もしない
+        EarlyRuns:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: "cron(15,30,45 8 ? * MON-FRI *)"
+            ScheduleExpressionTimezone: Asia/Tokyo
+            State: !Ref RotationObservationScheduleState
+            RoleArn: !GetAtt RotationObservationSchedulerRole.Arn
+            RetryPolicy:
+              MaximumRetryAttempts: 0
+              MaximumEventAgeInSeconds: 3600
+            FlexibleTimeWindow:
+              Mode: "OFF"
+        # 最後の回 09:00(BatchRuns の TTL の上限 13:00 JST の内側。runner が構築時に検証)
+        LastRun:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: "cron(0 9 ? * MON-FRI *)"
+            ScheduleExpressionTimezone: Asia/Tokyo
+            State: !Ref RotationObservationScheduleState
+            RoleArn: !GetAtt RotationObservationSchedulerRole.Arn
+            RetryPolicy:
+              MaximumRetryAttempts: 0
+              MaximumEventAgeInSeconds: 3600
+            FlexibleTimeWindow:
+              Mode: "OFF"
+
+  # P の Scheduler の起動用 Role(★ この stack で初めての明示の RoleArn ★。既存の ScheduleV2 は SAM の自動生成)。
+  # 信頼ポリシーの Principal は scheduler.amazonaws.com だけ・権限は P の関数 1 つへの lambda:InvokeFunction だけ。
+  RotationObservationSchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeRotationObservationFunction
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeRotationObservationFunction
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt RotationObservationFunction.Arn
+
+  # 既存の保有バッチの Errors Alarm と同じ形。TreatMissingData: notBreaching を明示(出荷時 DISABLED で
+  # 1 回も起動しない間も ALARM にならない)。runner が failed を返すと Lambda が失敗する = ここが鳴る。
+  RotationObservationFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-rotation-observation-errors"
+      AlarmDescription: >-
+        資金入替の観測 P の Lambda が失敗した(記録に失敗・想定外の例外・タイムアウト)。Issue #604 P-b4 参照。
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref RotationObservationFunction
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref IncidentNotificationTopic
+
   GithubAppSecretResourcePolicy:
     Type: AWS::SecretsManager::ResourcePolicy
     Condition: SecretResourcePolicyIsEnabled

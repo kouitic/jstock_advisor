@@ -17,3 +17,4 @@ tests/unit/test_policy_registry.py
 tests/unit/test_scan_for_pii.py
 tests/unit/test_issue_606_production_connection_gate.py
 tests/unit/test_issue_923_available_cash_env_guard.py
+tests/unit/test_infra_issue_604_rotation_observation.py
