@@ -269,6 +269,19 @@ class CandidateRow:
     remaining_cash: str | None
     reason: Reason | None
     readable: bool = True
+    # --- 集計(#934 U2)が読む項目。★ 記録に既にある値を写すだけ(再計算・推定・補完しない)★ ---
+    # すべて既定値つきの加法の追加(表示〔table / JSON〕はこれらを使わない = 既存の出力は不変)
+    unapplied_axes: tuple[str, ...] = ()  # raer_out.unapplied_axes
+    comparison_key: str | None = None  # raer_out.comparison_key
+    raer_reason_codes: tuple[str, ...] = ()  # raer_out.reason_codes
+    risk_flags: tuple[str, ...] = ()  # raer_out.risk_flags
+    #: raer_out.extra.contributions の軸 → 寄与が 0 でないか(値そのものは持たない)
+    contribution_axes: tuple[tuple[str, bool], ...] = ()
+    #: 寄与が最大の軸(0 でない寄与の中で。同値は軸の固定順で先)。寄与が無い・全て 0 なら None
+    top_deduction_axis: str | None = None
+    sector: str | None = None  # attrs.sector
+    freshness_verdict: str | None = None  # price.freshness_verdict
+    price_as_of: str | None = None  # price.price_as_of_date
 
 
 class OwnerStatus(StrEnum):
@@ -450,6 +463,60 @@ def _supported(record: Mapping[str, Any], kind: str) -> bool:
 # --- 候補の行 ------------------------------------------------------------------------------------
 
 
+#: 集計(#934 U2)のために候補の行へ写す記録のパス(candidates[] の下)。
+#: ★ 記録の allowlist に在るパスだけ ★
+#: (契約テストが allowlist の部分集合であることを固定する。allowlist から消えたら落ちる)
+U2_RECORD_PATHS: Final[tuple[str, ...]] = (
+    "stock_code",
+    "attrs.sector",
+    "price.freshness_verdict",
+    "price.price_as_of_date",
+    "raer_out.state",
+    "raer_out.value",  # 『RAER の値あり』の分母(既存の読み。U2 の指標が依存する)
+    "raer_out.unapplied_axes",
+    "raer_out.comparison_key",
+    "raer_out.reason_codes",
+    "raer_out.risk_flags",
+    "raer_out.extra.contributions",
+    "allocation.decision",
+)
+
+#: 寄与が同値のときの優先(RAER の軸の固定順)
+_AXIS_ORDER: Final[tuple[str, ...]] = (
+    "FAIR_VALUE_CONFIDENCE",
+    "COMPANY_QUALITY",
+    "BUSINESS_RISK",
+    "DATA_QUALITY",
+    "EARNINGS_TREND",
+)
+
+
+def _words(value: object) -> tuple[str, ...]:
+    """記録の語の一覧(文字列だけ。読めない要素は捨てる)。"""
+    return tuple(item for item in _list(value) if isinstance(item, str) and item)
+
+
+def _contribution_view(raw: object) -> tuple[tuple[tuple[str, bool], ...], str | None]:
+    """軸 → 寄与が 0 でないか、と、寄与が最大の軸。値は持たない(件数の語彙だけ)。"""
+    pairs: list[tuple[str, Decimal]] = []
+    for axis, amount in _dict(raw).items():
+        number = _decimal(amount)
+        if isinstance(axis, str) and number is not None:
+            pairs.append((axis, number))
+    nonzero = tuple(sorted((axis, number != 0) for axis, number in pairs))
+    positive = [(axis, number) for axis, number in pairs if number > 0]
+    if not positive:
+        return nonzero, None
+    best = max(
+        positive,
+        key=lambda p: (
+            p[1],
+            -(_AXIS_ORDER.index(p[0]) if p[0] in _AXIS_ORDER else len(_AXIS_ORDER)),
+        ),
+    )
+    return nonzero, best[0]
+
+
 def _candidate_row(raw: object, cash_left: Decimal | None) -> tuple[CandidateRow, Decimal | None]:
     """候補 1 件。cash_left = ここまでの残余(記録の金額の引き算。読めなければ None のまま)。"""
     candidate = _dict(raw)
@@ -506,6 +573,7 @@ def _candidate_row(raw: object, cash_left: Decimal | None) -> tuple[CandidateRow
     )
     rank = _count(allocation.get("rank")) if allocation else None
     value = raer.get("value")
+    contribution_axes, top_axis = _contribution_view(_dict(raer.get("extra")).get("contributions"))
     row = CandidateRow(
         seq=_int_text(candidate.get("seq")) or "-",
         stock_code=_str(candidate.get("stock_code")) or UNKNOWN_TEXT,
@@ -520,6 +588,15 @@ def _candidate_row(raw: object, cash_left: Decimal | None) -> tuple[CandidateRow
         shortfall=shortfall,
         remaining_cash=remaining,
         reason=_reason(ALLOCATION_REASONS, allocation.get("reason_code")) if allocation else None,
+        unapplied_axes=_words(raer.get("unapplied_axes")),
+        comparison_key=_str(raer.get("comparison_key")),
+        raer_reason_codes=_words(raer.get("reason_codes")),
+        risk_flags=_words(raer.get("risk_flags")),
+        contribution_axes=contribution_axes,
+        top_deduction_axis=top_axis,
+        sector=_str(attrs.get("sector")),
+        freshness_verdict=_str(price.get("freshness_verdict")),
+        price_as_of=_str(price.get("price_as_of_date")),
     )
     return row, left
 
