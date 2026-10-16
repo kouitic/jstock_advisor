@@ -1380,6 +1380,9 @@ def test_nothing_in_src_imports_the_composition_module() -> None:
         "domain/valuation/raer_coefficients_config.py",
         "domain/valuation/raer_inputs.py",
         "services/allocation_shadow_compute.py",  # #603 PR-F2-2a(RAER の計算を呼ぶ。dormant)
+        # #934 BT-2a(RAER の式の再現。dormant。借りるのは RaerCoefficients の型 1 つだけ。
+        # 式は本 module を呼ばず独立に再実装する)
+        "domain/signals/allocation_shadow_raer_replay.py",
     }
     assert set(importers) <= allowed, importers
 
