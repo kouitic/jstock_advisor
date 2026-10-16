@@ -117,7 +117,7 @@ NOT_MEASURABLE: Final[tuple[NotMeasurable, ...]] = (
         7,
         "判断の閾値の近傍にある候補数の分布",
         "config の参照(読取専用)と、記録の config_hash との突合が要る。import の経路を増やす"
-        "ため gate の確認後に PR-1b で扱う(参照した config の出所を記録に添える)",
+        "ため gate の確認後に別の PR で扱う(参照した config の出所を記録に添える)",
         Classification.UNCLASSIFIED,
     ),
     NotMeasurable(
