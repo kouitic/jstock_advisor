@@ -172,6 +172,8 @@ class OwnerDetail:
     unparsed: int = 0
     # 所有者の見出し: 記録された値だけ(買付余力・基準日時・ポートフォリオ評価額)。
     # 『見込み残高(目安)』『配分 / 見送りの件数』は導出(引き算・行から数えた値)なので出さない
+    # ★ 件数を出す場合は、記録の `counts` の節の値から取る(`today` の画面モデルの行から数え直した
+    #   値は導出なので使わない。USER の指示 #122 …6195577047: 記録の値だけを表示する)★
     available_cash: str | None = None
     last_reconciled_at: str | None = None
     portfolio_value: str | None = None
