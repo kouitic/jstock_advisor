@@ -27,6 +27,9 @@ from jstock_advisor.domain.entities.enums import (
 )
 from jstock_advisor.domain.entities.evaluation_audit import SUMMARY_CATEGORIES
 from jstock_advisor.domain.entities.holding_evaluation_record import HoldingEvaluationRecord
+from jstock_advisor.domain.notification.notification_category import (
+    resolve_attention_origin_for_recommendation,
+)
 from jstock_advisor.domain.signals import rotation_source_eligibility as module
 from jstock_advisor.domain.signals.capital_rotation import SourceEligibility
 from jstock_advisor.domain.signals.rotation_source_eligibility import (
@@ -43,9 +46,6 @@ from jstock_advisor.domain.signals.rotation_source_eligibility import (
     derive_source_eligibility,
     facts_from_record,
     recommendation_facts,
-)
-from jstock_advisor.services.line_notification_service import (
-    resolve_attention_origin_for_recommendation,
 )
 from tests.unit import test_allocation_shadow_compute_contract as compute_tests
 
