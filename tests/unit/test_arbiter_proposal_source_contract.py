@@ -3,7 +3,7 @@
 設計: #878 rev6(…6195907794)・サブちゃんの再判定(…6195777307)。★ PR-3b-0 = field + docstring のみ ★
 
   S1  語彙は 2 値(LAYER / LEGACY_ENGINE)で、買い側の `CandidateSource` とは別の enum(名前を避けた)
-  S2  ★ 既定は LAYER ★・既存の構築点(src)は source を渡さない = 『挙動不変』の根拠をテストに置く
+  S2  ★ 既定は LAYER ★・source を渡す構築点は adapter だけ(LEGACY_ENGINE のみ)= 根拠をテストに置く
   S3  ★ field は比較・hash に含まれる ★(出所が違う候補を同じと見なさない。`compare=False` にしない)
   S4  ★ `build_candidates` / `arbitrate` は source を見ない ★(値の定義だけ)。既存の判定結果は不変。
       とくに ★ LEGACY_ENGINE でも層が未確定なら落ちる ★(『層の確定性ゲートを通さない』は本 PR に
@@ -88,19 +88,33 @@ def test_the_default_is_layer() -> None:
     ]
 
 
-def test_no_construction_in_src_passes_a_source() -> None:
-    """既存の構築点(src)は source を渡さない = 全部が既定の LAYER(『挙動不変』の根拠)。"""
-    offenders: list[str] = []
-    seen_constructions = 0
+def _passed_source(node: ast.Call) -> str | None:
+    """構築の呼び出しが渡している source の式(渡していなければ None)。"""
+    if len(node.args) > 6:
+        return ast.unparse(node.args[6])
+    for keyword in node.keywords:
+        if keyword.arg == "source" or keyword.arg is None:
+            return ast.unparse(keyword.value)
+    return None
+
+
+def test_only_the_adapter_passes_a_source_and_only_legacy_engine() -> None:
+    """source を渡す構築点(src)は、E2 の adapter(#878 PR-3b-1)だけ。値は LEGACY_ENGINE だけ。
+
+    PR-3b-0 では『全部が既定の LAYER(0 件)』だった。PR-3b-1 の adapter が、現行エンジンの経路の
+    候補に LEGACY_ENGINE を付ける唯一の構築点になる(これ以外が増えたら落ちる)。層の確定性ゲートは
+    変えない(下のテストが固定)。
+    """
+    passing: list[tuple[str, str]] = []
     for path in sorted(_PACKAGE.rglob("*.py")):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if not (isinstance(node, ast.Call) and _is_proposal_call(node)):
-                continue
-            seen_constructions += 1
-            if len(node.args) > 6 or any(k.arg in {"source", None} for k in node.keywords):
-                offenders.append(path.relative_to(_PACKAGE).as_posix())
-    assert offenders == []
-    assert seen_constructions >= 0  # src に構築点が無くても通る(adapter は PR-3b-1 以降)
+            if isinstance(node, ast.Call) and _is_proposal_call(node):
+                expression = _passed_source(node)
+                if expression is not None:
+                    passing.append((path.relative_to(_PACKAGE).as_posix(), expression))
+    assert passing == [
+        ("domain/exit_architecture/profit_taking_adapter.py", "ProposalSource.LEGACY_ENGINE")
+    ]
 
 
 def _is_proposal_call(node: ast.Call) -> bool:
@@ -110,14 +124,17 @@ def _is_proposal_call(node: ast.Call) -> bool:
 
 
 def test_the_construction_check_is_not_vacuous() -> None:
-    """検査が空振りでない: 位置引数 7 個・source= の構築は offender として数える。"""
-    bad_positional = ast.parse("CandidateProposal(a, b, c, d, e, f, g)").body[0]
-    bad_keyword = ast.parse("CandidateProposal(a, b, c, d, source=s)").body[0]
-    for stmt in (bad_positional, bad_keyword):
+    """検査が空振りでない: 位置引数 7 個・source= の構築は『source を渡している』と数える。"""
+    expectations = {
+        "CandidateProposal(a, b, c, d, e, f, g)": "g",
+        "CandidateProposal(a, b, c, d, source=s)": "s",
+        "CandidateProposal(a, b, c, d, e, f)": None,  # 6 個 = 渡していない
+    }
+    for source, expected in expectations.items():
+        stmt = ast.parse(source).body[0]
         assert isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
-        call = stmt.value
-        assert _is_proposal_call(call)
-        assert len(call.args) > 6 or any(k.arg in {"source", None} for k in call.keywords)
+        assert _is_proposal_call(stmt.value)
+        assert _passed_source(stmt.value) == expected
 
 
 # --- S3 比較・hash -----------------------------------------------------------------------------

@@ -32,6 +32,8 @@ from typing import Any
 from jstock_advisor.domain.entities.common import DataSourceReference
 from jstock_advisor.domain.entities.enums import ConfidenceLevel, RecommendationType
 from jstock_advisor.domain.entities.recommendation import Recommendation
+from jstock_advisor.domain.exit_architecture.profit_taking_adapter import ExitTraceLike
+from jstock_advisor.domain.signals.profit_taking import ExitTrace
 from jstock_advisor.interfaces.market_data import MarketDataProvider
 from jstock_advisor.interfaces.types import PriceHistory, PriceSnapshot
 
@@ -128,3 +130,13 @@ def build_recommendation(**overrides: Any) -> Recommendation:
     }
     defaults.update(overrides)
     return Recommendation(**defaults)
+
+
+def _exit_trace_satisfies_the_adapter_protocol(trace: ExitTrace) -> ExitTraceLike:
+    """型検査だけの 1 行(Issue #878 PR-3b-1。本番では呼ばない)。
+
+    本物の `ExitTrace` が adapter の `ExitTraceLike`(Protocol)へそのまま渡せることを、
+    `mypy tests/factories.py`(CI の typecheck)が検査する。src 側へ置くと #606・C0 の全走査の対象に
+    なり、`profit_taking` を import する file は C0 が落ちるため、ここへ置く(サブちゃんの申し送り)。
+    """
+    return trace
