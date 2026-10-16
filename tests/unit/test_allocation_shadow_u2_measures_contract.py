@@ -11,6 +11,7 @@ import copy
 import json
 from typing import Any
 
+from jstock_advisor.cli.allocation_summary import render_table
 from jstock_advisor.domain.notification import allocation_shadow_cli_view as cli_view
 from jstock_advisor.domain.notification.allocation_shadow_summary import (
     NOT_MEASURABLE,
@@ -343,3 +344,140 @@ def test_all_zero_contributions_have_no_top_axis() -> None:
     measures = _measures(day)
     assert _buckets(measures["deduction_top_axis"]) == {"NONE": 1}
     assert _buckets(measures["contribution_nonzero_axes"]) == {}
+
+
+# =================================================================================================
+# 寄与が厳密に同値のときの軸の優先(RAER の軸の固定順。サブちゃんの SHOULD-3)
+# =================================================================================================
+
+
+def test_a_tie_in_contribution_picks_the_earlier_axis_in_the_fixed_order() -> None:
+    """記録が軸をどの順に書いても、同値なら固定順の先の軸が勝つ(分布が記録のキー順へ偏らない)。"""
+    order = list(cli_view._AXIS_ORDER)
+    reversed_keys = list(reversed(order))  # 記録が固定順と逆に書いた場合
+    contributions = {axis: "1" for axis in reversed_keys}
+    day = _day("2026-10-14", {A: [_cand("1001", contributions=contributions)]})
+    assert _buckets(_measures(day)["deduction_top_axis"]) == {order[0]: 1}
+    # 先頭の 2 軸だけが同値の最大のとき、固定順の先(= order の小さい添字)が勝つ
+    tie = {order[-1]: "5", order[1]: "5", order[0]: "2"}
+    tie = {key: tie[key] for key in sorted(tie, key=order.index, reverse=True)}
+    day2 = _day("2026-10-14", {A: [_cand("1002", contributions=tie)]})
+    assert _buckets(_measures(day2)["deduction_top_axis"]) == {order[1]: 1}
+
+
+# =================================================================================================
+# 『実際に読む ⊆ 宣言』を挙動で固定する(サブちゃんの SHOULD-1)
+#   cli_view.py 全体の .get は today の画面の読みも含むため、AST ではなく外側から依存を固定する。
+# =================================================================================================
+
+_U2_MEASURE_KEYS = (
+    "unapplied_axes",
+    "comparison_keys",
+    "raer_reason_codes",
+    "deduction_top_axis",
+    "contribution_nonzero_axes",
+    "risk_flag_words",
+    "allocated_sector_spread",
+    "allocated_sector_unknown",
+    "price_freshness_verdicts",
+    "price_freshness_by_raer_state",
+    "price_age_days",
+    "candidate_overlap",
+    "unreadable_candidate_rows",
+)
+
+#: 宣言した各 path を欠いたとき、値(分母・件数・bucket)が変わる指標の集合(= 依存する指標)
+_DEPENDENTS = {
+    "stock_code": {"candidate_overlap"},
+    "attrs.sector": {"allocated_sector_spread", "allocated_sector_unknown"},
+    "price.freshness_verdict": {"price_freshness_verdicts", "price_freshness_by_raer_state"},
+    "price.price_as_of_date": {"price_age_days"},
+    "raer_out.state": {"price_freshness_by_raer_state"},
+    "raer_out.value": {"deduction_top_axis", "contribution_nonzero_axes", "risk_flag_words"},
+    "raer_out.unapplied_axes": {"unapplied_axes"},
+    "raer_out.comparison_key": {"comparison_keys"},
+    "raer_out.reason_codes": {"raer_reason_codes"},
+    "raer_out.risk_flags": {"risk_flag_words"},
+    "raer_out.extra.contributions": {"deduction_top_axis", "contribution_nonzero_axes"},
+    "allocation.decision": {"allocated_sector_spread", "allocated_sector_unknown"},
+}
+
+
+def _minimal_candidate() -> dict[str, Any]:
+    """U2_RECORD_PATHS の path だけを持つ候補(それ以外の項目は持たない)。"""
+    return {
+        "stock_code": "1001",
+        "attrs": {"sector": "S1"},
+        "price": {"freshness_verdict": "FRESH", "price_as_of_date": "2026-10-13"},
+        "raer_out": {
+            "state": "PROVISIONAL",
+            "value": "10.0",
+            "unapplied_axes": ["EARNINGS_TREND"],
+            "comparison_key": "k1",
+            "reason_codes": ["R_TREND"],
+            "risk_flags": ["HIGH_PER"],
+            "extra": {"contributions": {"FAIR_VALUE_CONFIDENCE": "5", "BUSINESS_RISK": "2"}},
+        },
+        "allocation": {"decision": "ALLOCATED"},
+    }
+
+
+def _drop(candidate: dict[str, Any], path: str) -> dict[str, Any]:
+    out = copy.deepcopy(candidate)
+    *parents, leaf = path.split(".")
+    node = out
+    for key in parents:
+        node = node[key]
+    del node[leaf]
+    return out
+
+
+def _signature(candidate: dict[str, Any]) -> dict[str, tuple[Any, ...]]:
+    day = _day("2026-10-14", {A: [candidate]})
+    return {
+        key: (m.denominator, m.count, m.buckets)
+        for key, m in _measures(day).items()
+        if key in _U2_MEASURE_KEYS
+    }
+
+
+def test_the_declared_paths_alone_give_every_u2_measure_a_value() -> None:
+    signature = _signature(_minimal_candidate())
+    assert set(signature) == set(_U2_MEASURE_KEYS)
+    unmeasurable = [key for key, (denominator, *_rest) in signature.items() if denominator <= 0]
+    assert unmeasurable == []
+
+
+def test_the_dependents_table_covers_exactly_the_declared_paths() -> None:
+    assert set(_DEPENDENTS) == set(cli_view.U2_RECORD_PATHS)
+
+
+def test_dropping_a_declared_path_changes_only_its_dependent_measures() -> None:
+    """宣言した path を 1 つ欠くと、依存する指標だけが変わる(死んだ宣言・申告漏れの両方を検出)。"""
+    full = _signature(_minimal_candidate())
+    wrong: dict[str, set[str]] = {}
+    for path in cli_view.U2_RECORD_PATHS:
+        degraded = _signature(_drop(_minimal_candidate(), path))
+        changed = {key for key in full if degraded[key] != full[key]}
+        if changed != _DEPENDENTS[path]:
+            wrong[path] = changed
+    assert wrong == {}
+
+
+# =================================================================================================
+# 表と JSON の parity(サブちゃんの SHOULD-2)— 全 measure が両方に現れる
+# =================================================================================================
+
+
+def test_every_measure_appears_in_both_the_table_and_the_json() -> None:
+    day = _day("2026-10-14", {A: [_cand("1001")]})
+    summary = summarize([day])
+    report = build_ten_day_report(summary, ["2026-10-14"])
+    table = render_table(report, summary, by_owner=False)
+    payload = report_to_dict(report, summary)
+    period_measures = payload["periods"][0]["measures"]
+    keys_in_json = [m["key"] for m in period_measures]
+    for measure in summary.periods[0].measures:
+        assert measure.title in table
+        assert measure.key in keys_in_json
+    assert set(_U2_MEASURE_KEYS) <= set(keys_in_json)

@@ -472,6 +472,7 @@ U2_RECORD_PATHS: Final[tuple[str, ...]] = (
     "price.freshness_verdict",
     "price.price_as_of_date",
     "raer_out.state",
+    "raer_out.value",  # 『RAER の値あり』の分母(既存の読み。U2 の指標が依存する)
     "raer_out.unapplied_axes",
     "raer_out.comparison_key",
     "raer_out.reason_codes",
