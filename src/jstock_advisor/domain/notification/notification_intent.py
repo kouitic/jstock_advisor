@@ -1,6 +1,6 @@
 """LINE通知を送るべきかどうかの意味論的判定(2026-08、通知意図3段階化)の唯一の正本。
 
-`NotificationCategory`(resolve_notification_category()、line_notification_service.py)
+`NotificationCategory`(resolve_notification_category()、notification_category.py)
 が「表示テンプレート選択」のための分類であるのに対し、本モジュールの
 `NotificationIntent`は「送るか送らないか」を決める意味論を表す。同じ
 `RecommendationType.WATCH`/`NotificationCategory.WATCH`でも、Profit Protectionの
