@@ -34,7 +34,7 @@ from jstock_advisor.domain.backtest.replay_classification import (
 from jstock_advisor.domain.backtest.replay_events import (
     EXCLUSION_ORDER,
     CoFireCounts,
-    ExclusionReason,
+    PopulationExclusion,
     Fire,
     Observation,
     account_population,
@@ -64,11 +64,11 @@ def test_the_population_account_sums_and_keeps_zero_reasons() -> None:
     rows = [
         _obs("h-1", 1),
         _obs("h-1", 2, is_first_evaluation=True),
-        _obs("h-2", 1, exclusion=ExclusionReason.LEGACY),
-        _obs("h-2", 2, exclusion=ExclusionReason.LEGACY),
-        _obs("h-2", 3, exclusion=ExclusionReason.BASELINE_INTEGRITY_ERROR),
+        _obs("h-2", 1, exclusion=PopulationExclusion.LEGACY),
+        _obs("h-2", 2, exclusion=PopulationExclusion.LEGACY),
+        _obs("h-2", 3, exclusion=PopulationExclusion.BASELINE_INTEGRITY_ERROR),
         _obs("h-3", 1, held_out=True),
-        _obs("h-3", 2, held_out=True, exclusion=ExclusionReason.DATA_INSUFFICIENT),  # 除外が先
+        _obs("h-3", 2, held_out=True, exclusion=PopulationExclusion.DATA_INSUFFICIENT),  # 除外が先
     ]
 
     account = account_population(rows)
@@ -78,11 +78,11 @@ def test_the_population_account_sums_and_keeps_zero_reasons() -> None:
     assert account.held_out == 1
     assert [r for r, _ in account.excluded] == list(EXCLUSION_ORDER)  # 固定の順序
     assert dict(account.excluded) == {
-        ExclusionReason.LEGACY: 2,
-        ExclusionReason.EVALUATED_AT_MISMATCH: 0,  # 件数 0 も省略しない
-        ExclusionReason.BEFORE_PLAN: 0,
-        ExclusionReason.BASELINE_INTEGRITY_ERROR: 1,
-        ExclusionReason.DATA_INSUFFICIENT: 1,
+        PopulationExclusion.LEGACY: 2,
+        PopulationExclusion.EVALUATED_AT_MISMATCH: 0,  # 件数 0 も省略しない
+        PopulationExclusion.BEFORE_PLAN: 0,
+        PopulationExclusion.BASELINE_INTEGRITY_ERROR: 1,
+        PopulationExclusion.DATA_INSUFFICIENT: 1,
     }
     assert account.total == account.excluded_total + account.held_out + account.analyzed
 
@@ -96,11 +96,11 @@ def test_the_population_account_of_nothing_is_all_zero() -> None:
         0,
         0,
     )
-    assert len(account.excluded) == len(ExclusionReason)
+    assert len(account.excluded) == len(PopulationExclusion)
 
 
 def test_the_four_t1_exclusion_groups_and_data_shortage_are_the_whole_vocabulary() -> None:
-    assert {r.value for r in ExclusionReason} == {
+    assert {r.value for r in PopulationExclusion} == {
         "LEGACY",
         "EVALUATED_AT_MISMATCH",
         "BEFORE_PLAN",
@@ -165,7 +165,7 @@ def test_different_phases_and_holdings_never_merge() -> None:
 
 def test_excluded_held_out_and_phaseless_rows_make_no_event() -> None:
     rows = [
-        _obs("h-1", 1, exclusion=ExclusionReason.LEGACY),
+        _obs("h-1", 1, exclusion=PopulationExclusion.LEGACY),
         _obs("h-1", 2, held_out=True),
         _obs("h-1", 3, key=None),
     ]

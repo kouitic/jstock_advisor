@@ -30,7 +30,7 @@ from enum import StrEnum
 from jstock_advisor.domain.backtest.errors import ReplayInputError, require_int, require_text
 
 
-class ExclusionReason(StrEnum):
+class PopulationExclusion(StrEnum):
     """分析対象から外す理由(#846 rev2.3 の T1 の 4 区分 + データ不足)。分母から外して報告する。"""
 
     LEGACY = "LEGACY"  # a: 旧形式の行
@@ -41,7 +41,7 @@ class ExclusionReason(StrEnum):
 
 
 #: 勘定の表示の固定の順序(件数 0 の理由も省略しない)
-EXCLUSION_ORDER: tuple[ExclusionReason, ...] = tuple(ExclusionReason)
+EXCLUSION_ORDER: tuple[PopulationExclusion, ...] = tuple(PopulationExclusion)
 
 
 @dataclass(frozen=True)
@@ -61,7 +61,7 @@ class Observation:
     day_index: int
     phase_kind: str
     phase_key: str | None = None
-    exclusion: ExclusionReason | None = None
+    exclusion: PopulationExclusion | None = None
     is_first_evaluation: bool = False
     held_out: bool = False
 
@@ -71,8 +71,8 @@ class Observation:
         require_text(self.phase_kind, "phase_kind")
         if self.phase_key is not None:
             require_text(self.phase_key, "phase_key")
-        if self.exclusion is not None and not isinstance(self.exclusion, ExclusionReason):
-            raise ReplayInputError("exclusion must be an ExclusionReason or None")
+        if self.exclusion is not None and not isinstance(self.exclusion, PopulationExclusion):
+            raise ReplayInputError("exclusion must be an PopulationExclusion or None")
         if not isinstance(self.is_first_evaluation, bool) or not isinstance(self.held_out, bool):
             raise ReplayInputError("flags must be bool")
 
@@ -90,7 +90,7 @@ class PopulationAccount:
     """全行 → 除外(理由別)・症例 → 分析対象。件数の合計が必ず一致する。"""
 
     total: int
-    excluded: tuple[tuple[ExclusionReason, int], ...]  # 固定の順序・件数 0 も含む
+    excluded: tuple[tuple[PopulationExclusion, int], ...]  # 固定の順序・件数 0 も含む
     held_out: int
     analyzed: int
     first_evaluations: int  # 分析対象のうち初回評価(外さず数える)
