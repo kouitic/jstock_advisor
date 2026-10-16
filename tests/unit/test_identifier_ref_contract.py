@@ -178,6 +178,8 @@ _NEW_RECORD_READERS = {
     "domain/notification/allocation_shadow_detail_view.py",
     "domain/notification/allocation_shadow_detail_renderer.py",
     "infrastructure/aws/allocation_shadow_reader.py",
+    # #934 BT-2a(RAER の式の再現。記録の dict を読むだけの純粋関数。どこからも import されない)
+    "domain/signals/allocation_shadow_raer_replay.py",
 }
 
 
